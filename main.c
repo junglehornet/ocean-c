@@ -1,7 +1,6 @@
-#include "core.h"
 #include "dynarray.h"
-#include "token.h"
 #include "scanner.h"
+#include "parser.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,17 +24,16 @@ int main(int argc, char *argv[]) {
 
         char *source = malloc(fsize + 1);
         if (!source) {
-            printf("Error: could not malloc source code buffer\n");
+            printf("Error: Out of memory - could not malloc source code buffer\n");
             exit(1);
         }
         fread(source, fsize, 1, sourcefile);
         source[fsize] = 0;
         
         tokenlist *list = scanTokens(source, argv[i]);
-        printf("--==[%s]==--\n", argv[i]);
-        for (size_t t = 0; t < list->top; t++) {
-            printToken(get_tokenlist(list, t));
-        }
+        printTokensFromFile(argv[i], list);
         printf("\n\n");
+        parseResult res = parseTokens(list);
+        //printAst(*(expr*)res.statements[0].value);
     }
 }

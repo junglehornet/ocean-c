@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <memory.h>
 
+#include "ast.h"
 #include "token.h"
 
 #define GROW_DYNAMIC_ARRAY(list, type) \
@@ -12,7 +13,8 @@
 #define SHRINK_DYNAMIC_ARRAY(list, type) \
     list->top <= (list->len / 2) ? (list->len /= 2, (type *)realloc(list->arr, list->len * sizeof(type))) : list->arr
 
-#define DEFINE_DYNAMIC_ARRAY_TYPE(type) \
+#define listlen(list) list->top
+#define DECLARE_DYNAMIC_ARRAY_TYPE(type) \
     typedef struct { \
         type *arr;\
         long top;\
@@ -21,7 +23,7 @@
     \
     void init_##type##list(type##list *list);\
     type pop_##type##list(type##list *list);\
-    void push_##type##list(type##list *list, type item);\
+    size_t push_##type##list(type##list *list, type item);\
     void insert_##type##list(type##list *list, type item, size_t index);\
     type get_##type##list(type##list *list, size_t index);\
     void free_##type##list(type##list *list);\
@@ -78,13 +80,14 @@
         return value;\
     }\
     \
-    void push_##type##list(type##list *list, type item) {\
+    size_t push_##type##list(type##list *list, type item) {\
         if (!isValid_##type##list(list)) {\
             error_##type("Error: tried to push to an invalid " #type " list");\
-            return;\
+            return 0;\
         }\
         list->arr = GROW_DYNAMIC_ARRAY(list, type);\
-        list->arr[list->top++] = item;\
+        list->arr[list->top] = item;\
+        return list->top++;\
     }\
     \
     void insert_##type##list(type##list *list, type item, size_t index) {\
@@ -132,11 +135,15 @@
             printf("Fatal compiler error: could not allocate memory for to_" #type "array().");\
             exit(1);\
         }\
-        memcpy(arr, list->arr, list->top);\
+        memcpy(arr, list->arr, list->top * sizeof(type));\
         return arr;\
     }
 
-DEFINE_DYNAMIC_ARRAY_TYPE(token)
-DEFINE_DYNAMIC_ARRAY_TYPE(char)
-    
+DECLARE_DYNAMIC_ARRAY_TYPE(char)
+DECLARE_DYNAMIC_ARRAY_TYPE(stmt)
+typedef char* str;
+DECLARE_DYNAMIC_ARRAY_TYPE(str)
+DECLARE_DYNAMIC_ARRAY_TYPE(expr)
+DECLARE_DYNAMIC_ARRAY_TYPE(token)
+
 #endif

@@ -2,6 +2,7 @@
 #include "dynarray.h"
 #include "token.h"
 #include "stdio.h"
+#include <assert.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -10,28 +11,33 @@
 
 #include "scanner.h"
 
-/*
-INT, FLOAT, I8, I16, I32, F32, STRING,
-TYPE, STRUCT, INDEX, FUNC, IMPORT, ANY,
-INTERFACE, CONTINUE, BREAK, ENUM, IF,
-SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO,
-*/
+void printTokensFromFile(char *filename, tokenlist *list) {
+    printf("Warning: printTokensFromFile() called. If you are a user and this is an official build\n"
+           "of the Ocean compiler then this is a bug. Please report this bug to the Ocean developers.\n\n");
+
+    printf("--==[%s]==--\n", filename);
+    for (size_t t = 0; t < list->top; t++) {
+        printToken(get_tokenlist(list, t));
+    }
+}
 
 #define NKEYWORDS (sizeof(keywords) / sizeof(keywords[0]))
 #define KEYWORD_MAX_LEN 16
 
 const enum tokenType keyword_types[] = {
-    INT, FLOAT, I8, I16, I32, F32, STRING,
-    TYPE, STRUCT, INDEX, FUNC, IMPORT, ANY,
-    INTERFACE, CONTINUE, BREAK, ENUM, IF, DO,
-    SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO
+    //INT, FLOAT, I8, I16, I32, U8, U16, U32, U64,
+    /*F32, STRING,*/ TYPE, STRUCT, INDEX, FUNC, IMPORT,
+    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DO,
+    SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
+    PACKAGE, WHILE, ELSE,
 };
 
 const char *keywords[] = {
-    "int", "float", "i8", "i16", "i32", "f32", "string",
-    "type", "struct", "index", "func", "import", "any",
-    "interface", "continue", "break", "enum", "if", "do",
-    "switch", "fallthrough", "extern", "for", "goto"
+    //"int", "float", "i8", "i16", "i32", "u8", "u16", "u32", "u64",
+    /*"f32", "string",*/ "type", "struct", "index", "func", "import",
+    "any", "interface", "continue", "break", "enum", "if", "do",
+    "switch", "fallthrough", "extern", "for", "goto", "as",
+    "package", "while", "else",
 };
 
 unsigned long hashes[NKEYWORDS] = {};
@@ -48,7 +54,7 @@ static unsigned long hash_str(char *str) {
 
 static void populate_keyword_hashes() {
     for (size_t i = 0; i < NKEYWORDS; i++) {
-        char str[16];
+        char str[KEYWORD_MAX_LEN];
         strcpy(str, keywords[i]);
         hashes[i] = hash_str(str);
     }
@@ -58,6 +64,10 @@ static void populate_keyword_hashes() {
         for (size_t j = i + 1; j < NKEYWORDS; j++) {
             if (hashes[i] == hashes[j]) {
                 printf("Fatal compiler error: hash collision for keywords detected.\n");
+                printf("This error is critical. If you are a user and you encounter this\n"
+                       "error, the build you are using is broken. Download a newer version\n"
+                       "of the Ocean compiler to fix this issue. If there is no newer\n"
+                       "version, please report this bug to the Ocean developers immediately.\n");
                 abort();
             }
         }
@@ -84,8 +94,9 @@ static char next_char(struct scannerState *state) {
     state->offset++;
     char c = state->source[state->offset];
     if (c == '\n') {
-        state->column = 1;
+        state->column = 0;
         state->line++;
+        return next_char(state);
     }
     return c;
 }
@@ -115,14 +126,14 @@ tokenlist *scanTokens(char *source, char *filename) {
 
     tokenlist *list = (tokenlist*)malloc(sizeof(tokenlist));
     if (!list) {
-        printf("Error: Could not malloc tokenlist");
+        printf("Error: Out of memory - Could not malloc tokenlist");
         exit(1);
     }
     init_tokenlist(list);
 
     struct scannerState state;
     state.line = 1;
-    state.column = 0;
+    state.column = 1;
     state.offset = 0;
     state.source = source;
     state.filename = filename;
@@ -131,119 +142,154 @@ tokenlist *scanTokens(char *source, char *filename) {
     state.list = list;
 
     for (char currentChar = *state.source;; currentChar = next_char(&state)) {
-        
+        state.thisLine = state.line;
+        state.thisColumn = state.column;
         switch (currentChar) {
-            case 0:
-                push_tokenlist(list, (token){.type = EOF_TOKEN, .lexeme = "EOF", .line = state.line, .column = state.column, .filename = filename});
+            case '\0':
+                push_tokenlist(list, (token){.type = EOF_TOKEN, .lexeme = "EOF", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 goto end_loop;
-                break;
             case '{':
-                push_tokenlist(list, (token){.type = LEFT_CURLY_BRACE, .lexeme = "{", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = LEFT_CURLY_BRACE, .lexeme = "{", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '}':
-                push_tokenlist(list, (token){.type = RIGHT_CURLY_BRACE, .lexeme = "}", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = RIGHT_CURLY_BRACE, .lexeme = "}", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '(':
-                push_tokenlist(list, (token){.type = LEFT_PAREN, .lexeme = "(", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = LEFT_PAREN, .lexeme = "(", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case ')':
-                push_tokenlist(list, (token){.type = RIGHT_PAREN, .lexeme = ")", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = RIGHT_PAREN, .lexeme = ")", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '[':
-                push_tokenlist(list, (token){.type = LEFT_BRACKET, .lexeme = "[", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = LEFT_BRACKET, .lexeme = "[", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case ']':
-                push_tokenlist(list, (token){.type = RIGHT_BRACKET, .lexeme = "]", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = RIGHT_BRACKET, .lexeme = "]", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '_':
-                push_tokenlist(list, (token){.type = UNDERSCORE, .lexeme = "_", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = UNDERSCORE, .lexeme = "_", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '\"':
                 scan_literal_string(&state);
                 break;
             case ';':
-                push_tokenlist(list, (token){.type = SEMICOLON, .lexeme = ";", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = SEMICOLON, .lexeme = ";", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '`':
                 push_tokenlist(list, scan_raw_string(&state));
                 break;
             case ',':
-                push_tokenlist(list, (token){.type = COMMA, .lexeme = ",", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = COMMA, .lexeme = ",", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '.':
-                push_tokenlist(list, (token){.type = DOT, .lexeme = ".", .line = state.line, .column = state.column, .filename = filename});
+                push_tokenlist(list, (token){.type = DOT, .lexeme = ".", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             #define COMPOUNDABLE_SIMPLE_OPERATOR(operator, tokenType) case operator[0]:\
                 if (peek(&state) == '=') {\
                     next_char(&state);\
-                    push_tokenlist(list, (token){.type = tokenType##_EQUALS, .lexeme = operator "=", .line = state.line, .column = state.column, .filename = filename});\
+                    push_tokenlist(list, (token){.type = tokenType##_EQUALS, .lexeme = operator "=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});\
                 } else {\
-                    push_tokenlist(list, (token){.type = tokenType, .lexeme = operator, .line = state.line, .column = state.column, .filename = filename});\
+                    push_tokenlist(list, (token){.type = tokenType, .lexeme = operator, .line = state.thisLine, .column = state.thisColumn, .filename = filename});\
                 }\
                 break;
             COMPOUNDABLE_SIMPLE_OPERATOR("=", EQUALS)
-            COMPOUNDABLE_SIMPLE_OPERATOR("+", PLUS)
-            COMPOUNDABLE_SIMPLE_OPERATOR("-", MINUS)
             COMPOUNDABLE_SIMPLE_OPERATOR("*", STAR)
             COMPOUNDABLE_SIMPLE_OPERATOR("%", MODULO)
             COMPOUNDABLE_SIMPLE_OPERATOR("^", XOR)
             COMPOUNDABLE_SIMPLE_OPERATOR("~", TILDE)
-            COMPOUNDABLE_SIMPLE_OPERATOR(":", COLON)
+            case ':':
+                push_tokenlist(list, (token){.type = COLON, .lexeme = ":", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                break;
             #undef COMPOUNDABLE_SIMPLE_OPERATOR
+            case '+':
+                if (peek(&state) == '=') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = PLUS_EQUALS, .lexeme = "+=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else if (peek(&state) == '+') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = PLUS_PLUS, .lexeme = "++", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else {
+                    push_tokenlist(list, (token){.type = PLUS, .lexeme = "+", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                }
+                break;
+            case '-':
+                if (peek(&state) == '=') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = MINUS_EQUALS, .lexeme = "-=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else if (peek(&state) == '-') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = MINUS_MINUS, .lexeme = "--", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else {
+                    push_tokenlist(list, (token){.type = MINUS, .lexeme = "-", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                }
+                break;
+            case '|':
+                if (peek(&state) == '|') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = LOGICAL_OR, .lexeme = "||", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else {
+                    push_tokenlist(list, (token){.type = BITWISE_OR, .lexeme = "|", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                }
+                break;
             case '/':
                 if (peek(&state) == '=') {
                     next_char(&state);
-                    push_tokenlist(list, (token){.type = SLASH_EQUALS, .lexeme = "/=", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = SLASH_EQUALS, .lexeme = "/=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else if (peek(&state) == '/') {
                     for (;peek(&state) != '\n' && peek(&state) != '\0'; next_char(&state));
                 } else if (peek(&state) == '*') {
                     multiline_comment(&state);
                 } else {
-                    push_tokenlist(list, (token){.type = SLASH, .lexeme = "/", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = SLASH, .lexeme = "/", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
                 break;
             case '<':
                 if (peek(&state) == '=') {
                     next_char(&state);
-                    push_tokenlist(list, (token){.type = LESS_EQUALS, .lexeme = "<=", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = LESS_EQUALS, .lexeme = "<=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else if (peek(&state) == '<') {
                     next_char(&state);
                     if (peek(&state) == '=') {
                         next_char(&state);
-                        push_tokenlist(list, (token){.type = BITSHIFT_LEFT_EQUALS, .lexeme = "<<=", .line = state.line, .column = state.column, .filename = filename});
+                        push_tokenlist(list, (token){.type = BITSHIFT_LEFT_EQUALS, .lexeme = "<<=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                     } else {
-                        push_tokenlist(list, (token){.type = BITSHIFT_LEFT, .lexeme = "<<", .line = state.line, .column = state.column, .filename = filename});
+                        push_tokenlist(list, (token){.type = BITSHIFT_LEFT, .lexeme = "<<", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                     }
                 } else {
-                    push_tokenlist(list, (token){.type = LESS_THAN, .lexeme = "<", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = LESS_THAN, .lexeme = "<", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
                 break;
             case '>':
                 if (peek(&state) == '=') {
                     next_char(&state);
-                    push_tokenlist(list, (token){.type = GREATER_EQUALS, .lexeme = ">=", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = GREATER_EQUALS, .lexeme = ">=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else if (peek(&state) == '>') {
                     next_char(&state);
                     if (peek(&state) == '=') {
                         next_char(&state);
-                        push_tokenlist(list, (token){.type = BITSHIFT_RIGHT_EQUALS, .lexeme = ">>=", .line = state.line, .column = state.column, .filename = filename});
+                        push_tokenlist(list, (token){.type = BITSHIFT_RIGHT_EQUALS, .lexeme = ">>=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                     } else {
-                        push_tokenlist(list, (token){.type = BITSHIFT_RIGHT, .lexeme = ">>", .line = state.line, .column = state.column, .filename = filename});
+                        push_tokenlist(list, (token){.type = BITSHIFT_RIGHT, .lexeme = ">>", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                     }
                 } else {
-                    push_tokenlist(list, (token){.type = GREATER_THAN, .lexeme = ">", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = GREATER_THAN, .lexeme = ">", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
                 break;
             case '!':
                 if (peek(&state) == '=') {
                     next_char(&state);
-                    push_tokenlist(list, (token){.type = NOT_EQUALS, .lexeme = "!=", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = NOT_EQUALS, .lexeme = "!=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else {
-                    push_tokenlist(list, (token){.type = EXCLAMATION, .lexeme = "!", .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = EXCLAMATION, .lexeme = "!", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
                 break;
             case '&':
-                push_tokenlist(list, (token){.type = AMPERSAND, .lexeme = "&", .line = state.line, .column = state.column, .filename = filename});
+                if (peek(&state) == '&') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = LOGICAL_AND, .lexeme = "&&", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else {
+                    push_tokenlist(list, (token){.type = AMPERSAND, .lexeme = "&", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                }
                 break;
             case '\'':
                 // parse char and then push as int literal
@@ -255,11 +301,13 @@ tokenlist *scanTokens(char *source, char *filename) {
                 memcpy(lexemebuf, state.source + quote_offset, state.offset - quote_offset);
                 lexemebuf[state.offset - quote_offset + 1] = '\0';
                 if (c > 255) {
-                    push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexemebuf, .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexemebuf, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else {
-                    push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexemebuf, .numValue.integer=c, .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexemebuf, .numValue.integer=c, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
                 break;
+            case '?':
+                push_tokenlist(list, (token){.type = QUESTION_MARK, .lexeme = "?", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
             case ' ':
             case '\t':
             case '\r':
@@ -272,6 +320,10 @@ tokenlist *scanTokens(char *source, char *filename) {
                 } else {
                     charlist chars = {0};
                     init_charlist(&chars);
+                    if (!is_alphaNumeric(currentChar)) {
+                        printf("[%s:%ld:%ld]: Unexpected or invalid character: '%c'. Note: Only the characters A-Z, a-z, 0-9, and underscores are allowed in identifiers.\n", state.filename, state.line, state.column, currentChar);
+                        continue;
+                    }
                     push_charlist(&chars, currentChar);
                     while (is_alphaNumeric(peek(&state))) push_charlist(&chars, next_char(&state));
                     char *chararr = to_chararray(&chars);
@@ -279,7 +331,7 @@ tokenlist *scanTokens(char *source, char *filename) {
                     memcpy(lexeme, chararr, chars.top);
                     lexeme[chars.top] = '\0';
                     free(chararr);
-                    push_tokenlist(list, (token){.type = get_keyword_type(lexeme), .lexeme = lexeme, .line = state.line, .column = state.column, .filename = filename});
+                    push_tokenlist(list, (token){.type = get_keyword_type(lexeme), .lexeme = lexeme, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
         }
     }
@@ -287,7 +339,7 @@ tokenlist *scanTokens(char *source, char *filename) {
     end_loop:
     
     if (scanning_error) {
-        printf("Syntax errors encountered during scanning, quitting.\n");
+        printf("One or more errors encountered during scanning, quitting.\n");
         exit(1);
     }
 
@@ -376,12 +428,12 @@ static void scan_literal_string(struct scannerState *state) {
 
     for (char currentChar = next_char(state);;currentChar = next_char(state)) {
         if (currentChar == '\0') {
-            printf("Error: End of file inside string literal\n");
+            printf("[%s:%ld:%ld] Error: End of file inside string literal\n", state->filename, state->line, state->column);
             scanning_error = 1;
             return;
         }
         if (currentChar == '\n') {
-            printf("Error: Unescaped newline inside string literal\n");
+            printf("[%s:%ld:%ld] Error: Unescaped newline inside string literal\n", state->filename, state->line, state->column);
             scanning_error = 1;
             return;
         }
@@ -427,50 +479,37 @@ static token scan_raw_string(struct scannerState *state) {
 
 static void scan_literal_number(struct scannerState *state) {
     char currentChar = state->source[state->offset];
-    // check for (and consume) 0x, 0b, 0o denoting alternate numerical format
+    const long line = state->line;
+    const long column = state->column;
     init_charlist(state->lexeme);
     char n = 0;
     char base = 10;
+    // check for (and consume) 0x, 0b, 0o denoting alternate numerical format
     if (currentChar == '0') {
         switch (peek(state)) {
             case 'x':
-                push_charlist(state->lexeme, currentChar);
-                next_char(state);
-                currentChar = next_char(state);
-                base = 16;
-                break;
             case 'X':
                 push_charlist(state->lexeme, currentChar);
-                next_char(state);
+                push_charlist(state->lexeme, next_char(state));
                 currentChar = next_char(state);
                 base = 16;
                 break;
             case 'b':
-                push_charlist(state->lexeme, currentChar);
-                next_char(state);
-                currentChar = next_char(state);
-                base = 2;
-                break;
             case 'B':
                 push_charlist(state->lexeme, currentChar);
-                next_char(state);
+                push_charlist(state->lexeme, next_char(state));
                 currentChar = next_char(state);
                 base = 2;
                 break;
             case 'o':
-                push_charlist(state->lexeme, currentChar);
-                next_char(state);
-                currentChar = next_char(state);
-                base = 8;
-                break;
             case 'O':
                 push_charlist(state->lexeme, currentChar);
-                next_char(state);
+                push_charlist(state->lexeme, next_char(state));
                 currentChar = next_char(state);
                 base = 8;
                 break;
             default:
-                n++;
+                //n++;
         }
     }
 
@@ -483,7 +522,7 @@ static void scan_literal_number(struct scannerState *state) {
     while (is_digit(currentChar, 1)) {
         n++;
         if (char_to_decimal(currentChar) >= base) {
-            printf("Error: digit %c is invalid for a number with base %hhu\n", currentChar, base);
+            printf("[%s:%ld:%ld] Error: digit %c is invalid for a number with base %hhu\n", state->filename, state->line, state->column, currentChar, base);
             err = 1;
             scanning_error = 1;
             break;
@@ -501,7 +540,7 @@ static void scan_literal_number(struct scannerState *state) {
 
         do {
             if (char_to_decimal(currentChar) >= base) {
-                printf("Error: digit %c is invalid for a number with base %hhu\n", currentChar, base);
+                printf("[%s:%ld:%ld] Error: digit %c is invalid for a number with base %hhu\n", state->filename, state->line, state->column, currentChar, base);
                 err = 1;
                 scanning_error = 1;
                 break;
@@ -527,9 +566,9 @@ static void scan_literal_number(struct scannerState *state) {
     }
 
     if (floating) {
-        push_tokenlist(state->list, (token){.type = LITERAL_FLOAT, .lexeme = to_chararray(state->lexeme), .numValue.floating = value, .line = state->line, .column = state->column, .filename = state->filename});
+        push_tokenlist(state->list, (token){.type = LITERAL_FLOAT, .lexeme = to_chararray(state->lexeme), .numValue.floating = value, .line = line, .column = column, .filename = state->filename});
     } else {    
-        push_tokenlist(state->list, (token){.type = LITERAL_INT, .lexeme = to_chararray(state->lexeme), .numValue.integer = (long) value, .line = state->line, .column = state->column, .filename = state->filename});
+        push_tokenlist(state->list, (token){.type = LITERAL_INT, .lexeme = to_chararray(state->lexeme), .numValue.integer = (long) value, .line = line, .column = column, .filename = state->filename});
     }
     init_charlist(state->lexeme);
     return;
@@ -540,7 +579,7 @@ static uint16_t scan_literal_char(struct scannerState *state) {
     
     switch (currentChar) {
         case '\n':
-            printf("Error: newline encountered while scanning char [%s:%ld:%ld]\n", state->filename, state->line, state->column);
+            printf("[%s:%ld:%ld] Error: newline encountered while scanning char\n", state->filename, state->line, state->column);
             scanning_error = 1;
             return -1;
         case '\\':
@@ -571,26 +610,26 @@ static uint16_t scan_literal_char(struct scannerState *state) {
                         char errbuf[state->offset - xoffset + 1];
                         memcpy(errbuf, state->source + xoffset, state->offset - xoffset);
                         errbuf[state->offset - xoffset + 1] = '\0';
-                        printf("Error: invalid escape sequence '\\%s' [%s:%ld:%ld]\n", errbuf, state->filename, state->line, state->column);
+                        printf("[%s:%ld:%ld] Error: invalid escape sequence '\\%s'\n", state->filename, state->line, state->column, errbuf);
                         return -1;
                     }
                     return num;
                 case 'u':
-                    printf("Warning: ocean-c does not support unicode yet and \\u is ignored.\n");
+                    printf("[%s:%ld:%ld] Warning: ocean-c does not support unicode yet and \\u is ignored.\n", state->filename, state->line, state->column);
                     return 'u';
                 case 'U':
-                    printf("Warning: ocean-c does not support unicode yet and \\U is ignored.\n");
+                    printf("[%s:%ld:%ld] Warning: ocean-c does not support unicode yet and \\U is ignored.\n", state->filename, state->line, state->column);
                     return 'U';
                 default:
                     ;
                     size_t firstoffset = state->offset;
                     next_char(state);
                     uint16_t octal = scan_numn(state, 1, 3, 8, 0);
-                    if (num > 255) {
+                    if (octal > 255) {
                         char errbuf[state->offset - firstoffset + 1];
                         memcpy(errbuf, state->source + firstoffset,  state->offset - firstoffset);
                         errbuf[state->offset - firstoffset + 1] = '\0';
-                        printf("Error: invalid escape sequence '\\%s' [%s:%ld:%ld]\n", errbuf, state->filename, state->line, state->column);
+                        printf("[%s:%ld:%ld] Error: invalid escape sequence '\\%s'\n", state->filename, state->line, state->column, errbuf);
                         return -1;
                     }
                     return octal;

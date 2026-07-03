@@ -5,6 +5,7 @@
 
 struct scannerState {
     long line, column;
+    long thisLine, thisColumn;
     char *filename;
     charlist *lexeme;
     char *source;
@@ -13,5 +14,7 @@ struct scannerState {
 };
 
 tokenlist *scanTokens(char *source, char *filename);
+
+void printTokensFromFile(char *filename, tokenlist *list);
 
 #endif

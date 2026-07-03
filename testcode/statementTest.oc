@@ -1,0 +1,8 @@
+x: int = 2;
+;;;;
+&;
+^;
+if (x == 3) {
+    x := 4;
+    if ; // an error should be thrown here
+}

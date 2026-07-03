@@ -3,5 +3,6 @@
 
 // compilation flags
 #define ABORT_ON_ERROR 1
+#define PARSER_MAX_RECURSION_DEPTH 1024
 
 #endif

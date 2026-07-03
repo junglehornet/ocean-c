@@ -1,10 +1,13 @@
 #include "core.h"
 
+#include "token.h"
 #include "dynarray.h"
 
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 
-token emptyToken;
-IMPLEMENT_DYNAMIC_ARRAY_TYPE(token, emptyToken)
+IMPLEMENT_DYNAMIC_ARRAY_TYPE(token, (token){0})
 IMPLEMENT_DYNAMIC_ARRAY_TYPE(char, 0)
+IMPLEMENT_DYNAMIC_ARRAY_TYPE(stmt, (stmt){0})
+IMPLEMENT_DYNAMIC_ARRAY_TYPE(str, NULL)
+IMPLEMENT_DYNAMIC_ARRAY_TYPE(expr, (expr){0})
