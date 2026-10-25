@@ -22,6 +22,9 @@ typedef struct parserState {
     char isSynchronizing;
     char quietErrors;
     char probingLabelType;
+    char pendingGreater; // Second half of >> while closing nested angle types.
+    char allowTypeGuard;
+    size_t typeGuards;
     size_t functionDepth;
     size_t loopDepth;
     size_t switchDepth;
@@ -38,12 +41,20 @@ static token endToken(parserState *state) {
     return tok;
 }
 
+static token currentToken(parserState *state) {
+    token tok = state->tokens[state->tokenIndex];
+    if (state->pendingGreater) { tok.type = GREATER_THAN; tok.column++; tok.lexeme = ">"; }
+    return tok;
+}
+
 static token advance(parserState *state) {
     if (state->tokenIndex + 1 >= state->tokensLen) {
         state->hasError = state->isSynchronizing = 1;
         return endToken(state);
     }
-    return state->tokens[++state->tokenIndex];
+    state->pendingGreater = 0;
+    state->tokenIndex++;
+    return currentToken(state);
 }
 
 static token peek(parserState *state) {
@@ -61,7 +72,7 @@ static token peek(parserState *state) {
 
 #define CHECK_SYNC if (state->isSynchronizing) return (expr){0}
 
-#define SET_TOK tok = state->tokens[state->tokenIndex]
+#define SET_TOK tok = currentToken(state)
 
 #define DEFINE_TOK token SET_TOK
 
@@ -87,6 +98,7 @@ static token peek(parserState *state) {
 
 static expr comma(parserState *state);
 static char parseCastTarget(parserState *state, typeTokens *target);
+static char parseSignatureType(parserState *state, size_t depth);
 static char tryCallTypeArguments(parserState *state, struct expr_instantiation *result);
 static typeTokens copySignatureSpan(parserState *state, size_t start, size_t end);
 static char signatureError(parserState *state, const char *message);
@@ -242,10 +254,12 @@ static expr primary(parserState *state) {
 
             case LEFT_CURLY_BRACE: {
                 if (parent.type != EXPR_TYPE_IDENTIFIER && parent.type != EXPR_TYPE_DOT &&
-                    parent.type != EXPR_TYPE_INDEX) goto endLoop;
+                    parent.type != EXPR_TYPE_INDEX && parent.type != EXPR_TYPE_INSTANTIATION) goto endLoop;
                 expr typeName = parent;
-                while (typeName.type == EXPR_TYPE_INDEX)
-                    typeName = ((struct expr_index*)typeName.underlying)->parent;
+                while (typeName.type == EXPR_TYPE_INDEX || typeName.type == EXPR_TYPE_INSTANTIATION)
+                    typeName = typeName.type == EXPR_TYPE_INDEX ?
+                        ((struct expr_index*)typeName.underlying)->parent :
+                        ((struct expr_instantiation*)typeName.underlying)->parent;
                 if (typeName.type == EXPR_TYPE_DOT)
                     typeName = ((struct expr_dot*)typeName.underlying)->field;
                 if (typeName.type == EXPR_TYPE_IDENTIFIER &&
@@ -258,6 +272,29 @@ static expr primary(parserState *state) {
             case DOT:
                 // member access
                 tok = advance(state);
+                if (tok.type == LEFT_PAREN) {
+                    tok = advance(state);
+                    struct expr_assertion assertion = {.child = parent};
+                    if (tok.type == TYPE) {
+                        if (!state->allowTypeGuard) {
+                            signatureError(state, "Type guard is only valid in a type switch header");
+                            return (expr){0};
+                        }
+                        assertion.isTypeGuard = 1;
+                        state->typeGuards++;
+                        tok = advance(state);
+                    } else {
+                        size_t start = state->tokenIndex;
+                        if (!parseSignatureType(state, 0)) return (expr){0};
+                        assertion.type = copySignatureSpan(state, start, state->tokenIndex);
+                        SET_TOK;
+                    }
+                    expect(RIGHT_PAREN, "Expected closing type assertion parenthesis", expr);
+                    advance(state);
+                    CONSTRUCT_EXPR_RES(EXPR_TYPE_ASSERTION, assertion, result);
+                    parent = result;
+                    break;
+                }
                 expect(IDENTIFIER, "Expected member name after dot", expr);
                 struct expr_dot dot = {0};
                 dot.parent = parent;
@@ -268,17 +305,20 @@ static expr primary(parserState *state) {
                 *(struct expr_dot*) parent.underlying = dot;
                 parent.type = EXPR_TYPE_DOT;
                 break;
+            case LESS_THAN:
             case LEFT_BRACKET: {
+                char angle = tok.type == LESS_THAN;
                 struct expr_instantiation instance = {.parent = parent};
                 if (tryCallTypeArguments(state, &instance)) {
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_INSTANTIATION, instance, result);
                     parent = result;
                     break;
                 }
-                // No type-argument list immediately followed by a call: index.
+                if (angle) goto endLoop;
+                // Not a type-argument list: index.
                 // array indexing
                 tok = advance(state);
-                expr index = comma(state);
+                expr index = tok.type == RIGHT_BRACKET ? (expr){0} : comma(state);
                 CHECK_SYNC;
                 SET_TOK;
                 expect(RIGHT_BRACKET, "expected right bracket", expr);
@@ -650,8 +690,6 @@ static expr *parseExpr(parserState *state) {
 
 static stmtlist *parseBlock(parserState *state);
 
-static char parseSignatureType(parserState *state, size_t depth);
-
 static stmt parseDeclaration(parserState *state) {
     DEFINE_TOK;
     tokenlist *vars = &(tokenlist){0};
@@ -792,11 +830,15 @@ static char checkTypeName(parserState *state, token tok) {
 }
 
 static typeTokens copySignatureSpan(parserState *state, size_t start, size_t end) {
-    typeTokens result = {.nTokens = end - start};
+    typeTokens result = {.nTokens = end - start + (state->pendingGreater && end == state->tokenIndex)};
     if (result.nTokens) {
         result.tokens = malloc(result.nTokens * sizeof(token));
         CHECK_MALLOC(result.tokens);
         memcpy(result.tokens, state->tokens + start, result.nTokens * sizeof(token));
+        if (state->pendingGreater && end == state->tokenIndex) {
+            result.tokens[result.nTokens - 1].type = GREATER_THAN;
+            result.tokens[result.nTokens - 1].lexeme = ">";
+        }
     }
     return result;
 }
@@ -857,6 +899,31 @@ static char parseTypeDimension(parserState *state, size_t depth, int minimum) {
     return 1;
 }
 
+static char angleEnd(token tok) {
+    return tok.type == GREATER_THAN || tok.type == BITSHIFT_RIGHT;
+}
+static char closeAngle(parserState *state) {
+    token tok = currentToken(state);
+    if (!angleEnd(tok)) return signatureError(state, "Expected closing type argument angle");
+    if (tok.type == BITSHIFT_RIGHT) state->pendingGreater = 1;
+    else advance(state);
+    return 1;
+}
+static char parseAngleTypes(parserState *state, size_t depth) {
+    if (depth >= PARSER_MAX_RECURSION_DEPTH)
+        return signatureError(state, "Type nesting limit exceeded");
+    token tok = advance(state);
+    if (angleEnd(tok)) return signatureError(state, "Expected type argument");
+    while (1) {
+        if (!parseSignatureType(state, depth + 1)) return 0;
+        tok = currentToken(state);
+        if (tok.type != COMMA) break;
+        tok = advance(state);
+        if (angleEnd(tok)) break;
+    }
+    return closeAngle(state);
+}
+
 static char parseTypeBrackets(parserState *state, size_t depth, char prefix) {
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Type nesting limit exceeded");
@@ -870,13 +937,14 @@ static char parseTypeBrackets(parserState *state, size_t depth, char prefix) {
         char ok = 1;
         do {
             if (!parseSignatureType(&trial, depth + 1)) { ok = 0; break; }
-            tok = trial.tokens[trial.tokenIndex];
+            tok = currentToken(&trial);
             if (tok.type != COMMA) break;
             tok = advance(&trial);
             if (tok.type == RIGHT_BRACKET) break;
         } while (1);
         if (ok && tok.type == RIGHT_BRACKET) {
             state->tokenIndex = trial.tokenIndex;
+            state->pendingGreater = trial.pendingGreater;
             advance(state);
             return 1;
         }
@@ -933,7 +1001,7 @@ static char parseInterfaceConstraint(parserState *state, size_t depth) {
     do {
         if (tok.type == TILDE) advance(&trial);
         if (!parseSignatureType(&trial, depth)) { ok = 0; break; }
-        tok = trial.tokens[trial.tokenIndex];
+        tok = currentToken(&trial);
         if (tok.type != BITWISE_OR) break;
         tok = advance(&trial);
     } while (1);
@@ -943,6 +1011,7 @@ static char parseInterfaceConstraint(parserState *state, size_t depth) {
             state->tokens[start + 1].type == STAR)
             return signatureError(state, "Expected right operand after self *");
         state->tokenIndex = trial.tokenIndex;
+        state->pendingGreater = trial.pendingGreater;
         return 1;
     }
     // Only top-level operators split operands; bracketed and composite types
@@ -1127,11 +1196,9 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
         }
         // A function type with no result is unambiguous before a delimiter.
         if (tok.type == COMMA || tok.type == RIGHT_PAREN || tok.type == LEFT_CURLY_BRACE ||
-            tok.type == SEMICOLON || tok.type == RIGHT_BRACKET)
+            tok.type == SEMICOLON || tok.type == RIGHT_BRACKET || tok.type == COLON ||
+            tok.type == EQUALS || tok.type == BITWISE_OR || angleEnd(tok))
             return 1;
-        // A bare identifier before a delimiter is the outer parameter's name.
-        if ((tok.type == IDENTIFIER || tok.type == UNDERSCORE) &&
-            (peek(state).type == COMMA || peek(state).type == RIGHT_PAREN)) return 1;
         return parseSignatureType(state, depth + 1);
     }
     if (tok.type != IDENTIFIER && tok.type != ANY)
@@ -1157,20 +1224,25 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
         tok = advance(state);
     }
     // Generic type arguments and Ocean's suffix array notation.
-    while (tok.type == LEFT_BRACKET) {
-        if (!parseTypeBrackets(state, depth + 1, 0)) return 0;
+    while (tok.type == LEFT_BRACKET || tok.type == LESS_THAN) {
+        if (tok.type == LESS_THAN) {
+            if (!parseAngleTypes(state, depth + 1)) return 0;
+        } else if (!parseTypeBrackets(state, depth + 1, 0)) return 0;
         SET_TOK;
     }
     return 1;
 }
 
 // Speculate using the type grammar without changing the expression cursor.
-// Only commit a nonempty list when the closing bracket is followed by a call.
+// Bracketed type lists also represent standalone generic values.
+// Angle lists in expressions require a call, composite literal, or expression
+// delimiter after the closing angle to distinguish relational operators.
 static char tryCallTypeArguments(parserState *state, struct expr_instantiation *result) {
     parserState trial = *state;
     trial.quietErrors = 1;
+    char angle = currentToken(state).type == LESS_THAN;
     token tok = advance(&trial);
-    if (tok.type == RIGHT_BRACKET) return 0;
+    if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) return 0;
     typeTokens *arguments = nullptr;
     size_t count = 0;
     do {
@@ -1180,14 +1252,24 @@ static char tryCallTypeArguments(parserState *state, struct expr_instantiation *
         CHECK_MALLOC(grown);
         arguments = grown;
         arguments[count++] = copySignatureSpan(&trial, start, trial.tokenIndex);
-        tok = trial.tokens[trial.tokenIndex];
+        tok = currentToken(&trial);
         if (tok.type != COMMA) break;
         tok = advance(&trial);
-        if (tok.type == RIGHT_BRACKET) break;
+        if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) break;
     } while (1);
-    if (tok.type != RIGHT_BRACKET || peek(&trial).type != LEFT_PAREN) goto notTypes;
-    advance(&trial);
+    if (angle) {
+        if (!angleEnd(tok) || !closeAngle(&trial)) goto notTypes;
+        tok = currentToken(&trial);
+        if (tok.type != LEFT_PAREN && tok.type != LEFT_CURLY_BRACE &&
+            tok.type != SEMICOLON && tok.type != COMMA && tok.type != RIGHT_PAREN &&
+            tok.type != RIGHT_BRACKET && tok.type != RIGHT_CURLY_BRACE &&
+            tok.type != DOT && tok.type != EOF_TOKEN) goto notTypes;
+    } else {
+        if (tok.type != RIGHT_BRACKET) goto notTypes;
+        advance(&trial);
+    }
     state->tokenIndex = trial.tokenIndex;
+    state->pendingGreater = trial.pendingGreater;
     result->nTypeArguments = count;
     result->typeArguments = arguments;
     return 1;
@@ -1280,12 +1362,14 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
 }
 
 // Type parameter declarations retain Go's name-before-constraint order:
-// [T, U any, V ~int | ~string]. These names are types, not value parameters.
+// [T, U any, V ~int | ~string] or <T, U: any, V: ~int | ~string>.
+// These names are types, not value parameters.
 static char parseTypeParameters(parserState *state, signatureFields *fields) {
     DEFINE_TOK;
+    char angle = tok.type == LESS_THAN;
     tok = advance(state);
-    if (tok.type == RIGHT_BRACKET) return signatureError(state, "Expected type parameter");
-    while (tok.type != RIGHT_BRACKET) {
+    if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) return signatureError(state, "Expected type parameter");
+    while (tok.type != RIGHT_BRACKET && !(angle && angleEnd(tok))) {
         size_t namesStart = state->tokenIndex, count = 0;
         do {
             if (tok.type != IDENTIFIER) return signatureError(state, "Expected type parameter name");
@@ -1295,6 +1379,10 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
             if (tok.type != COMMA) break;
             tok = advance(state);
         } while (1);
+        if (angle) {
+            if (tok.type != COLON) return signatureError(state, "Expected colon before type constraint");
+            tok = advance(state);
+        }
         size_t start = state->tokenIndex;
         do {
             if (tok.type == TILDE) tok = advance(state);
@@ -1306,10 +1394,11 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
         for (size_t i = 0; i < count; i++)
             if (!addSignatureField(state, fields, state->tokens[namesStart + 2 * i],
                                    start, state->tokenIndex)) return 0;
-        if (tok.type == RIGHT_BRACKET) break;
+        if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) break;
         if (tok.type != COMMA) return signatureError(state, "Expected comma after type constraint");
         tok = advance(state);
     }
+    if (angle) return closeAngle(state);
     advance(state);
     return 1;
 }
@@ -1341,7 +1430,11 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
         function.name = tok;
         tok = advance(state);
     }
-    if (!anonymous && tok.type == LEFT_BRACKET && !parseTypeParameters(state, &typeParams)) goto invalid;
+    if (!hasKeyword && anonymous && (tok.type == LEFT_BRACKET || tok.type == LESS_THAN)) {
+        signatureError(state, "Operator methods cannot declare type parameters");
+        goto invalid;
+    }
+    if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
     if (!parseSignatureFields(state, &parameters, 1, 0)) goto invalid;
     SET_TOK;
     size_t resultStart = state->tokenIndex;
@@ -1381,7 +1474,12 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
         size_t oldLoopDepth = state->loopDepth, oldSwitchDepth = state->switchDepth;
         state->loopDepth = state->switchDepth = 0;
         state->functionDepth++;
+        char oldGuard = state->allowTypeGuard;
+        size_t oldGuards = state->typeGuards;
+        state->allowTypeGuard = 0;
         stmtlist *body = parseBlock(state);
+        state->allowTypeGuard = oldGuard;
+        state->typeGuards = oldGuards;
         state->functionDepth--;
         state->loopDepth = oldLoopDepth;
         state->switchDepth = oldSwitchDepth;
@@ -1579,7 +1677,7 @@ static stmt parseStruct(parserState *state) {
     size_t nOperatorMethods = 0;
     signatureFields fields = {0}, typeParams = {0}, valueParams = {0};
     tok = advance(state);
-    if (tok.type == LEFT_BRACKET && !parseTypeParameters(state, &typeParams)) goto invalid;
+    if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
     SET_TOK;
     if (tok.type == LEFT_PAREN) {
         if (!parseSignatureFields(state, &valueParams, 0, 0)) goto invalid;
@@ -1732,7 +1830,7 @@ static stmt parseInterface(parserState *state) {
     node->name = tok;
     signatureFields typeParams = {0};
     tok = advance(state);
-    if (tok.type == LEFT_BRACKET && !parseTypeParameters(state, &typeParams)) goto invalid;
+    if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
     SET_TOK;
     if (tok.type != LEFT_CURLY_BRACE) {
         signatureError(state, "Expected interface body");
@@ -1855,11 +1953,53 @@ invalid:
 static stmt parseSwitch(parserState *state) {
     DEFINE_TOK;
     tok = advance(state);
-    struct stmt_switch node = {0};
+    struct stmt_switch node = {.binding = {.type = EOF_TOKEN}};
     if (tok.type == LEFT_PAREN) {
         advance(state);
-        node.value = parseExpr(state);
+        char oldGuard = state->allowTypeGuard;
+        size_t guards = state->typeGuards;
+        state->allowTypeGuard = 1;
+        stmt header = parseDeclarationExpr(state);
+        state->allowTypeGuard = oldGuard;
         if (state->isSynchronizing) return (stmt){0};
+        SET_TOK;
+        if (tok.type == SEMICOLON) {
+            if (state->typeGuards != guards) {
+                signatureError(state, "Type guard cannot be a switch initializer");
+                return (stmt){0};
+            }
+            node.initializer = header;
+            tok = advance(state);
+            if (tok.type != RIGHT_PAREN) {
+                state->allowTypeGuard = 1;
+                header = parseDeclarationExpr(state);
+                state->allowTypeGuard = oldGuard;
+                if (state->isSynchronizing) return (stmt){0};
+            } else header = (stmt){0};
+        }
+        expr *guard = NULL;
+        if (header.type == STMT_VAR) {
+            struct stmt_var *binding = header.value;
+            if (binding->nVars == 1 && !binding->type.nTokens && binding->nInitValues == 1) {
+                node.binding = binding->vars[0];
+                guard = &binding->initValues[0];
+            }
+        } else if (header.type == STMT_EXPR) guard = header.value;
+        node.isTypeSwitch = guard && guard->type == EXPR_TYPE_ASSERTION &&
+            ((struct expr_assertion*)guard->underlying)->isTypeGuard;
+        if ((state->typeGuards != guards && (!node.isTypeSwitch || state->typeGuards != guards + 1)) ||
+            (header.type != STMT_NULL && !guard) ||
+            (header.type == STMT_VAR && !node.isTypeSwitch)) {
+            signatureError(state, "Expected switch expression or a single type-switch binding");
+            return (stmt){0};
+        }
+        node.value = guard;
+        if (header.type == STMT_VAR) {
+            struct stmt_var *binding = header.value;
+            node.value = binding->initValues;
+            free(binding->vars);
+            free(binding);
+        }
         SET_TOK;
         expect(RIGHT_PAREN, "Expected end of switch expression", stmt);
         tok = advance(state);
@@ -1884,9 +2024,18 @@ static stmt parseSwitch(parserState *state) {
         } else if (tok.type == CASE) {
             do {
                 advance(state);
-                expr value = assignment(state);
-                if (state->isSynchronizing) goto clauseError;
-                push_exprlist(&values, value);
+                if (node.isTypeSwitch) {
+                    size_t start = state->tokenIndex;
+                    if (!parseSignatureType(state, 0)) goto clauseError;
+                    typeTokens *types = realloc(clause.types, (clause.nTypes + 1) * sizeof(*types));
+                    CHECK_MALLOC(types);
+                    clause.types = types;
+                    clause.types[clause.nTypes++] = copySignatureSpan(state, start, state->tokenIndex);
+                } else {
+                    expr value = assignment(state);
+                    if (state->isSynchronizing) goto clauseError;
+                    push_exprlist(&values, value);
+                }
                 SET_TOK;
             } while (tok.type == COMMA);
         } else {
@@ -1904,7 +2053,7 @@ static stmt parseSwitch(parserState *state) {
                 goto clauseError;
             }
             size_t oldFallthroughDepth = state->fallthroughDepth;
-            state->fallthroughDepth = state->syntaxDepth + 1;
+            state->fallthroughDepth = node.isTypeSwitch ? 0 : state->syntaxDepth + 1;
             stmt statement = parseStatement(state);
             state->fallthroughDepth = oldFallthroughDepth;
             if (state->isSynchronizing) goto clauseError;
@@ -1927,6 +2076,8 @@ static stmt parseSwitch(parserState *state) {
         node.cases[node.nCases++] = clause;
         continue;
 clauseError:
+        for (size_t i = 0; i < clause.nTypes; i++) free(clause.types[i].tokens);
+        free(clause.types);
         free_exprlist(&values);
         free_stmtlist(&body);
         state->switchDepth--;
@@ -1954,7 +2105,7 @@ static char colonStartsDeclaration(parserState *state) {
     token tok = advance(&trial);
     if (tok.type == EQUALS) return 1; // inferred declaration
     if (!parseSignatureType(&trial, 0) || trial.isSynchronizing) return 0;
-    tok = trial.tokens[trial.tokenIndex];
+    tok = currentToken(&trial);
     return tok.type == SEMICOLON || tok.type == EQUALS;
 }
 
@@ -2295,6 +2446,7 @@ static char parseImports(parserState *state, stmtlist *statements) {
 // Error recovery always advances and tracks delimiters so a broken declaration
 // cannot stall the parser or consume the start of the next top-level function.
 static void recoverTopLevel(parserState *state, size_t start) {
+    state->pendingGreater = 0;
     size_t braces = 0;
     for (size_t i = start; i < state->tokenIndex; i++) {
         if (state->tokens[i].type == LEFT_CURLY_BRACE) braces++;

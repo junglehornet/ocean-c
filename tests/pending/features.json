@@ -2,150 +2,6 @@
   "version": 1,
   "features": [
     {
-      "id": "angle_generics",
-      "stage": "parser",
-      "reason": "The historical fixture uses angle brackets; bracketed generics already work.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "struct",
-          "source": "struct Box<T: any> { T value; }",
-          "check": "generic_struct"
-        },
-        {
-          "id": "interface",
-          "source": "interface Reader<T: any> { Read() T; }",
-          "check": "generic_interface"
-        },
-        {
-          "id": "function",
-          "source": "func identity<T: any>(T value) T { return value; }",
-          "check": "generic_function"
-        },
-        {
-          "id": "nested_type",
-          "source": "type Nested Box<Box<int>>;",
-          "check": "accept"
-        }
-      ]
-    },
-    {
-      "id": "empty_index",
-      "stage": "parser",
-      "reason": "The self[] delegation expression in structEtc.oc is unsupported.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "expression",
-          "source": "self[];",
-          "check": "empty_index"
-        },
-        {
-          "id": "method",
-          "source": "struct Values { index []int data; +() { use(self[].length); } }",
-          "check": "accept"
-        }
-      ]
-    },
-    {
-      "id": "switch_initializers",
-      "stage": "parser",
-      "reason": "Switch currently has no initializer slot or grammar.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "declaration",
-          "source": "func f() { switch (x := next(); x) { case 1: return; default: return; } }",
-          "check": "accept"
-        },
-        {
-          "id": "expression",
-          "source": "switch (prepare(); value) { case 1: break; }",
-          "check": "accept"
-        }
-      ]
-    },
-    {
-      "id": "type_switches",
-      "stage": "parser",
-      "reason": "Type assertions and type-switch clauses need language/AST design.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "binding",
-          "source": "func f(any value) { switch (item := value.(type)) { case int: use(item); default: return; } }",
-          "check": "accept"
-        },
-        {
-          "id": "unbound",
-          "source": "func f(any value) { switch (value.(type)) { case string: return; } }",
-          "check": "accept"
-        }
-      ]
-    },
-    {
-      "id": "anonymous_generics",
-      "stage": "parser",
-      "reason": "Anonymous function parsing currently skips type parameters.",
-      "syntax": "existing",
-      "cases": [
-        {
-          "id": "literal",
-          "source": "identity := func[T any](T value) T { return value; };",
-          "check": "anonymous_generics"
-        }
-      ]
-    },
-    {
-      "id": "semicolon_insertion",
-      "stage": "parser",
-      "reason": "The scanner/parser currently requires explicit statement separators.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "declarations",
-          "source": "package main\nfunc main() {\n x := 1\n use(x)\n}\n",
-          "check": "accept"
-        },
-        {
-          "id": "branches",
-          "source": "func f() {\n for (;;) {\n break\n }\n return\n}\n",
-          "check": "accept"
-        }
-      ]
-    },
-    {
-      "id": "standalone_instantiation",
-      "stage": "parser",
-      "reason": "Generic function values currently have an indexing AST.",
-      "syntax": "existing",
-      "cases": [
-        {
-          "id": "function_value",
-          "source": "identity[int];",
-          "check": "standalone_instantiation"
-        },
-        {
-          "id": "qualified_value",
-          "source": "callback := pkg.identity[int];",
-          "check": "standalone_instantiation"
-        }
-      ]
-    },
-    {
-      "id": "function_type_ambiguity",
-      "stage": "parser",
-      "reason": "The bare-result function type conflicts with the existing named-parameter rule; this fixture proposes the alternative.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "bare_result",
-          "source": "func accepts(func() int) {}",
-          "check": "unnamed_function_type"
-        }
-      ]
-    },
-    {
       "id": "unicode",
       "stage": "scanner",
       "reason": "Unicode escapes, UTF-8 string bytes, and non-ASCII identifiers are incomplete.",
@@ -163,12 +19,12 @@
         },
         {
           "id": "utf8_string",
-          "source": "\"Ω\"",
+          "source": "\"\u03a9\"",
           "check": "omega"
         },
         {
           "id": "identifier",
-          "source": "α",
+          "source": "\u03b1",
           "check": "unicode_identifier",
           "missing_diagnostic": "Unexpected or invalid character"
         },

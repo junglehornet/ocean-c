@@ -12,7 +12,7 @@ LLVM_PROFILE_FILE="$profile_dir/%p-%m.profraw" OCEAN_PROFILE_DIR="$profile_dir" 
     ctest --test-dir "$build_dir" -LE pending --output-on-failure
 llvm-profdata merge -sparse "$profile_dir"/*.profraw -o "$build_dir/coverage.profdata"
 objects=()
-for target in function_parser_test parser_features_test parser_edges_test scanner_test token_test dynarray_test ast_test hashmap_test; do
+for target in function_parser_test parser_features_test parser_edges_test parser_extensions_test scanner_test token_test dynarray_test ast_test hashmap_test; do
     objects+=(-object "$build_dir/$target")
 done
 llvm-cov report "$build_dir/ocean-c" "${objects[@]}" \

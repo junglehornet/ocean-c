@@ -1,11 +1,12 @@
 # Pending acceptance tests
 
 This inventory covers the incomplete compiler features documented in
-[the test README](../README.md). It defines **80 contracts across 29
+[the test README](../README.md). It defines **64 contracts across 21
 feature areas**, separate from the regression suites for implemented behavior.
-No compiler features are implemented by this change.
+Completed parser contracts are covered by `parser_extensions_test` and the
+other parser regression suites.
 
-There are **28 executable probes** of current parser/scanner/printer behavior
+There are **12 executable probes** of current scanner/printer behavior
 and **52 semantic/ownership fixtures** awaiting test drivers. The latter are
 acceptance specifications, not claims that missing compiler stages have been
 executed or tested successfully. Each fixture has a concrete source and expected
@@ -47,7 +48,7 @@ List contracts or run one with its full explanation:
 python3 tests/pending_features.py --list
 python3 tests/pending_features.py --validate
 python3 tests/pending_features.py --probe /tmp/ocean-pending/pending_probe \
-  --case anonymous_generics.literal
+  --case scientific_numbers.exponent
 ```
 
 The validator and **26 runner self-tests** are ordinary passing CTest entries.
@@ -59,14 +60,6 @@ CMake configure dependency, so changing cases refreshes test registration.
 
 | Feature | Stage | Cases | Syntax status |
 | --- | --- | ---: | --- |
-| `angle_generics` | parser | 4 | proposed |
-| `empty_index` | parser | 2 | proposed |
-| `switch_initializers` | parser | 2 | proposed |
-| `type_switches` | parser | 2 | proposed |
-| `anonymous_generics` | parser | 1 | existing |
-| `semicolon_insertion` | parser | 2 | proposed |
-| `standalone_instantiation` | parser | 2 | existing |
-| `function_type_ambiguity` | parser | 1 | proposed |
 | `unicode` | scanner | 5 | existing |
 | `scientific_numbers` | scanner | 1 | proposed |
 | `debug_printer` | debug | 6 | proposed |
@@ -92,9 +85,8 @@ CMake configure dependency, so changing cases refreshes test registration.
 `existing` means fixtures use currently documented syntax, except for the
 specific missing capability. `proposed` means grammar, a spelling, a precedence
 choice, or debug output format still needs approval before implementation.
-In particular, angle-bracket generics (including `T: constraint`), switch/type
-switch headers, automatic semicolons, bare-result function-type disambiguation,
-module marker spelling, struct value application, exponent notation, and new
+In particular, module marker spelling, struct value application, exponent
+notation, and new
 printer formats are **proposals, not silently adopted language rules**.
 Already implemented syntax and deliberately unsupported forms (e.g. variadic
 struct value parameters and generic operator methods) remain in the regression

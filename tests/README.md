@@ -38,9 +38,9 @@ and union constraints. Dimensions accept integer literals, qualified names,
 parentheses, unary operators, and binary operators. Ambiguous suffixes such as
 `T[N]` remain unresolved until type checking. The parser does not evaluate array
 lengths, perform semantic type checking, verify return arity/types, or instantiate
-generics. The function-type spelling `func() name` is treated as
-a named parameter with a no-result function type; parenthesized function results
-(e.g. `func() (int)`) disambiguate an unnamed function type with a result.
+generics. The function-type spelling `func() int` is an unnamed function type
+returning `int`. Use `func() () callback` for a named parameter whose function
+type has no results, or `func() int callback` for a named callback returning `int`.
 
 These tests include parser.c to exercise malformed declarations directly as well
 as through parseTokens; do not compile parser.c separately into the test binary.
@@ -105,6 +105,28 @@ Imports are AST declarations, not package loading. Type names, constraints,
 label targets, return types, and extern linkage still require semantic analysis.
 See the [pending feature inventory](pending/README.md) for remaining limitations.
 
+## Switch extensions and anonymous generics
+
+Switch headers accept a declaration or expression initializer followed by an
+explicit semicolon. Type switches retain the guard, optional binding, and
+complete case type spans in the AST:
+
+```Ocean
+switch (x := next(); x) { case 1: break; default: break; }
+switch (prepare(); item := value.(type)) {
+    case int, []string: use(item);
+    default: break;
+}
+identity := func[T any](T value) T { return value; };
+```
+
+Type assertions use `value.(Type)`. The special `.(type)` guard is restricted
+to the switch header, optionally with one inferred binding. Type-switch cases
+contain types and disallow fallthrough. An initializer may also precede a
+condition-only switch, as in `switch (prepare();) { ... }`. Binding resolution,
+assertion validity, and type-case compatibility remain semantic analysis.
+Ocean requires explicit statement separators and does not insert semicolons.
+
 ## Struct indexing and the name `index`
 
 `index` is scanned as an identifier. It may name variables, parameters, fields,
@@ -119,9 +141,8 @@ struct Matrix { T[height][width] underlying; index underlying; }
 The AST's `stmt_struct.indexField` identifies the delegated field; EOF_TOKEN
 means no field was designated. A separate directive can precede the field
 it names. The parser validates uniqueness and field existence; the type checker
-must validate that the target can be indexed. The larger Matrix example's
-angle-bracket parameters still require additional parsing work. Bracketed
-variants of its operator methods and constraints are supported.
+must validate that the target can be indexed. The expression `self[]` accesses the delegated collection, while `self[i]`
+accesses an element. Both bracketed and angle-bracket parameters are accepted.
 
 ## Casts
 
@@ -187,33 +208,34 @@ Each semicolon-terminated embedded type or union is retained in
 `stmt_interface.constraints` as one token span; the semicolon is excluded.
 Methods remain in `stmt_interface.methods`. The parser validates the grammar;
 type resolution, type-set compatibility, and constraint satisfaction belong to
-semantic analysis. Angle-bracket interface parameters from `structEtc.oc`
-remain unsupported.
+semantic analysis. Angle-bracket interface parameters such as
+`interface Scalar<T: any> { ... }` are also accepted.
 
 ## Generic calls
 
-A nonempty, grammar-valid type list immediately followed by a call is parsed
-as generic instantiation:
+A nonempty, grammar-valid bracketed type list is parsed as generic
+instantiation, including standalone generic function values:
 
 ```Ocean
 identity[int](value);
 pkg.pair[pkg.Item, []string,](first, second);
 apply[map[string]int, func(int x) (int)](callback);
+callback := identity[int];
+identity<int>(value);
 ```
 
 The call's `func` is an `EXPR_TYPE_INSTANTIATION` node holding the original
 callee and one `typeTokens` span per argument. Argument spans exclude list
 separators and outer brackets; nested type syntax is preserved. A trailing
-comma is accepted. Ordinary calls and brackets without an immediate call keep
-their existing AST forms.
+comma is accepted. Angle arguments are accepted before calls, composite
+literals, member access, and expression delimiters. Comparisons such as
+`a < b > c` and shift expressions keep their binary AST forms.
 
-`a[i](x)` is grammatically ambiguous: it receives an instantiation node, and
-name resolution must decide whether `i` denotes a type or an index value.
-Write `(a[i])(x)` to explicitly call an indexed value. Expressions that do not
-form type arguments, such as `a[0](x)` or `a[i + 1](x)`, remain indexed calls.
-This adds call syntax and AST representation; generic instantiation and type
-checking still belong to semantic analysis. Standalone generic function values
-such as `identity[int]` remain represented as indexing until name resolution.
+`a[i]` and `a[i](x)` are grammatically ambiguous: they receive instantiation
+nodes, and name resolution must decide whether `i` denotes a type or an index
+value. Parentheses around `a[i]` preserve this ambiguity. Expressions that do
+not form type arguments, such as `a[0]` or `a[i + 1]`, remain indexing. Generic
+instantiation, index resolution, and type checking still belong to semantic analysis.
 
 ## Generic structs and interfaces
 
@@ -241,7 +263,9 @@ old unused single-token `typeParamInterfaces` field.
 
 Fields, indexing delegation, embedded interfaces, and method signatures may
 reference parameters. Binding those references and enforcing constraints remain
-semantic work. The angle-bracket spelling in `structEtc.oc` remains unsupported.
+semantic work. Angle parameters use a colon before each constraint group,
+for example `struct Pair<T, U: any> { T first; U second; }`. Nested type
+arguments such as `Box<Box<int>>` are accepted without changing shift tokens.
 
 ## Struct value parameters
 
@@ -310,8 +334,8 @@ Supported symbols are arithmetic, bitwise, comparison, shift, and logical
 operators, `!`, `~`, `++`, `--`, and supported compound assignments. Plain `=`,
 `~=`, indexing/call operators, and operator-specific generic parameter lists
 are not accepted as operator method names. Pointer/function fields keep their
-existing grammar. The original `structEtc.oc` still uses unsupported
-angle-bracket parameters and an empty-index expression (`self[]`).
+existing grammar. Angle-bracket parameters and empty-index expressions
+(`self[]`) are supported.
 
 ## Expanded coverage suites
 
@@ -319,6 +343,9 @@ The CTest suite now contains:
 
 - `function_parser_test`: function signatures and malformed declarations.
 - `parser_features_test`: language features, AST structure, recovery, and truncation.
+- `parser_extensions_test`: angle/anonymous generics, standalone instantiation,
+  delegated collection access, switch initializers/type switches, function types,
+  explicit semicolons, malformed declarations, recovery, and token prefixes.
 - `parser_edges_test`: unary/compound operators, float AST values, ternary
   associativity, if initializers/else branches, loop modes, branch labels,
   empty composites/switch cases, and invalid input/nesting limits.
@@ -383,11 +410,11 @@ printing, and incorrect command-line success statuses on errors.
 
 ## Pending incomplete features
 
-The [pending inventory](pending/README.md) defines 80 future acceptance
-contracts across 29 incomplete feature areas. CTest lists them individually
+The [pending inventory](pending/README.md) defines 64 future acceptance
+contracts across 21 incomplete feature areas. CTest lists them individually
 under the `pending` label. Unmet contracts are reported as skipped/XFAIL;
 unexpected successes fail so they can be promoted to regression tests.
-Twenty-eight cases probe current APIs; 52 semantic/cleanup fixtures explicitly
+Twelve cases probe current APIs; 52 semantic/cleanup fixtures explicitly
 await compiler-stage adapters. Proposed syntax is marked in the inventory.
 
 ```sh

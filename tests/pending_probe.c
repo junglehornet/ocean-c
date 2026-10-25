@@ -58,29 +58,5 @@ int main(int argc, char **argv) {
         printAst(*expression);
         return 0;
     }
-    if (strcmp(argv[1], "parser")) return 2;
-    if (!strcmp(argv[3], "accept")) return 0;
-    if (!strcmp(argv[3], "generic_struct")) {
-        if (first.type == STMT_STRUCT && ((struct stmt_struct*)first.value)->nTypeParams == 1) return 0;
-    } else if (!strcmp(argv[3], "generic_interface")) {
-        if (first.type == STMT_INTERFACE && ((struct stmt_interface*)first.value)->nTypeParams == 1) return 0;
-    } else if (!strcmp(argv[3], "generic_function")) {
-        if (first.type == STMT_FUNC && ((struct stmt_func*)first.value)->nTypeParams == 1) return 0;
-    } else if (!strcmp(argv[3], "anonymous_generics")) {
-        if (expression && expression->type == EXPR_TYPE_FUNCTION &&
-            ((struct stmt_func*)expression->underlying)->nTypeParams == 1) return 0;
-    } else if (!strcmp(argv[3], "standalone_instantiation")) {
-        if (expression && expression->type == EXPR_TYPE_INSTANTIATION &&
-            ((struct expr_instantiation*)expression->underlying)->nTypeArguments == 1) return 0;
-    } else if (!strcmp(argv[3], "empty_index")) {
-        if (expression && expression->type == EXPR_TYPE_INDEX &&
-            ((struct expr_index*)expression->underlying)->index.type == EXPR_TYPE_NULL) return 0;
-    } else if (!strcmp(argv[3], "unnamed_function_type")) {
-        if (first.type == STMT_FUNC) {
-            struct stmt_func *function = first.value;
-            if (function->nParams == 1 && function->paramNames[0].type == EOF_TOKEN &&
-                function->paramTypeNames[0].nTokens == 4) return 0;
-        }
-    } else return 2;
-    return missing("required AST representation was not produced");
+    return 2;
 }

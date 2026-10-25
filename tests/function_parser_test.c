@@ -46,7 +46,8 @@ int main(void) {
     assert(f->nParams == 5 && f->resultTypes[0].nTokens == 4);
     f = valid("func maps(map[string][]int items, chan int events) {}"); assert(f->nParams == 2);
     f = valid("func callback(func(int x, int y) int cb) {}"); assert(f->paramTypeNames[0].nTokens == 9);
-    f = valid("func callback(func() cb) {}"); assert(f->nParams == 1);
+    f = valid("func callback(func() () cb) {}");
+    assert(f->nParams == 1 && !strcmp(f->paramNames[0].lexeme, "cb"));
     f = valid("func named() (int total) { total = 1; return; }"); assert(f->body.nStmts == 2);
     f = valid("func loop(int n) { for (i := 0; i < n; i++) { n--; } }"); assert(f->body.stmts[0].type == STMT_FOR);
     f = valid("func calls() int { io.Println(1); return next(); }"); assert(f->body.nStmts == 2);

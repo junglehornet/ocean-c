@@ -28,7 +28,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    set(ocean_test_targets function_parser_test parser_features_test parser_edges_test)
+    set(ocean_test_targets function_parser_test parser_features_test parser_edges_test parser_extensions_test)
     foreach(test_name IN LISTS ocean_test_targets)
         # Parser suites include parser.c to inspect internal error paths.
         add_executable(${test_name} tests/${test_name}.c scanner.c token.c dynarray.c)

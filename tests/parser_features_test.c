@@ -486,17 +486,19 @@ int main(void) {
     e = expression("factory[int]()[string](x);");
     assert(e.type == EXPR_TYPE_CALL &&
            ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INSTANTIATION);
-    e = expression("a[i];"); assert(e.type == EXPR_TYPE_INDEX);
+    e = expression("a[i];"); assert(e.type == EXPR_TYPE_INSTANTIATION);
     e = expression("a[i + 1](x);");
     assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INDEX);
     e = expression("a[0](x);");
     assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INDEX);
     e = expression("(a[i])(x);");
-    assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INDEX);
+    assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INSTANTIATION);
     e = expression("a[i](x);");
     assert(e.type == EXPR_TYPE_CALL &&
            ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INSTANTIATION);
-    invalid("f[](x);"); invalid("f[int,,string](x);");
+    e = expression("f[](x);");
+    assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INDEX);
+    invalid("f[int,,string](x);");
     invalid("f[[]](x);"); invalid("f[int string](x);");
     invalid("f[int](;"); invalid("f[int](x;");
     invalid("f[map[]int](x);");

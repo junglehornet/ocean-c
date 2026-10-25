@@ -25,7 +25,7 @@ class PendingRunnerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.probe = self.root / "probe"
         self.probe.touch()
-        self.feature, self.case = self.cases["standalone_instantiation.function_value"]
+        self.feature, self.case = self.cases["scientific_numbers.exponent"]
 
     def process(self, code=0, output="", error=""):
         return subprocess.CompletedProcess([], code, output, error)
@@ -35,9 +35,7 @@ class PendingRunnerTests(unittest.TestCase):
             return runner.native_contract(str(self.probe), self.feature, self.case, self.root)
 
     def test_inventory_has_every_documented_area(self):
-        expected = {"angle_generics", "empty_index", "switch_initializers", "type_switches",
-                    "anonymous_generics", "semicolon_insertion", "standalone_instantiation",
-                    "function_type_ambiguity", "unicode", "scientific_numbers", "debug_printer",
+        expected = {"unicode", "scientific_numbers", "debug_printer",
                     "imports", "module_discovery", "symbol_binding", "type_checking",
                     "generic_instantiation", "ambiguous_calls", "generic_function_values",
                     "type_dimension_resolution", "constant_evaluation", "enum_values",
@@ -163,13 +161,13 @@ class PendingRunnerTests(unittest.TestCase):
     def test_xpass_fails_instead_of_silently_skipping(self):
         with patch.object(runner, "native_contract", return_value=(True, "contract met")):
             with redirect_stdout(io.StringIO()) as output:
-                status = runner.main(["--case", "standalone_instantiation.function_value", "--probe", str(self.probe)])
+                status = runner.main(["--case", "scientific_numbers.exponent", "--probe", str(self.probe)])
         self.assertEqual(status, 1); self.assertIn("XPASS", output.getvalue())
 
     def test_missing_contract_has_skip_exit_code(self):
         with patch.object(runner, "native_contract", return_value=(False, "not implemented")):
             with redirect_stdout(io.StringIO()) as output:
-                status = runner.main(["--case", "standalone_instantiation.function_value", "--probe", str(self.probe)])
+                status = runner.main(["--case", "scientific_numbers.exponent", "--probe", str(self.probe)])
         self.assertEqual(status, 77); self.assertIn("XFAIL", output.getvalue())
 
     def test_unknown_case_is_error(self):

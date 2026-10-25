@@ -123,10 +123,15 @@ struct stmt_defer {
 struct switch_case {
     size_t nValues; // Zero for default.
     expr *values;
+    size_t nTypes; // Type-switch cases retain complete type spans.
+    typeTokens *types;
     struct stmt_block body;
 };
 
 struct stmt_switch {
+    stmt initializer; // STMT_NULL when absent.
+    char isTypeSwitch;
+    token binding; // EOF_TOKEN when the type guard has no binding.
     expr *value; // NULL for a condition-only switch.
     size_t nCases;
     struct switch_case *cases;
@@ -215,6 +220,7 @@ enum exprType {
     EXPR_TYPE_FUNCTION,
     EXPR_TYPE_COMPOSITE,
     EXPR_TYPE_INSTANTIATION,
+    EXPR_TYPE_ASSERTION,
 };
 
 struct expr {
@@ -233,8 +239,8 @@ struct expr_call {
     expr *params;
 };
 
-// Used as expr_call.func for f[T, U](...). An identifier argument can also
-// denote an index; name resolution decides ambiguous cases such as a[i](x).
+// Generic values and expr_call.func for f[T, U](...). An identifier argument
+// can also denote an index; name resolution decides ambiguous cases like a[i].
 struct expr_instantiation {
     expr parent;
     size_t nTypeArguments;
@@ -277,9 +283,15 @@ struct expr_typecast {
     typeTokens type; // Arrow target, excluding the outer delimiter parentheses.
 };
 
+struct expr_assertion {
+    expr child;
+    typeTokens type; // Empty for .(type), which is restricted to switch guards.
+    char isTypeGuard;
+};
+
 struct expr_index {
     expr parent;
-    expr index;
+    expr index; // EXPR_TYPE_NULL denotes access to the delegated collection.
 };
 
 struct expr_composite {
