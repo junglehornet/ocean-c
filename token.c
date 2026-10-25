@@ -33,10 +33,18 @@ char *getTokenTypeStr(enum tokenType t) {
             return "TYPE";
         case STRUCT:
             return "STRUCT";
-        case INDEX:
-            return "INDEX";
         case FUNC:
             return "FUNC";
+        case RETURN:
+            return "RETURN";
+        case AMPERSAND_EQUALS:
+            return "AMPERSAND_EQUALS";
+        case BITWISE_OR_EQUALS:
+            return "BITWISE_OR_EQUALS";
+        case CASE:
+            return "CASE";
+        case DEFAULT:
+            return "DEFAULT";
         case IMPORT:
             return "IMPORT";
         case ANY:
@@ -51,8 +59,8 @@ char *getTokenTypeStr(enum tokenType t) {
             return "ENUM";
         case IF:
             return "IF";
-        case DO:
-            return "DO";
+        case DEFER:
+            return "DEFER";
         case SWITCH:
             return "SWITCH";
         case FALLTHROUGH:
@@ -65,6 +73,10 @@ char *getTokenTypeStr(enum tokenType t) {
             return "GOTO";
         case AS:
             return "AS";
+        case PACKAGE:
+            return "PACKAGE";
+        case RANGE:
+            return "RANGE";
         case LEFT_CURLY_BRACE:
             return "LEFT_CURLY_BRACE";
         case RIGHT_CURLY_BRACE:
@@ -93,6 +105,8 @@ char *getTokenTypeStr(enum tokenType t) {
             return "COLON";
         case PLUS:
             return "PLUS";
+        case ARROW:
+            return "ARROW";
         case MINUS:
             return "MINUS";
         case STAR:
@@ -122,21 +136,27 @@ char *getTokenTypeStr(enum tokenType t) {
         case GREATER_EQUALS:
             return "GREATER_EQUALS";
         case BITSHIFT_LEFT:
-            return "BITSHIFT_LEFT_EQUALS";
+            return "BITSHIFT_LEFT";
         case BITSHIFT_RIGHT:
-            return "BITSHIFT_RIGHT_EQUALS";
+            return "BITSHIFT_RIGHT";
         case BITWISE_OR:
             return "BITWISE_OR";
         case LOGICAL_OR:
             return "LOGICAL_OR";
+        case LOGICAL_AND:
+            return "LOGICAL_AND";
+        case PLUS_PLUS:
+            return "PLUS_PLUS";
+        case MINUS_MINUS:
+            return "MINUS_MINUS";
         case PLUS_EQUALS:
-            return "PLUS_EQUALS_EQUALS";
+            return "PLUS_EQUALS";
         case MINUS_EQUALS:
-            return "MINUS_EQUALS_EQUALS";
+            return "MINUS_EQUALS";
         case STAR_EQUALS:
-            return "STAR_EQUALS_EQUALS";
+            return "STAR_EQUALS";
         case SLASH_EQUALS:
-            return "SLASH_EQUALS_EQUALS";
+            return "SLASH_EQUALS";
         case MODULO_EQUALS:
             return "MODULO_EQUALS";
         case XOR_EQUALS:
@@ -157,10 +177,10 @@ char *getTokenTypeStr(enum tokenType t) {
             return "IDENTIFIER";
         case EOF_TOKEN:
             return "EOF";
-        case PACKAGE:
-            return "PACKAGE";
         case QUESTION_MARK:
             return "QUESTION";
+        case ELSE:
+            return "ELSE";
         default:
             return "???";
     }

@@ -4,6 +4,7 @@
 #include "stdio.h"
 #include <assert.h>
 #include <math.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -26,18 +27,18 @@ void printTokensFromFile(char *filename, tokenlist *list) {
 
 const enum tokenType keyword_types[] = {
     //INT, FLOAT, I8, I16, I32, U8, U16, U32, U64,
-    /*F32, STRING,*/ TYPE, STRUCT, INDEX, FUNC, IMPORT,
-    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DO,
+    /*F32, STRING,*/ TYPE, STRUCT, FUNC, IMPORT,
+    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
     SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
-    PACKAGE, WHILE, ELSE,
+    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT,
 };
 
 const char *keywords[] = {
     //"int", "float", "i8", "i16", "i32", "u8", "u16", "u32", "u64",
-    /*"f32", "string",*/ "type", "struct", "index", "func", "import",
-    "any", "interface", "continue", "break", "enum", "if", "do",
+    /*"f32", "string",*/ "type", "struct", "func", "import",
+    "any", "interface", "continue", "break", "enum", "if", "defer",
     "switch", "fallthrough", "extern", "for", "goto", "as",
-    "package", "while", "else",
+    "package", "else", "range", "return", "case", "default",
 };
 
 unsigned long hashes[NKEYWORDS] = {};
@@ -96,7 +97,6 @@ static char next_char(struct scannerState *state) {
     if (c == '\n') {
         state->column = 0;
         state->line++;
-        return next_char(state);
     }
     return c;
 }
@@ -122,6 +122,7 @@ static void scan_literal_number(struct scannerState *state);
 static void multiline_comment(struct scannerState *state);
 
 tokenlist *scanTokens(char *source, char *filename) {
+    scanning_error = 0;
     populate_keyword_hashes();
 
     tokenlist *list = (tokenlist*)malloc(sizeof(tokenlist));
@@ -129,6 +130,7 @@ tokenlist *scanTokens(char *source, char *filename) {
         printf("Error: Out of memory - Could not malloc tokenlist");
         exit(1);
     }
+    *list = (tokenlist){0};
     init_tokenlist(list);
 
     struct scannerState state;
@@ -213,7 +215,10 @@ tokenlist *scanTokens(char *source, char *filename) {
                 }
                 break;
             case '-':
-                if (peek(&state) == '=') {
+                if (peek(&state) == '>') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = ARROW, .lexeme = "->", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else if (peek(&state) == '=') {
                     next_char(&state);
                     push_tokenlist(list, (token){.type = MINUS_EQUALS, .lexeme = "-=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else if (peek(&state) == '-') {
@@ -224,7 +229,10 @@ tokenlist *scanTokens(char *source, char *filename) {
                 }
                 break;
             case '|':
-                if (peek(&state) == '|') {
+                if (peek(&state) == '=') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = BITWISE_OR_EQUALS, .lexeme = "|=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else if (peek(&state) == '|') {
                     next_char(&state);
                     push_tokenlist(list, (token){.type = LOGICAL_OR, .lexeme = "||", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else {
@@ -284,28 +292,41 @@ tokenlist *scanTokens(char *source, char *filename) {
                 }
                 break;
             case '&':
-                if (peek(&state) == '&') {
+                if (peek(&state) == '=') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = AMPERSAND_EQUALS, .lexeme = "&=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else if (peek(&state) == '&') {
                     next_char(&state);
                     push_tokenlist(list, (token){.type = LOGICAL_AND, .lexeme = "&&", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 } else {
                     push_tokenlist(list, (token){.type = AMPERSAND, .lexeme = "&", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
                 break;
-            case '\'':
-                // parse char and then push as int literal
-                ;
-                size_t quote_offset = state.offset;
-                uint16_t c = scan_literal_char(&state);
-                next_char(&state);
-                char *lexemebuf = (char*)malloc((state.offset - quote_offset + 1) * sizeof(char));
-                memcpy(lexemebuf, state.source + quote_offset, state.offset - quote_offset);
-                lexemebuf[state.offset - quote_offset + 1] = '\0';
-                if (c > 255) {
-                    push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexemebuf, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
-                } else {
-                    push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexemebuf, .numValue.integer=c, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+            case '\'': {
+                size_t start = state.offset;
+                char first = next_char(&state);
+                if (first == '\0' || first == '\n' || first == '\'') {
+                    printf("[%s:%ld:%ld]: Invalid character literal\n", filename, state.thisLine, state.thisColumn);
+                    scanning_error = 1;
+                    break;
                 }
+                uint16_t c = scan_literal_char(&state);
+                if (scanning_error) break;
+                if (next_char(&state) != '\'') {
+                    printf("[%s:%ld:%ld]: Expected closing quote after character literal\n", filename, state.thisLine, state.thisColumn);
+                    scanning_error = 1;
+                    break;
+                }
+                size_t length = state.offset - start + 1;
+                char *lexeme = malloc(length + 1);
+                assert(lexeme);
+                memcpy(lexeme, source + start, length);
+                lexeme[length] = '\0';
+                push_tokenlist(list, (token){.type = LITERAL_INT, .lexeme = lexeme,
+                    .numValue.integer = c, .line = state.thisLine,
+                    .column = state.thisColumn, .filename = filename});
                 break;
+            }
             case '?':
                 push_tokenlist(list, (token){.type = QUESTION_MARK, .lexeme = "?", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
             case ' ':
@@ -322,7 +343,9 @@ tokenlist *scanTokens(char *source, char *filename) {
                     init_charlist(&chars);
                     if (!is_alphaNumeric(currentChar)) {
                         printf("[%s:%ld:%ld]: Unexpected or invalid character: '%c'. Note: Only the characters A-Z, a-z, 0-9, and underscores are allowed in identifiers.\n", state.filename, state.line, state.column, currentChar);
-                        continue;
+                        free_charlist(&chars);
+                        scanning_error = 1;
+                        break;
                     }
                     push_charlist(&chars, currentChar);
                     while (is_alphaNumeric(peek(&state))) push_charlist(&chars, next_char(&state));
@@ -331,9 +354,11 @@ tokenlist *scanTokens(char *source, char *filename) {
                     memcpy(lexeme, chararr, chars.top);
                     lexeme[chars.top] = '\0';
                     free(chararr);
+                    free_charlist(&chars);
                     push_tokenlist(list, (token){.type = get_keyword_type(lexeme), .lexeme = lexeme, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
         }
+        if (scanning_error) goto end_loop;
     }
     
     end_loop:
@@ -343,6 +368,7 @@ tokenlist *scanTokens(char *source, char *filename) {
         exit(1);
     }
 
+    free_charlist(state.lexeme);
     return list;
 }
 
@@ -374,57 +400,28 @@ static char char_to_decimal(char c) {
 
 // scan a number at least minn characters long and up to maxn characters long with base b
 // if hex is 1, scan hex digits too, otherwise error on hex digits
-static uint16_t scan_numn(struct scannerState *state, char minn, char maxn, char b, char hex) {
-    char n = 0;
-    long value = 0;
-    char sequence[maxn];
-    char has_error;
-
-    for (char currentChar = state->source[state->offset];;currentChar = next_char(state)) {
-        if (currentChar == '\0') {
-            break;
-        }
-        
-        if (!is_digit(currentChar, 1)) {
-            if (n >= minn) {
-                break;
-            } else {
-                has_error = 1;
-            }
-        }
-
-        if (n >= maxn) {
-            break;
-        }
-        
-        sequence[n++] = currentChar;
-        if ((currentChar >= 'A' && currentChar <= 'F') || (currentChar >= 'a' && currentChar <= 'f')) {
-            if (!hex) has_error = 1;
-        }
-    }
-
-    if (has_error) {
+static uint16_t scan_numn(struct scannerState *state, char minn, char maxn, char base, char hex) {
+    unsigned value = 0;
+    size_t count = 0;
+    do {
+        char c = state->source[state->offset];
+        if (!is_digit(c, hex) || char_to_decimal(c) >= base) break;
+        value = value * base + char_to_decimal(c);
+        count++;
+        if (count == (size_t)maxn || !is_digit(peek(state), hex) ||
+            char_to_decimal(peek(state)) >= base) break;
+        next_char(state);
+    } while (1);
+    if (count < (size_t)minn || value > 255) {
+        printf("[%s:%ld:%ld]: Invalid escape sequence\n", state->filename, state->line, state->column);
         scanning_error = 1;
-        return -1;
+        return UINT16_MAX;
     }
-
-    for (char *i = sequence; i < sequence + n; i++) {
-            if (is_digit(*i, 0)) {
-                value = (*i - HEX_OFFSET) * powl(b, n - (i - sequence));
-            } else if (is_digit(*i, 1)) {
-                value += *i - CHAR_OFFSET * powl(b, n - (i - sequence));
-            } else {
-                printf("Fatal compiler error scanning number: 1\n");
-                abort();
-            }
-    }
-
-    return value;
+    return (uint16_t)value;
 }
 
 static void scan_literal_string(struct scannerState *state) {
     init_charlist(state->lexeme);
-    push_charlist(state->lexeme, '"');
 
     for (char currentChar = next_char(state);;currentChar = next_char(state)) {
         if (currentChar == '\0') {
@@ -438,7 +435,6 @@ static void scan_literal_string(struct scannerState *state) {
             return;
         }
         if (currentChar == '"') {
-            push_charlist(state->lexeme, '"');
             goto end_loop;
         }
 
@@ -450,9 +446,10 @@ static void scan_literal_string(struct scannerState *state) {
 
     end_loop:
     ;
-    token string;
-    string.column = state->column;
-    string.line = state->line;
+    push_charlist(state->lexeme, '\0');
+    token string = {0};
+    string.column = state->thisColumn;
+    string.line = state->thisLine;
     string.filename = state->filename;
     string.lexeme = to_chararray(state->lexeme);
     string.type = LITERAL_STRING;
@@ -464,12 +461,18 @@ static token scan_raw_string(struct scannerState *state) {
     init_charlist(state->lexeme);
 
     for (char currentChar = next_char(state); currentChar != '`'; currentChar = next_char(state)) {
+        if (currentChar == '\0') {
+            printf("[%s:%ld:%ld]: Unterminated raw string\n", state->filename, state->thisLine, state->thisColumn);
+            scanning_error = 1;
+            return (token){.type = EOF_TOKEN};
+        }
         push_charlist(state->lexeme, currentChar);
     }
 
-    token string;
-    string.column = state->column;
-    string.line = state->line;
+    push_charlist(state->lexeme, '\0');
+    token string = {0};
+    string.column = state->thisColumn;
+    string.line = state->thisLine;
     string.filename = state->filename;
     string.lexeme = to_chararray(state->lexeme);
     string.type = LITERAL_STRING;
@@ -478,100 +481,66 @@ static token scan_raw_string(struct scannerState *state) {
 }
 
 static void scan_literal_number(struct scannerState *state) {
-    char currentChar = state->source[state->offset];
-    const long line = state->line;
-    const long column = state->column;
-    init_charlist(state->lexeme);
-    char n = 0;
-    char base = 10;
-    // check for (and consume) 0x, 0b, 0o denoting alternate numerical format
-    if (currentChar == '0') {
+    long line = state->line, column = state->column;
+    size_t start = state->offset;
+    int base = 10;
+    if (state->source[state->offset] == '0') {
         switch (peek(state)) {
-            case 'x':
-            case 'X':
-                push_charlist(state->lexeme, currentChar);
-                push_charlist(state->lexeme, next_char(state));
-                currentChar = next_char(state);
-                base = 16;
-                break;
-            case 'b':
-            case 'B':
-                push_charlist(state->lexeme, currentChar);
-                push_charlist(state->lexeme, next_char(state));
-                currentChar = next_char(state);
-                base = 2;
-                break;
-            case 'o':
-            case 'O':
-                push_charlist(state->lexeme, currentChar);
-                push_charlist(state->lexeme, next_char(state));
-                currentChar = next_char(state);
-                base = 8;
-                break;
-            default:
-                //n++;
+            case 'x': case 'X': base = 16; break;
+            case 'b': case 'B': base = 2; break;
+            case 'o': case 'O': base = 8; break;
         }
+        if (base != 10) { next_char(state); next_char(state); }
     }
-
-    // collect chars into array
-    charlist num = {0};
-    char err = 0;
-    char floating = 0;
-    
-    init_charlist(&num);
-    while (is_digit(currentChar, 1)) {
-        n++;
-        if (char_to_decimal(currentChar) >= base) {
-            printf("[%s:%ld:%ld] Error: digit %c is invalid for a number with base %hhu\n", state->filename, state->line, state->column, currentChar, base);
-            err = 1;
+    long integer = 0;
+    size_t digits = 0;
+    while (is_digit(state->source[state->offset], 1)) {
+        int digit = char_to_decimal(state->source[state->offset]);
+        if (digit >= base || integer > (LONG_MAX - digit) / base) {
+            printf("[%s:%ld:%ld]: invalid numeric digit or integer overflow\n", state->filename, line, column);
             scanning_error = 1;
-            break;
+            return;
         }
-        push_charlist(&num, currentChar);
-        push_charlist(state->lexeme, currentChar);        
-        if (is_digit(peek(state), 1)) currentChar = next_char(state);
-        else break;
-    }
-    
-    if (peek(state) == '.') {
+        integer = integer * base + digit;
+        digits++;
+        if (!is_digit(peek(state), 1)) break;
         next_char(state);
-        floating = 1;
-        push_charlist(&num, currentChar);
-
-        do {
-            if (char_to_decimal(currentChar) >= base) {
-                printf("[%s:%ld:%ld] Error: digit %c is invalid for a number with base %hhu\n", state->filename, state->line, state->column, currentChar, base);
-                err = 1;
-                scanning_error = 1;
-                break;
-            }
-            push_charlist(&num, currentChar);
-            push_charlist(state->lexeme, currentChar);        
-            currentChar = next_char(state);
-        } while (is_digit(peek(state), 1));
     }
-    
-    if (err) {
-        push_tokenlist(state->list, (token){.type = LITERAL_INT, .lexeme = to_chararray(state->lexeme), .numValue.integer = 0, .line = state->line, .column = state->column, .filename = state->filename});
+    if (!digits) {
+        printf("[%s:%ld:%ld]: Expected numeric digit after base prefix\n", state->filename, line, column);
+        scanning_error = 1;
         return;
     }
-
-    // parse out number from chars
-    double value = 0;
-
-    for (size_t i = 0; i < num.top; i++) {
-        if (get_charlist(&num, i) == '.') continue;
-        n--;
-        value += char_to_decimal(get_charlist(&num, i)) * powl(base, n);
+    double value = (double)integer;
+    char floating = 0;
+    if (peek(state) == '.' && is_digit(state->source[state->offset + 2], base == 16)) {
+        floating = 1;
+        next_char(state);
+        next_char(state);
+        double divisor = base;
+        do {
+            int digit = char_to_decimal(state->source[state->offset]);
+            if (digit >= base) {
+                printf("[%s:%ld:%ld]: invalid numeric digit\n", state->filename, line, column);
+                scanning_error = 1;
+                return;
+            }
+            value += digit / divisor;
+            divisor *= base;
+            if (!is_digit(peek(state), 1)) break;
+            next_char(state);
+        } while (1);
     }
-
-    if (floating) {
-        push_tokenlist(state->list, (token){.type = LITERAL_FLOAT, .lexeme = to_chararray(state->lexeme), .numValue.floating = value, .line = line, .column = column, .filename = state->filename});
-    } else {    
-        push_tokenlist(state->list, (token){.type = LITERAL_INT, .lexeme = to_chararray(state->lexeme), .numValue.integer = (long) value, .line = line, .column = column, .filename = state->filename});
-    }
-    init_charlist(state->lexeme);
-    return;
+    size_t length = state->offset - start + 1;
+    char *lexeme = malloc(length + 1);
+    assert(lexeme);
+    memcpy(lexeme, state->source + start, length);
+    lexeme[length] = '\0';
+    token result = {.type = floating ? LITERAL_FLOAT : LITERAL_INT, .lexeme = lexeme,
+        .line = line, .column = column, .filename = state->filename};
+    if (floating) result.numValue.floating = value;
+    else result.numValue.integer = integer;
+    push_tokenlist(state->list, result);
 }
 
 static uint16_t scan_literal_char(struct scannerState *state) {
@@ -602,18 +571,8 @@ static uint16_t scan_literal_char(struct scannerState *state) {
                 SIMPLE_ESCAPE_SEQUENCE('?', '?')
                 SIMPLE_ESCAPE_SEQUENCE('\n', '\n')
                 case 'x':
-                    ;
-                    size_t xoffset = state->offset;
                     next_char(state);
-                    uint16_t num = scan_numn(state, 2, 2, 16, 1);
-                    if (num > 255) {
-                        char errbuf[state->offset - xoffset + 1];
-                        memcpy(errbuf, state->source + xoffset, state->offset - xoffset);
-                        errbuf[state->offset - xoffset + 1] = '\0';
-                        printf("[%s:%ld:%ld] Error: invalid escape sequence '\\%s'\n", state->filename, state->line, state->column, errbuf);
-                        return -1;
-                    }
-                    return num;
+                    return scan_numn(state, 2, 2, 16, 1);
                 case 'u':
                     printf("[%s:%ld:%ld] Warning: ocean-c does not support unicode yet and \\u is ignored.\n", state->filename, state->line, state->column);
                     return 'u';
@@ -621,18 +580,7 @@ static uint16_t scan_literal_char(struct scannerState *state) {
                     printf("[%s:%ld:%ld] Warning: ocean-c does not support unicode yet and \\U is ignored.\n", state->filename, state->line, state->column);
                     return 'U';
                 default:
-                    ;
-                    size_t firstoffset = state->offset;
-                    next_char(state);
-                    uint16_t octal = scan_numn(state, 1, 3, 8, 0);
-                    if (octal > 255) {
-                        char errbuf[state->offset - firstoffset + 1];
-                        memcpy(errbuf, state->source + firstoffset,  state->offset - firstoffset);
-                        errbuf[state->offset - firstoffset + 1] = '\0';
-                        printf("[%s:%ld:%ld] Error: invalid escape sequence '\\%s'\n", state->filename, state->line, state->column, errbuf);
-                        return -1;
-                    }
-                    return octal;
+                    return scan_numn(state, 1, 3, 8, 0);
             }
         default:
             return currentChar;
@@ -648,8 +596,8 @@ static void multiline_comment(struct scannerState *state) {
                     printf("Syntax errors encountered during scanning, quitting.\n");
                     exit(1);
                 } else {
-                    state->offset--;
-                    state->column--;
+                    printf("[%s:%ld:%ld]: Unterminated block comment\n", state->filename, state->thisLine, state->thisColumn);
+                    scanning_error = 1;
                     return;
                 }
             case '\n':

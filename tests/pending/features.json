@@ -1,0 +1,869 @@
+{
+  "version": 1,
+  "features": [
+    {
+      "id": "angle_generics",
+      "stage": "parser",
+      "reason": "The historical fixture uses angle brackets; bracketed generics already work.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "struct",
+          "source": "struct Box<T: any> { T value; }",
+          "check": "generic_struct"
+        },
+        {
+          "id": "interface",
+          "source": "interface Reader<T: any> { Read() T; }",
+          "check": "generic_interface"
+        },
+        {
+          "id": "function",
+          "source": "func identity<T: any>(T value) T { return value; }",
+          "check": "generic_function"
+        },
+        {
+          "id": "nested_type",
+          "source": "type Nested Box<Box<int>>;",
+          "check": "accept"
+        }
+      ]
+    },
+    {
+      "id": "empty_index",
+      "stage": "parser",
+      "reason": "The self[] delegation expression in structEtc.oc is unsupported.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "expression",
+          "source": "self[];",
+          "check": "empty_index"
+        },
+        {
+          "id": "method",
+          "source": "struct Values { index []int data; +() { use(self[].length); } }",
+          "check": "accept"
+        }
+      ]
+    },
+    {
+      "id": "switch_initializers",
+      "stage": "parser",
+      "reason": "Switch currently has no initializer slot or grammar.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "declaration",
+          "source": "func f() { switch (x := next(); x) { case 1: return; default: return; } }",
+          "check": "accept"
+        },
+        {
+          "id": "expression",
+          "source": "switch (prepare(); value) { case 1: break; }",
+          "check": "accept"
+        }
+      ]
+    },
+    {
+      "id": "type_switches",
+      "stage": "parser",
+      "reason": "Type assertions and type-switch clauses need language/AST design.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "binding",
+          "source": "func f(any value) { switch (item := value.(type)) { case int: use(item); default: return; } }",
+          "check": "accept"
+        },
+        {
+          "id": "unbound",
+          "source": "func f(any value) { switch (value.(type)) { case string: return; } }",
+          "check": "accept"
+        }
+      ]
+    },
+    {
+      "id": "anonymous_generics",
+      "stage": "parser",
+      "reason": "Anonymous function parsing currently skips type parameters.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "literal",
+          "source": "identity := func[T any](T value) T { return value; };",
+          "check": "anonymous_generics"
+        }
+      ]
+    },
+    {
+      "id": "semicolon_insertion",
+      "stage": "parser",
+      "reason": "The scanner/parser currently requires explicit statement separators.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "declarations",
+          "source": "package main\nfunc main() {\n x := 1\n use(x)\n}\n",
+          "check": "accept"
+        },
+        {
+          "id": "branches",
+          "source": "func f() {\n for (;;) {\n break\n }\n return\n}\n",
+          "check": "accept"
+        }
+      ]
+    },
+    {
+      "id": "standalone_instantiation",
+      "stage": "parser",
+      "reason": "Generic function values currently have an indexing AST.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "function_value",
+          "source": "identity[int];",
+          "check": "standalone_instantiation"
+        },
+        {
+          "id": "qualified_value",
+          "source": "callback := pkg.identity[int];",
+          "check": "standalone_instantiation"
+        }
+      ]
+    },
+    {
+      "id": "function_type_ambiguity",
+      "stage": "parser",
+      "reason": "The bare-result function type conflicts with the existing named-parameter rule; this fixture proposes the alternative.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "bare_result",
+          "source": "func accepts(func() int) {}",
+          "check": "unnamed_function_type"
+        }
+      ]
+    },
+    {
+      "id": "unicode",
+      "stage": "scanner",
+      "reason": "Unicode escapes, UTF-8 string bytes, and non-ASCII identifiers are incomplete.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "short_escape",
+          "source": "\"\\u03A9\"",
+          "check": "omega"
+        },
+        {
+          "id": "long_escape",
+          "source": "\"\\U0001F30A\"",
+          "check": "wave"
+        },
+        {
+          "id": "utf8_string",
+          "source": "\"Ω\"",
+          "check": "omega"
+        },
+        {
+          "id": "identifier",
+          "source": "α",
+          "check": "unicode_identifier",
+          "missing_diagnostic": "Unexpected or invalid character"
+        },
+        {
+          "id": "invalid_escape",
+          "source": "\"\\uZZZZ\"",
+          "check": "reject",
+          "rejection_diagnostic": "[Uu]nicode|escape"
+        }
+      ]
+    },
+    {
+      "id": "scientific_numbers",
+      "stage": "scanner",
+      "reason": "Exponent notation is not recognized by the numeric scanner.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "exponent",
+          "source": "1.25e2",
+          "check": "exponent",
+          "missing_diagnostic": "invalid numeric digit"
+        }
+      ]
+    },
+    {
+      "id": "debug_printer",
+      "stage": "debug",
+      "reason": "Newer expression nodes still abort in the debug AST printer.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "member",
+          "source": "point.x;",
+          "check": "accept",
+          "stdout": "(DOT point x)"
+        },
+        {
+          "id": "index",
+          "source": "xs[0];",
+          "check": "accept",
+          "stdout": "(INDEX xs 0)"
+        },
+        {
+          "id": "cast",
+          "source": "x->int;",
+          "check": "accept",
+          "stdout": "(TYPECAST x int)"
+        },
+        {
+          "id": "function",
+          "source": "callback := func() {};",
+          "check": "accept",
+          "stdout": "(FUNCTION"
+        },
+        {
+          "id": "composite",
+          "source": "Point{x: 1};",
+          "check": "accept",
+          "stdout": "(COMPOSITE"
+        },
+        {
+          "id": "instantiation",
+          "source": "identity[int](1);",
+          "check": "accept",
+          "stdout": "(INSTANTIATION"
+        }
+      ]
+    },
+    {
+      "id": "imports",
+      "stage": "semantic",
+      "reason": "Import parsing does not load packages or validate their paths/exports.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "load_package",
+          "source": "package main; import \"example/math\" as m; func use(any value) {} func main() { use(m.Answer); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "import_value": 42
+            }
+          },
+          "files": {
+            "main.oc": "package main; import \"example/math\" as m; func use(any value) {} func main() { use(m.Answer); }",
+            "math/math.oc": "package math; Answer := 42;"
+          }
+        },
+        {
+          "id": "missing_package",
+          "source": "import \"missing/package\";",
+          "expected": {
+            "ok": false,
+            "diagnostic": "unresolved_import"
+          }
+        },
+        {
+          "id": "missing_export",
+          "source": "import \"example/math\" as m; func use(any value) {} func main() { use(m.Missing); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "unresolved_export"
+          },
+          "files": {
+            "main.oc": "import \"example/math\" as m; func use(any value) {} func main() { use(m.Missing); }",
+            "math/math.oc": "package math; Answer := 42;"
+          }
+        }
+      ]
+    },
+    {
+      "id": "module_discovery",
+      "stage": "semantic",
+      "reason": "No module/root discovery or package search policy exists; marker spelling is proposed.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "ancestor_root",
+          "source": "package main; func main() {}",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "module_root": "project"
+            }
+          },
+          "entry": "project/main.oc",
+          "working_directory": "project/nested",
+          "files": {
+            "project/ocean.mod": "module example/app\n",
+            "project/main.oc": "package main; func main() {}",
+            "project/nested/.keep": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "symbol_binding",
+      "stage": "semantic",
+      "reason": "There is no resolver for declarations, uses, or lexical scopes.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "undeclared",
+          "source": "func main() { missing(); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "unresolved_symbol"
+          }
+        },
+        {
+          "id": "shadowing",
+          "source": "func use(any value) {} func main() { x := 1; { x := \"inner\"; use(x); } use(x); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "use_types": [
+                "string",
+                "int"
+              ]
+            }
+          }
+        },
+        {
+          "id": "duplicate",
+          "source": "func main() { x := 1; x := 2; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "duplicate_symbol"
+          }
+        }
+      ]
+    },
+    {
+      "id": "type_checking",
+      "stage": "semantic",
+      "reason": "Assignments, calls, casts, and composite entries are not type checked.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "assignment",
+          "source": "func main() { value: int = \"text\"; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "type_mismatch"
+          }
+        },
+        {
+          "id": "call_arity",
+          "source": "func takes(int x) {} func main() { takes(); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "argument_count"
+          }
+        },
+        {
+          "id": "call_type",
+          "source": "func takes(int x) {} func main() { takes(\"text\"); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "argument_type"
+          }
+        },
+        {
+          "id": "cast",
+          "source": "func main() { value := Point{}->int; } struct Point {}",
+          "expected": {
+            "ok": false,
+            "diagnostic": "invalid_conversion"
+          }
+        },
+        {
+          "id": "composite",
+          "source": "struct Point { int x; } func main() { value := Point{x: \"text\"}; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "field_type"
+          }
+        }
+      ]
+    },
+    {
+      "id": "generic_instantiation",
+      "stage": "semantic",
+      "reason": "Generic syntax is retained but substitution, arity, and constraints are not enforced.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "substitution",
+          "source": "func identity[T any](T value) T { return value; } func main() { x := identity[int](1); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "x_type": "int"
+            }
+          }
+        },
+        {
+          "id": "arity",
+          "source": "func identity[T any](T value) T { return value; } func main() { identity[int, string](1); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "type_argument_count"
+          }
+        },
+        {
+          "id": "constraint",
+          "source": "func number[T ~int](T value) T { return value; } func main() { number[string](\"text\"); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "constraint_violation"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ambiguous_calls",
+      "stage": "semantic",
+      "reason": "The resolver must distinguish a type argument from a value index in a[i](x).",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "indexed_callable",
+          "source": "func main() { callbacks := {func(int x) int { return x; }}; i := 0; result := callbacks[i](1); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "call_kind": "indexed_call"
+            }
+          }
+        },
+        {
+          "id": "generic_callable",
+          "source": "func identity[T any](T value) T { return value; } func main() { identity[int](1); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "call_kind": "generic_call"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "generic_function_values",
+      "stage": "semantic",
+      "reason": "A standalone generic function value must resolve to an instantiated callable.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "callable",
+          "source": "func identity[T any](T value) T { return value; } func main() { f := identity[int]; result := f(1); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "f_type": "func(int) int",
+              "result_type": "int"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "type_dimension_resolution",
+      "stage": "semantic",
+      "reason": "Bracket token spans do not distinguish dimensions from type arguments.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "dimension",
+          "source": "N := 4; type Vector int[N];",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "Vector_kind": "array",
+              "Vector_length": 4
+            }
+          }
+        },
+        {
+          "id": "type_argument",
+          "source": "struct Box[T any] { T value; } type IntBox Box[int];",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "IntBox_kind": "struct",
+              "value_type": "int"
+            }
+          }
+        },
+        {
+          "id": "reserved_type",
+          "source": "struct Box[T any] { T value; } type Bad Box[index];",
+          "expected": {
+            "ok": false,
+            "diagnostic": "reserved_type_name"
+          }
+        }
+      ]
+    },
+    {
+      "id": "constant_evaluation",
+      "stage": "semantic",
+      "reason": "Dimension grammar is validated but expressions are not evaluated.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "fold",
+          "source": "type Array [2 * (3 + 1)]int;",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "Array_length": 8
+            }
+          }
+        },
+        {
+          "id": "negative_dimension",
+          "source": "type Array [-1]int;",
+          "expected": {
+            "ok": false,
+            "diagnostic": "invalid_array_length"
+          }
+        },
+        {
+          "id": "nonconstant",
+          "source": "func next() int { return 1; } func main() { n := next(); value: int[n]; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "nonconstant_array_length"
+          }
+        }
+      ]
+    },
+    {
+      "id": "enum_values",
+      "stage": "semantic",
+      "reason": "Implicit enumeration values are stored as NULL rather than assigned.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "implicit_and_explicit",
+          "source": "enum Color { RED, GREEN = 4, BLUE, }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "RED": 0,
+              "GREEN": 4,
+              "BLUE": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "return_checking",
+      "stage": "semantic",
+      "reason": "Return count/types and missing required returns are unchecked.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "arity",
+          "source": "func pair() (int, string) { return 1; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "return_count"
+          }
+        },
+        {
+          "id": "type",
+          "source": "func value() int { return \"text\"; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "return_type"
+          }
+        },
+        {
+          "id": "missing",
+          "source": "func value() int {}",
+          "expected": {
+            "ok": false,
+            "diagnostic": "missing_return"
+          }
+        },
+        {
+          "id": "named_results",
+          "source": "func value() (int result) { result = 1; return; }",
+          "expected": {
+            "ok": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "label_resolution",
+      "stage": "semantic",
+      "reason": "Labels parse, but target existence, kind, and function scope are unchecked.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "unknown_goto",
+          "source": "func f() { goto missing; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "unknown_label"
+          }
+        },
+        {
+          "id": "wrong_continue_target",
+          "source": "func f() { block: {} for (;;) { continue block; } }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "invalid_continue_target"
+          }
+        },
+        {
+          "id": "cross_function",
+          "source": "func f() { done: ; callback := func() { goto done; }; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "unknown_label"
+          }
+        },
+        {
+          "id": "duplicate",
+          "source": "func f() { done: ; done: ; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "duplicate_label"
+          }
+        },
+        {
+          "id": "forward_target",
+          "source": "func f() { goto done; done: return; }",
+          "expected": {
+            "ok": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "extern_linkage",
+      "stage": "semantic",
+      "reason": "Extern signatures parse but there is no linker or external symbol binding.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "resolve",
+          "source": "extern func external(int value) int; func main() { x := external(1); }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "external_symbol": "external"
+            }
+          },
+          "extern_symbols": {
+            "external": "func(int) int"
+          }
+        },
+        {
+          "id": "missing",
+          "source": "extern func missing(); func main() { missing(); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "unresolved_extern"
+          },
+          "extern_symbols": {}
+        }
+      ]
+    },
+    {
+      "id": "struct_value_application",
+      "stage": "semantic",
+      "reason": "Value parameters are retained but not applied or substituted; application syntax is proposed.",
+      "syntax": "proposed",
+      "cases": [
+        {
+          "id": "substitution",
+          "source": "struct Matrix[T any](u64 width, height) { T[height][width] data; } type M Matrix[int](3, 2);",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "M_data_dimensions": [
+                2,
+                3
+              ]
+            }
+          }
+        },
+        {
+          "id": "arity",
+          "source": "struct Buffer(u64 size) { byte[size] data; } type B Buffer();",
+          "expected": {
+            "ok": false,
+            "diagnostic": "value_argument_count"
+          }
+        },
+        {
+          "id": "type",
+          "source": "struct Buffer(u64 size) { byte[size] data; } type B Buffer(\"large\");",
+          "expected": {
+            "ok": false,
+            "diagnostic": "value_argument_type"
+          }
+        }
+      ]
+    },
+    {
+      "id": "operator_resolution",
+      "stage": "semantic",
+      "reason": "Overload selection and operator signature validation are not implemented.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "selection",
+          "source": "struct Number { int value; +(int rhs) Number { return self; } +(string rhs) string { return rhs; } } func main() { n := Number{value: 1}; result := n + 2; }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "result_type": "Number",
+              "selected_rhs_type": "int"
+            }
+          }
+        },
+        {
+          "id": "duplicate",
+          "source": "struct Number { +(int rhs) int { return rhs; } +(int rhs) int { return rhs; } }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "duplicate_operator_signature"
+          }
+        },
+        {
+          "id": "arity",
+          "source": "struct Number { *(int x, int y) int { return x; } }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "invalid_operator_arity"
+          }
+        },
+        {
+          "id": "result",
+          "source": "struct Number { ==(Number other) int { return 1; } }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "invalid_operator_result"
+          }
+        }
+      ]
+    },
+    {
+      "id": "custom_constraints",
+      "stage": "semantic",
+      "reason": "Membership and infix requirements are parsed but have no type-set semantics.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "exclude",
+          "source": "struct Matrix {} interface Scalar { -Matrix; } func takes[T Scalar](T value) {} func main() { takes[Matrix](Matrix{}); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "constraint_violation"
+          }
+        },
+        {
+          "id": "require",
+          "source": "struct Required {} interface Exact { =Required; } func takes[T Exact](T value) {} func main() { takes[int](1); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "constraint_violation"
+          }
+        },
+        {
+          "id": "permit",
+          "source": "struct Optional {} interface Allowed { +Optional; } func takes[T Allowed](T value) {} func main() { takes[Optional](Optional{}); }",
+          "expected": {
+            "ok": true
+          }
+        },
+        {
+          "id": "operator",
+          "source": "struct Opaque {} interface Multiply { self * int; } func takes[T Multiply](T value) {} func main() { takes[Opaque](Opaque{}); }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "missing_required_operator"
+          }
+        }
+      ]
+    },
+    {
+      "id": "index_delegation",
+      "stage": "semantic",
+      "reason": "Delegated field existence is checked, but indexability is not.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "not_indexable",
+          "source": "struct Broken { index int value; }",
+          "expected": {
+            "ok": false,
+            "diagnostic": "not_indexable"
+          }
+        },
+        {
+          "id": "element_type",
+          "source": "struct Values { index []int data; } func main() { values: Values; x := values[0]; }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "x_type": "int"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "cleanup",
+      "stage": "ownership",
+      "reason": "There is no complete AST/token destruction API, including failed parse trees.",
+      "syntax": "existing",
+      "cases": [
+        {
+          "id": "success",
+          "source": "struct Box[T any] { T value; } func f() { x := Box[int]{value: 1}; }",
+          "expected": {
+            "ok": true,
+            "facts": {
+              "live_allocations": 0,
+              "cleanup_available": true
+            }
+          }
+        },
+        {
+          "id": "recovery",
+          "source": "func broken(int x int y) {} func good() {}",
+          "expected": {
+            "ok": false,
+            "facts": {
+              "live_allocations": 0,
+              "cleanup_available": true
+            }
+          }
+        },
+        {
+          "id": "partial_operator",
+          "source": "struct Broken { int value; +(int other) { return; } +(int other); }",
+          "expected": {
+            "ok": false,
+            "facts": {
+              "live_allocations": 0,
+              "cleanup_available": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

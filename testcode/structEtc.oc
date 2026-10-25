@@ -1,0 +1,61 @@
+package main;
+
+import (
+	"io",
+	"random",
+);
+
+func main() {
+	io.Println("Hello, world!");
+	x := random.RandInt(0, 11);
+	io.Printf("A random number between 0 and 10: %d\n", x);
+}
+
+struct Color {
+	u8 red;
+	u8 green;
+	u8 blue;
+	u8 alpha;
+}
+
+enum MazeObjType {
+	PLAYER = 0, WALL, TRAP, NONE,
+}
+
+struct MazeObj {
+	Color dispColor;
+	MazeObjType type;
+}
+
+interface MatrixScalar<T: any> {
+	// this specifies that a MatrixScalar can not be a Matrix.
+	-Matrix;
+	// to specify that a MatrixScalar *must* be a Matrix, you could say
+	// =Matrix
+	// or, to specify that a MatrixScalar *can* be a Matrix, you could say
+	// +Matrix
+	// these examples also work with other interfaces?
+
+	// this specifies that a MatrixScalar must have the * operator defined
+	// for an other type of T
+	self * T;
+	// to specify that the + operator is defined for a this type of T and
+	// an other type of MatrixScalar you could say
+	// T + self;
+}
+
+struct Matrix<T: any> (u64 width, height) {
+	index T[height][width] underlying;
+	// or, underlying can be declared normally and then on another line you can write:
+	// index underlying;
+
+	* (MatrixScalar<T> other) {
+		for (u64 row = 0; row < self[].length; row++) {
+			for (u64 col = 0; col < self[0].length; col++) {
+				self[row][col] *= other;
+			}
+		}
+	}
+}
+
+type Maze Matrix<MazeObj>

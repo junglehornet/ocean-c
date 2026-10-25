@@ -2,27 +2,46 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
 
 // this file contains quick-and-dirty code to print out an AST in the notation of (operator operands...)
 // this is incomplete, unsafe, and not memory-efficient code that is prone to crash so NEVER CALL IN PRODUCTION
 
+// Each result is owned by the caller, including identifiers. Size buffers to
+// the actual output so nested trees and long literals do not overflow.
+static char *format_ast(const char *format, ...) {
+    va_list args, copy;
+    va_start(args, format);
+    va_copy(copy, args);
+    int length = vsnprintf(NULL, 0, format, copy);
+    va_end(copy);
+    if (length < 0) abort();
+    char *result = malloc((size_t)length + 1);
+    if (!result) abort();
+    vsnprintf(result, (size_t)length + 1, format, args);
+    va_end(args);
+    return result;
+}
+
 static char* stringOf(expr e) {
     if (e.type == EXPR_TYPE_LITERAL) {
-        char *str = malloc(10240);
+        char *str = NULL;
         switch ((*(struct expr_literal*)e.underlying).type) {
             case LITERAL_TYPE_INT:
-                sprintf(str, "%ld", *(long*)((struct expr_literal*)e.underlying)->value);
+                str = format_ast("%ld", *(long*)((struct expr_literal*)e.underlying)->value);
                 break;
             case LITERAL_TYPE_FLOAT:
-                sprintf(str, "%lf", *(double*)((struct expr_literal*)e.underlying)->value);
+                str = format_ast("%lf", *(double*)((struct expr_literal*)e.underlying)->value);
                 break;
             case LITERAL_TYPE_STRING:
-                sprintf(str, "\"%s\"", (char*)((struct expr_literal*)e.underlying)->value);
+                str = format_ast("\"%s\"", (char*)((struct expr_literal*)e.underlying)->value);
                 break;
         }
         return str;
     }
-    if (e.type == EXPR_TYPE_IDENTIFIER) return (*(struct expr_identifier*)e.underlying).lexeme.lexeme;
+    if (e.type == EXPR_TYPE_IDENTIFIER)
+        return format_ast("%s", ((struct expr_identifier*)e.underlying)->lexeme.lexeme);
     char* type = "[UNKNOWN TYPE]";
     if (e.type == EXPR_TYPE_UNARY) {
         struct expr_unary unary = *(struct expr_unary*)e.underlying;
@@ -58,19 +77,17 @@ static char* stringOf(expr e) {
                 type = "PREFIX_DECREMENT";
                 break;
         }
-        char *str = malloc(10240);
         char *child = stringOf(unary.child);
-        sprintf(str, "(%s %s)", type, child);
+        char *str = format_ast("(%s %s)", type, child);
         free(child);
         return str;
     }
     if (e.type == EXPR_TYPE_TERNARY) {
         struct expr_ternary ternary = *(struct expr_ternary*)e.underlying;
-        char *str = malloc(10240);
         char *condition = stringOf(ternary.condition);
         char *ifTrue = stringOf(ternary.ifTrue);
         char *ifFalse = stringOf(ternary.ifFalse);
-        sprintf(str, "(TERNARY %s %s %s)", condition, ifTrue, ifFalse);
+        char *str = format_ast("(TERNARY %s %s %s)", condition, ifTrue, ifFalse);
         free(condition);
         free(ifTrue);
         free(ifFalse);
@@ -78,18 +95,18 @@ static char* stringOf(expr e) {
     }
     if (e.type == EXPR_TYPE_CALL) {
         struct expr_call call = *(struct expr_call*)e.underlying;
-        char *str = malloc(10240);
-        char *funName = stringOf(call.func);
-        char **params = calloc(call.nParams, sizeof(char*));
+        char *func = stringOf(call.func);
+        char *str = format_ast("(FUNCTION_CALL %s", func);
+        free(func);
         for (size_t i = 0; i < call.nParams; i++) {
-            params[i] = stringOf(call.params[i]);
+            char *param = stringOf(call.params[i]);
+            char *next = format_ast("%s %s", str, param);
+            free(str); free(param);
+            str = next;
         }
-        sprintf(str, "(FUNCTION_CALL %s %s)", funName, params[0]);
-        free(funName);
-        for (size_t i = 0; i < call.nParams; i++) {
-            free(params[i]);
-        }
-        free(params);
+        char *next = format_ast("%s)", str);
+        free(str);
+        str = next;
         return str;
     }
     if (e.type != EXPR_TYPE_BINARY) {
@@ -98,6 +115,12 @@ static char* stringOf(expr e) {
     }
     struct expr_binary binary = *(struct expr_binary*)e.underlying;
     switch (binary.operation) {
+        case EXPR_BITWISE_AND_EQUALS:
+            type = "BITWISE_AND_EQUALS";
+            break;
+        case EXPR_BITWISE_OR_EQUALS:
+            type = "BITWISE_OR_EQUALS";
+            break;
         case EXPR_ADD:
             type = "ADD";
             break;
@@ -186,10 +209,9 @@ static char* stringOf(expr e) {
             type = "ASSIGNMENT";
             break;
     }
-    char *str = malloc(10240);
     char *left = stringOf(binary.left);
     char *right = stringOf(binary.right);
-    sprintf(str, "(%s %s %s)", type, left, right);
+    char *str = format_ast("(%s %s %s)", type, left, right);
     free(left);
     free(right);
     return str;

@@ -4,15 +4,15 @@
 enum tokenType {
     // keywords and types
     /*INT, FLOAT, I8, I16, I32, U8, U16, U32, U64,
-    F32, STRING,*/ TYPE, STRUCT, INDEX, FUNC, IMPORT,
-    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DO,
+    F32, STRING,*/ TYPE, STRUCT, FUNC, IMPORT,
+    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
     SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
-    PACKAGE, WHILE, ELSE,
+    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT,
 
     // symbols
     LEFT_CURLY_BRACE, RIGHT_CURLY_BRACE, LEFT_PAREN, RIGHT_PAREN,
     LEFT_BRACKET, RIGHT_BRACKET, UNDERSCORE, SEMICOLON,
-    BACKTICK, COMMA, DOT, COLON, QUESTION_MARK,
+    BACKTICK, COMMA, DOT, COLON, QUESTION_MARK, ARROW,
 
     // operators
     PLUS, MINUS, STAR, SLASH, MODULO, XOR, AMPERSAND,
@@ -24,7 +24,7 @@ enum tokenType {
     // assignment operators
     TOKEN_SPECIAL_ASSIGN_START, // denotes start of assignment operators
     EQUALS, PLUS_EQUALS, MINUS_EQUALS, STAR_EQUALS, SLASH_EQUALS,
-    MODULO_EQUALS, XOR_EQUALS, TILDE_EQUALS,
+    MODULO_EQUALS, XOR_EQUALS, TILDE_EQUALS, AMPERSAND_EQUALS, BITWISE_OR_EQUALS,
     BITSHIFT_LEFT_EQUALS, BITSHIFT_RIGHT_EQUALS,
     TOKEN_SPECIAL_ASSIGN_END, // denotes end of assignment operators (for purposes of expression parsing)
     // also assignment operators, but carry a different operator precedence so they are not between 1024 and 2048

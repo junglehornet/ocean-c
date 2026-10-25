@@ -22,6 +22,7 @@ enum binaryExprType {
     EXPR_ADD_EQUALS, EXPR_SUBTRACT_EQUALS, EXPR_MULTIPLY_EQUALS,
     EXPR_DIVIDE_EQUALS, EXPR_MODULO_EQUALS, EXPR_XOR_EQUALS,
     EXPR_BITSHIFT_LEFT_EQUALS, EXPR_BITSHIFT_RIGHT_EQUALS,
+    EXPR_BITWISE_AND_EQUALS, EXPR_BITWISE_OR_EQUALS,
 
     // other
     EXPR_COMMA, EXPR_ASSIGNMENT,
@@ -37,7 +38,9 @@ enum unaryExprType {
 enum stmtType {
     STMT_NULL = 0,
     STMT_PACKAGE, STMT_IMPORT, STMT_VAR, STMT_STRUCT, STMT_INTERFACE,
-    STMT_FUNC, STMT_IF, STMT_WHILE, STMT_EXPR, STMT_BLOCK,
+    STMT_FUNC, STMT_IF, STMT_EXPR, STMT_BLOCK, STMT_FOR, STMT_RETURN,
+    STMT_TYPE, STMT_ENUM, STMT_BREAK, STMT_CONTINUE, STMT_GOTO,
+    STMT_LABEL, STMT_DEFER, STMT_SWITCH, STMT_FALLTHROUGH,
 };
 
 typedef struct stmt {
@@ -52,6 +55,11 @@ struct stmt_block {
 
 typedef struct expr expr;
 
+struct stmt_return {
+    size_t nValues;
+    expr *values;
+};
+
 struct stmt_package {
     char *name;
 };
@@ -63,25 +71,76 @@ struct stmt_import {
 
 struct stmt_var {
     typeTokens type;
-    token var;
-    expr *initValue;
+    size_t nVars;
+    token *vars;
+    size_t nInitValues;
+    expr *initValues;
 };
 
 struct stmt_struct {
+    token name;
+    token indexField; // Field delegated to by []; EOF_TOKEN if none is designated.
     size_t nTypeParams;
-    token *typeParamInterfaces;
+    typeTokens *typeParamConstraints;
     token *typeParamNames;
     size_t nVarParams;
-    char **varParamTypes;
-    char **varParamNames;
+    typeTokens *varParamTypes; // Complete type spans, one per value parameter.
+    token *varParamNames;
 
+    size_t nOperatorMethods;
+    struct stmt_func *operatorMethods; // name holds the operator token; receiver is implicit self.
     size_t nFields;
     typeTokens *fieldTypes;
     token *fieldNames;
 };
 
+struct stmt_type {
+    token name;
+    typeTokens underlying;
+    char isAlias;
+};
+
+struct stmt_enum {
+    token name;
+    size_t nMembers;
+    token *names;
+    expr **values; // NULL entries use the language's implicit enumeration value.
+};
+
+struct stmt_branch {
+    token label; // EOF_TOKEN for an unlabeled break/continue.
+};
+
+struct stmt_label {
+    token name;
+    stmt *body;
+};
+
+struct stmt_defer {
+    expr *call;
+};
+
+struct switch_case {
+    size_t nValues; // Zero for default.
+    expr *values;
+    struct stmt_block body;
+};
+
+struct stmt_switch {
+    expr *value; // NULL for a condition-only switch.
+    size_t nCases;
+    struct switch_case *cases;
+};
+
 struct stmt_interface {
     token name;
+    size_t nTypeParams;
+    token *typeParamNames;
+    typeTokens *typeParamConstraints;
+    size_t nConstraints;
+    typeTokens *constraints; // One span per embedded type/union, excluding ';'.
+    size_t nMethods;
+    struct stmt_func *methods;
     struct methodSignature {
         token name;
         typeTokens returnType;
@@ -94,12 +153,24 @@ struct stmt_interface {
 };
 
 struct stmt_func {
-    typeTokens type;
+    typeTokens type; // Complete result syntax, including parentheses when present.
     token name;
+    token receiverName; // EOF_TOKEN when this is not a method.
+    typeTokens receiverType;
 
     size_t nParams;
     token *paramNames;
     typeTokens *paramTypeNames;
+    char isVariadic; // Only the last parameter may be variadic.
+    char isExtern;
+
+    size_t nResults;
+    token *resultNames; // EOF_TOKEN marks an unnamed parameter/result.
+    typeTokens *resultTypes;
+
+    size_t nTypeParams;
+    token *typeParamNames;
+    typeTokens *typeParamConstraints;
 
     struct stmt_block body;
 };
@@ -112,10 +183,17 @@ struct stmt_if {
     stmt *ifFalse;
 };
 
-struct stmt_while {
-    expr *condition;
+struct stmt_for {
+    stmt *initializer;  // Executed once before the loop; optional.
+    expr *condition;    // NULL means true for a three-clause loop.
+    expr *update;       // Executed after each iteration; optional.
     stmt *body;
-    char isDoWhile;
+    char deferCondition; // Skip the first condition check only.
+
+    // Range loops use bindings/range instead of initializer/condition/update.
+    size_t nBindings;
+    token bindings[2];
+    expr *range;
 };
 
 /* expr types:
@@ -134,6 +212,9 @@ enum exprType {
     EXPR_TYPE_UNARY,
     EXPR_TYPE_TYPECAST,
     EXPR_TYPE_INDEX,
+    EXPR_TYPE_FUNCTION,
+    EXPR_TYPE_COMPOSITE,
+    EXPR_TYPE_INSTANTIATION,
 };
 
 struct expr {
@@ -150,6 +231,14 @@ struct expr_call {
 
     size_t nParams;
     expr *params;
+};
+
+// Used as expr_call.func for f[T, U](...). An identifier argument can also
+// denote an index; name resolution decides ambiguous cases such as a[i](x).
+struct expr_instantiation {
+    expr parent;
+    size_t nTypeArguments;
+    typeTokens *typeArguments;
 };
 
 struct expr_dot {
@@ -185,12 +274,19 @@ struct expr_unary {
 
 struct expr_typecast {
     expr child;
-    typeTokens type;
+    typeTokens type; // Arrow target, excluding the outer delimiter parentheses.
 };
 
 struct expr_index {
     expr parent;
     expr index;
+};
+
+struct expr_composite {
+    expr type; // EXPR_TYPE_NULL for an inferred-type literal: {1, 2, 3}.
+    size_t nEntries;
+    expr *keys; // EXPR_TYPE_NULL entries for positional values.
+    expr *values;
 };
 
 // print an AST to the terminal in (operator operands...) notation (eg. (PLUS 2 2) is 2 + 2)

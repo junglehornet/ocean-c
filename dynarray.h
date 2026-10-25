@@ -11,9 +11,9 @@
     list->top >= list->len ? (list->len *= 2, (type *)realloc(list->arr, list->len * sizeof(type))) : list->arr
 
 #define SHRINK_DYNAMIC_ARRAY(list, type) \
-    list->top <= (list->len / 2) ? (list->len /= 2, (type *)realloc(list->arr, list->len * sizeof(type))) : list->arr
+    list->len > 8 && list->top <= (list->len / 4) ? (list->len /= 2, (type *)realloc(list->arr, list->len * sizeof(type))) : list->arr
 
-#define listlen(list) list->top
+#define listlen(list) ((list)->top)
 #define DECLARE_DYNAMIC_ARRAY_TYPE(type) \
     typedef struct { \
         type *arr;\
@@ -75,7 +75,6 @@
             return error_##type("Error: tried to pop an empty " #type " list");\
         }\
         type value = list->arr[--list->top];\
-        list->top--;\
         list->arr = SHRINK_DYNAMIC_ARRAY(list, type);\
         return value;\
     }\
@@ -100,15 +99,11 @@
             error_##type("Error: tried to insert an item of type " #type " at an invalid index");\
             return;\
         }\
-        list->top++;\
         list->arr = GROW_DYNAMIC_ARRAY(list, type);\
-        type previous = item;\
-        type temp;\
-        for (size_t i = index; index < list->top; index++) {\
-            temp = list->arr[index];\
-            list->arr[index] = previous;\
-            previous = temp;\
-        }\
+        memmove(list->arr + index + 1, list->arr + index,\
+                (list->top - index) * sizeof(type));\
+        list->arr[index] = item;\
+        list->top++;\
     }\
     \
     type get_##type##list(type##list *list, size_t index) {\
