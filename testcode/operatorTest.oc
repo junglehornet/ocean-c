@@ -1,0 +1,13 @@
+package main;
+
+import "io";
+
+func main() {
+    b1: bool = true;
+    b2: bool = false;
+    if (b1 ^ b2) {
+        io.Println("yes");
+    }
+    bp: bool* = &b1;
+    bp2: bool* = &b2;
+}

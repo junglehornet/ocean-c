@@ -1,3 +1,8 @@
+package main;
+
+import "rand";
+import "io";
+
 x: int = 2;
 ;;;;
 &;
@@ -5,4 +10,41 @@ x: int = 2;
 if (x == 3) {
     x := 4;
     if ; // an error should be thrown here
+}
+// types of for loops:
+for (true) {
+    // this would run forever...
+    io.Println("Hello there");
+    // but this break statement stops it after the first run.
+    break;
+}
+
+true_or_false: bool = true;
+
+// this loop is the same as the one above it
+for (true_or_false) {
+    io.Println("Hello there #2");
+    break;
+}
+
+for (i := 2; i < 5; i++) {
+    io.Println("This should print 3 times");
+}
+
+for (;false;) {
+    io.Println("never runs :(");
+}
+
+for {
+    io.Println("runs forever, same as for (true)");
+}
+
+// notice the defer keyword before the condition
+for (defer false) {
+    io.Println("this is like a do-while loop, so it will run once.");
+}
+
+for (i := 0; defer i > 0; i = rand.randint(0, 10)) {
+    io.Println("this is like a do-for loop, a do-while loop that has " +
+    " an initializer and increment statement");
 }
