@@ -5,11 +5,11 @@ file(MAKE_DIRECTORY "${TEST_DIR}")
 file(WRITE "${TEST_DIR}/empty.oc" "")
 file(WRITE "${TEST_DIR}/valid one.oc" "package first; func first() {}")
 file(WRITE "${TEST_DIR}/valid two.oc" "package second; func second() {}")
-file(WRITE "${TEST_DIR}/bad-parse.oc" "func broken(int x int y) {}")
+file(WRITE "${TEST_DIR}/bad-parse.oc" "func broken(x int y int) {}")
 file(WRITE "${TEST_DIR}/bad-scan.oc" "\"unfinished")
 
 function(check_cli expected diagnostic)
-    execute_process(COMMAND "${OCEAN_EXE}" ${ARGN}
+    execute_process(COMMAND "${OCEAN_EXE}" --check ${ARGN}
         RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error
         TIMEOUT 10)
     if(NOT "${status}" STREQUAL "${expected}")
@@ -29,3 +29,14 @@ check_cli(0 "first" "${TEST_DIR}/valid one.oc")
 check_cli(0 "second" "${TEST_DIR}/valid one.oc" "${TEST_DIR}/valid two.oc")
 check_cli(1 "Expected comma" "${TEST_DIR}/bad-parse.oc")
 check_cli(1 "string literal" "${TEST_DIR}/bad-scan.oc")
+file(WRITE "${TEST_DIR}/bad-semantic.oc" "func main() { x: int = \"text\"; }")
+check_cli(1 "type mismatch" "${TEST_DIR}/bad-semantic.oc")
+file(WRITE "${TEST_DIR}/resolved-index.oc" "func main() { callbacks := {func(x int) int { return x; }}; i := 0; result := callbacks[i](1); }")
+check_cli(0 "EOF" "${TEST_DIR}/resolved-index.oc")
+
+# Missing extern terminators must not blame the following no-argument function.
+file(WRITE "${TEST_DIR}/unterminated-extern.oc"
+    "extern i32 puts(i8[])\n\nfunc main() { puts(\"hello?\"); }")
+check_cli(1 "Expected semicolon after extern function" "${TEST_DIR}/unterminated-extern.oc")
+file(WRITE "${TEST_DIR}/extern-at-eof.oc" "extern void empty(void)")
+check_cli(1 "Expected semicolon after extern function" "${TEST_DIR}/extern-at-eof.oc")

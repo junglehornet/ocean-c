@@ -91,13 +91,12 @@ static char next_char(struct scannerState *state) {
         printf("Fatal compiler error: tried to read past EOF.\n");
         abort();
     }
-    state->column++;
+    if (state->source[state->offset] == '\n') {
+        state->column = 1;
+        state->line++;
+    } else state->column++;
     state->offset++;
     char c = state->source[state->offset];
-    if (c == '\n') {
-        state->column = 0;
-        state->line++;
-    }
     return c;
 }
 
@@ -453,6 +452,7 @@ static void scan_literal_string(struct scannerState *state) {
     string.filename = state->filename;
     string.lexeme = to_chararray(state->lexeme);
     string.type = LITERAL_STRING;
+    string.stringLength = state->lexeme->top - 1;
     push_tokenlist(state->list, string);
     init_charlist(state->lexeme);
 }
@@ -476,6 +476,7 @@ static token scan_raw_string(struct scannerState *state) {
     string.filename = state->filename;
     string.lexeme = to_chararray(state->lexeme);
     string.type = LITERAL_STRING;
+    string.stringLength = state->lexeme->top - 1;
     init_charlist(state->lexeme);
     return string;
 }
@@ -583,7 +584,7 @@ static uint16_t scan_literal_char(struct scannerState *state) {
                     return scan_numn(state, 1, 3, 8, 0);
             }
         default:
-            return currentChar;
+            return (unsigned char)currentChar;
     }
 }
 

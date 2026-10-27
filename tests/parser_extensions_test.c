@@ -65,18 +65,32 @@ static void truncated(const char *source) {
     free(tokens);
 }
 int main(void) {
-    parseResult r = valid("struct Box<T: any> { T value; }");
+    parseResult defaults = valid("struct Default<T, U> { first T; second U; }");
+    struct stmt_struct *defaultStruct = defaults.statements[0].value;
+    assert(defaultStruct->nTypeParams == 2 && defaultStruct->typeParamConstraints[0].nTokens == 1 &&
+           defaultStruct->typeParamConstraints[0].tokens[0].type == ANY &&
+           defaultStruct->typeParamConstraints[1].tokens[0].type == ANY);
+    valid("interface Default<T> { Get() T; }");
+    expression("callback := func<T>(value T) T { return value; };");
+    valid("struct Node<T any> { previous *Node<T>; value T; next *Node<T>; }");
+    valid("type Record struct { x, y int; callback func(value int) int; child struct { value int; }; };");
+    invalid("struct Old { *Node value; }");
+    invalid("type Old struct { []int values; };");
+    invalid("struct Missing { value; }");
+    invalid("struct Duplicate { x, x int; }");
+    invalid("type Duplicate struct { x int; x string; };");
+    parseResult r = valid("struct Box<T any> { value T; }");
     struct stmt_struct *box = r.statements[0].value;
     assert(box->nTypeParams == 1 && box->nFields == 1);
     assert(!strcmp(box->typeParamNames[0].lexeme, "T"));
     assert(box->typeParamConstraints[0].tokens[0].type == ANY);
-    r = valid("interface Reader<T: any> { Read() T; }");
+    r = valid("interface Reader<T any> { Read() T; }");
     struct stmt_interface *reader = r.statements[0].value;
     assert(reader->nTypeParams == 1 && reader->nMethods == 1);
-    r = valid("func identity<T: any>(T value) T { return value; }");
+    r = valid("func identity<T any>(value T) T { return value; }");
     struct stmt_func *function = r.statements[0].value;
     assert(function->nTypeParams == 1 && function->nParams == 1 && function->nResults == 1);
-    r = valid("struct Pair<T, U: any, V: ~int | ~string,> { Box<Box<T>> first; U second; }");
+    r = valid("struct Pair<T, U any, V ~int | ~string,> { first Box<Box<T>>; second U; }");
     box = r.statements[0].value;
     assert(box->nTypeParams == 3 && box->typeParamConstraints[2].nTokens == 5);
     assert(box->fieldTypes[0].tokens[box->fieldTypes[0].nTokens - 1].type == BITSHIFT_RIGHT);
@@ -85,9 +99,9 @@ int main(void) {
     assert(type->underlying.nTokens == 6 && type->underlying.tokens[5].type == BITSHIFT_RIGHT);
     valid("type Deep Box<Box<Box<int>>>;");
     valid("type Mixed Box<Box[int], Pair<int, []string>>;");
-    valid("interface Derived<T: Box<int>> { Base<Box<T>>; Read(Box<T> value) Box<T>; }");
-    valid("func constrained<T: Box<Box<int>>>(T value) T { return value; }");
-    r = valid("struct Constrained<T: Box<int>> { T value; }");
+    valid("interface Derived<T Box<int>> { Base<Box<T>>; Read(value Box<T>) Box<T>; }");
+    valid("func constrained<T Box<Box<int>>>(value T) T { return value; }");
+    r = valid("struct Constrained<T Box<int>> { value T; }");
     box = r.statements[0].value;
     assert(box->typeParamConstraints[0].nTokens == 4 &&
            box->typeParamConstraints[0].tokens[3].type == GREATER_THAN);
@@ -108,21 +122,24 @@ int main(void) {
     e = expression("a >> b;");
     assert(e.type == EXPR_TYPE_BINARY && ((struct expr_binary*)e.underlying)->operation == EXPR_BITSHIFT_RIGHT);
     valid("type Dimension int[N >> 1];");
-    invalid("struct Box<> {}"); invalid("struct Box<T:> {}");
-    invalid("struct Box<T any> {}"); invalid("struct Box<T: any, T: any> {}");
-    invalid("struct Box<index: any> {}"); invalid("struct Box<T: any] {}");
+    invalid("struct Box<> {}"); valid("struct Box<T> {}");
+    invalid("struct Box<T: any> {}");
+    invalid("interface Reader<T: any> {}");
+    invalid("func identity<T: any>(value T) T { return value; }");
+    invalid("x := func<T: any>() {};"); invalid("struct Box<T any, T any> {}");
+    invalid("struct Box<index any> {}"); invalid("struct Box<T any] {}");
     invalid("type Missing Box<int;"); invalid("type Extra Box<int>>;");
     invalid("type Empty Box<>;"); invalid("type Broken Box<int,,string>;");
     invalid("type Broken Box<Box<int>;");
 
-    e = expression("identity := func[T any](T value) T { return value; };");
+    e = expression("identity := func[T any](value T) T { return value; };");
     assert(e.type == EXPR_TYPE_FUNCTION);
     function = e.underlying;
     assert(function->nTypeParams == 1 && function->nParams == 1 && function->nResults == 1);
-    e = expression("identity := func<T: any>(T value) T { return value; };");
+    e = expression("identity := func<T any>(value T) T { return value; };");
     assert(e.type == EXPR_TYPE_FUNCTION && ((struct stmt_func*)e.underlying)->nTypeParams == 1);
     invalid("x := func[]() {};"); invalid("x := func[T any, T any]() {};");
-    invalid("x := func[T any](...T x, T y) {};");
+    invalid("x := func[T any](x ...T, y T) {};");
     invalid("struct Bad { +[T any]() {} }");
 
     inst = instance(expression("identity[int];"), 1);
@@ -143,7 +160,7 @@ int main(void) {
     assert(e.type == EXPR_TYPE_DOT && ((struct expr_dot*)e.underlying)->parent.type == EXPR_TYPE_INDEX);
     e = expression("self[][0];");
     assert(e.type == EXPR_TYPE_INDEX && ((struct expr_index*)e.underlying)->parent.type == EXPR_TYPE_INDEX);
-    valid("struct Values { index []int data; +() { use(self[].length); } }");
+    valid("struct Values { index data []int; +() { use(self[].length); } }");
     invalid("self[;"); invalid("self[,];");
 
     struct stmt_switch *sw = switchNode("func f() { switch (x := next(); x) { case 1: return; default: return; } }");
@@ -157,12 +174,12 @@ int main(void) {
     invalid("switch (x := next()) {}"); invalid("switch (next(); x; y) {}");
     invalid("switch (; x) {}");
 
-    sw = switchNode("func f(any value) { switch (item := value.(type)) { case int: use(item); default: return; } }");
+    sw = switchNode("func f(value any) { switch (item := value.(type)) { case int: use(item); default: return; } }");
     assert(sw->isTypeSwitch && !strcmp(sw->binding.lexeme, "item") && sw->nCases == 2);
     assert(sw->cases[0].nTypes == 1 && sw->cases[0].nValues == 0);
     assert(!strcmp(sw->cases[0].types[0].tokens[0].lexeme, "int"));
     assert(sw->cases[1].nTypes == 0 && sw->cases[1].nValues == 0);
-    sw = switchNode("func f(any value) { switch (value.(type)) { case string: return; } }");
+    sw = switchNode("func f(value any) { switch (value.(type)) { case string: return; } }");
     assert(sw->isTypeSwitch && sw->binding.type == EOF_TOKEN);
     sw = switchNode("switch (prepare(); item := value.(type)) { case []int, Box<Box<int>>, pkg.Item*: use(item); default: break; }");
     assert(sw->isTypeSwitch && sw->initializer.type == STMT_EXPR && sw->cases[0].nTypes == 3);
@@ -189,11 +206,11 @@ int main(void) {
     r = valid("func accepts(func() int) {}");
     function = r.statements[0].value;
     assert(function->nParams == 1 && function->paramNames[0].type == EOF_TOKEN && function->paramTypeNames[0].nTokens == 4);
-    r = valid("func accepts(func() () callback) {}");
+    r = valid("func accepts(callback func() ()) {}");
     function = r.statements[0].value;
     assert(!strcmp(function->paramNames[0].lexeme, "callback"));
-    valid("func accepts(func() int callback) {}");
-    valid("func accepts(func() (int) callback) {}");
+    valid("func accepts(callback func() int) {}");
+    valid("func accepts(callback func() (int)) {}");
     invalid("package main\nfunc main() {}");
     invalid("func f() {\n x := 1\n use(x)\n }");
     invalid("func f() { for (;;) { break\n } }");
@@ -205,8 +222,8 @@ int main(void) {
     strcat(deep, ";");
     invalid(deep);
 
-    truncated("struct Box<T: Box<Box<int>>> { Box<T> data; +() { use(self[].length); } }");
-    truncated("callback := func<T: any>(T x) T { return identity<Box<T>>(x); };");
+    truncated("struct Box<T Box<Box<int>>> { data Box<T>; +() { use(self[].length); } }");
+    truncated("callback := func<T any>(x T) T { return identity<Box<T>>(x); };");
     truncated("switch (init(); item := value.(type)) { case Box<Box<int>>, []string: use(item); default: break; }");
     parseResult recovery = parse("type Broken Box<int>>; func recovered() {}");
     assert(recovery.hasError && recovery.nStatements == 1 && recovery.statements[0].type == STMT_FUNC);

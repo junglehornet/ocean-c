@@ -9,6 +9,7 @@
 #include "dynarray.h"
 #include "token.h"
 #include "ast.h"
+#include "value_list.h"
 #include "core.h"
 
 typedef struct parserState {
@@ -97,6 +98,7 @@ static token peek(parserState *state) {
     } while (0)
 
 static expr comma(parserState *state);
+static char signatureEllipsis(parserState *state);
 static char parseCastTarget(parserState *state, typeTokens *target);
 static char parseSignatureType(parserState *state, size_t depth);
 static char tryCallTypeArguments(parserState *state, struct expr_instantiation *result);
@@ -109,6 +111,7 @@ static char checkTypeName(parserState *state, token tok);
 static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyword, char anonymous);
 
 static expr parseComposite(parserState *state, expr type) {
+    token location = currentToken(state);
     token tok = advance(state);
     exprlist keys = {0}, values = {0};
     init_exprlist(&keys);
@@ -142,7 +145,7 @@ static expr parseComposite(parserState *state, expr type) {
         tok = advance(state);
     }
     advance(state);
-    struct expr_composite node = {.type = type, .nEntries = values.top,
+    struct expr_composite node = {.type = type, .location = location, .nEntries = values.top,
         .keys = keys.top ? to_exprarray(&keys) : nullptr,
         .values = values.top ? to_exprarray(&values) : nullptr};
     free_exprlist(&keys);
@@ -166,6 +169,7 @@ static expr atomic(parserState *state) {
             CHECK_SYNC;
             return (expr){.type = EXPR_TYPE_FUNCTION, .underlying = function.value};
         }
+        case UNDERSCORE:
         case IDENTIFIER:
             struct expr_identifier ident = {0};
             ident.lexeme = tok;
@@ -206,6 +210,7 @@ static expr atomic(parserState *state) {
             struct expr_literal lit_str = {0};
             lit_str.type = LITERAL_TYPE_STRING;
             lit_str.value = tok.lexeme;
+            lit_str.stringLength = tok.stringLength;
             expr lit_str_expr = {0};
             lit_str_expr.type = EXPR_TYPE_LITERAL;
             lit_str_expr.underlying = malloc(sizeof(struct expr_literal));
@@ -270,6 +275,7 @@ static expr primary(parserState *state) {
                 break;
             }
             case DOT:
+                if (signatureEllipsis(state)) goto endLoop;
                 // member access
                 tok = advance(state);
                 if (tok.type == LEFT_PAREN) {
@@ -308,7 +314,7 @@ static expr primary(parserState *state) {
             case LESS_THAN:
             case LEFT_BRACKET: {
                 char angle = tok.type == LESS_THAN;
-                struct expr_instantiation instance = {.parent = parent};
+                struct expr_instantiation instance = {.parent = parent, .location = tok};
                 if (tryCallTypeArguments(state, &instance)) {
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_INSTANTIATION, instance, result);
                     parent = result;
@@ -317,12 +323,13 @@ static expr primary(parserState *state) {
                 if (angle) goto endLoop;
                 // Not a type-argument list: index.
                 // array indexing
+                token indexLocation = tok;
                 tok = advance(state);
                 expr index = tok.type == RIGHT_BRACKET ? (expr){0} : comma(state);
                 CHECK_SYNC;
                 SET_TOK;
                 expect(RIGHT_BRACKET, "expected right bracket", expr);
-                struct expr_index index_n = {0};
+                struct expr_index index_n = {.location = indexLocation};
                 index_n.parent = parent;
                 index_n.index = index;
                 parent.underlying = malloc(sizeof(struct expr_index));
@@ -334,8 +341,9 @@ static expr primary(parserState *state) {
             }
             case LEFT_PAREN:
                 // function call
+                token callLocation = tok;
                 tok = advance(state);
-                struct expr_call call = {0};
+                struct expr_call call = {.location = callLocation};
                 call.func = parent;
                 // parse func params
                 exprlist *list = (exprlist*)malloc(sizeof(exprlist));
@@ -347,6 +355,14 @@ static expr primary(parserState *state) {
                     CHECK_SYNC;
                     call.nParams++;
                     push_exprlist(list, param);
+                    if (signatureEllipsis(state)) {
+                        advance(state); advance(state); advance(state);
+                        call.spread = 1;
+                        if (currentToken(state).type != RIGHT_PAREN) {
+                            signatureError(state, "Expanded argument must be last");
+                            return (expr){0};
+                        }
+                    }
                     SET_TOK;
                     if (tok.type == COMMA) {
                         tok = advance(state);
@@ -658,6 +674,15 @@ static expr assignmentImpl(parserState *state) {
     return variable;
 }
 
+// Normalizing simultaneous assignment retains the leaves and replaces list nodes.
+static void freeCommaNodes(expr *e) {
+    if (!isComma(e)) return;
+    struct expr_binary *v = e->underlying;
+    freeCommaNodes(&v->left);
+    freeCommaNodes(&v->right);
+    free(v);
+}
+
 static expr comma(parserState *state) {
     expr left = assignment(state);
     CHECK_SYNC;
@@ -672,6 +697,39 @@ static expr comma(parserState *state) {
         SET_TOK;
         CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, binary_n, res)
         left = res;
+    }
+    size_t count = commaCount(&left);
+    for (size_t i = 1; i < count; i++) {
+        expr *item = commaItem(&left, i);
+        if (item->type != EXPR_TYPE_BINARY ||
+            ((struct expr_binary *)item->underlying)->operation != EXPR_ASSIGNMENT) continue;
+        char targets = 1;
+        for (size_t j = 0; j < i; j++) {
+            expr *candidate = commaItem(&left, j);
+            if (candidate->type != EXPR_TYPE_IDENTIFIER && candidate->type != EXPR_TYPE_INDEX &&
+                candidate->type != EXPR_TYPE_DOT && candidate->type != EXPR_TYPE_UNARY &&
+                candidate->type != EXPR_TYPE_INSTANTIATION)
+                targets = 0;
+        }
+        if (!targets) break;
+        struct expr_binary *last = item->underlying;
+        expr lhs = *commaItem(&left, 0), rhs = last->right;
+        for (size_t j = 1; j <= i; j++) {
+            struct expr_binary part = {.operation = EXPR_COMMA, .left = lhs,
+                .right = j == i ? last->left : *commaItem(&left, j)};
+            CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, part, joined);
+            lhs = joined;
+        }
+        for (size_t j = i + 1; j < count; j++) {
+            struct expr_binary part = {.operation = EXPR_COMMA, .left = rhs, .right = *commaItem(&left, j)};
+            CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, part, joined);
+            rhs = joined;
+        }
+        struct expr_binary assignmentNode = {.operation = EXPR_ASSIGNMENT, .left = lhs, .right = rhs};
+        CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, assignmentNode, result);
+        freeCommaNodes(&left);
+        free(last);
+        return result;
     }
     return left;
 }
@@ -688,6 +746,22 @@ static expr *parseExpr(parserState *state) {
     return heapExpr;
 }
 
+// Reuse the expression grammar for a retained buffer dimension token span.
+expr *parseBufferDimension(typeTokens dimension) {
+    token *tokens = calloc(dimension.nTokens + 1, sizeof(*tokens));
+    CHECK_MALLOC(tokens);
+    memcpy(tokens, dimension.tokens, dimension.nTokens * sizeof(*tokens));
+    tokens[dimension.nTokens] = (token){.type = EOF_TOKEN, .lexeme = "EOF"};
+    parserState state = {.tokens = tokens, .tokensLen = dimension.nTokens + 1};
+    expr *result = parseExpr(&state);
+    if (state.hasError || currentToken(&state).type != EOF_TOKEN) {
+        free(result);
+        result = nullptr;
+    }
+    free(tokens);
+    return result;
+}
+
 static stmtlist *parseBlock(parserState *state);
 
 static stmt parseDeclaration(parserState *state) {
@@ -698,7 +772,10 @@ static stmt parseDeclaration(parserState *state) {
     tok = advance(state);
     while (tok.type == COMMA) {
         tok = advance(state);
-        expect(IDENTIFIER, "Expected identifier", stmt);
+        if (tok.type != IDENTIFIER && tok.type != UNDERSCORE) {
+            signatureError(state, "Expected identifier");
+            return (stmt){0};
+        }
         push_tokenlist(vars, tok);
         tok = advance(state);
     }
@@ -1046,6 +1123,37 @@ static char parseInterfaceConstraint(parserState *state, size_t depth) {
     return signatureError(state, "Expected interface type, union, membership term, or operator requirement");
 }
 
+// Struct fields share one type across a comma-separated list of names.
+static char parseStructFields(parserState *state, signatureFields *fields,
+                              signatureFields *valueParams, token *indexField,
+                              char indexModifier, size_t depth) {
+    DEFINE_TOK;
+    size_t namesStart = state->tokenIndex, count = 0;
+    do {
+        if (tok.type != IDENTIFIER)
+            return signatureError(state, "Expected struct field name before type");
+        if (valueParams) {
+            for (size_t i = 0; i < valueParams->count; i++)
+                if (!strcmp(tok.lexeme, valueParams->names[i].lexeme))
+                    return signatureError(state, "Struct field duplicates a value parameter");
+        }
+        count++;
+        tok = advance(state);
+        if (tok.type != COMMA) break;
+        if (indexModifier)
+            return signatureError(state, "Index modifier must designate exactly one field");
+        tok = advance(state);
+    } while (1);
+    size_t start = state->tokenIndex;
+    if (!parseSignatureType(state, depth)) return 0;
+    for (size_t i = 0; i < count; i++) {
+        token name = state->tokens[namesStart + 2 * i];
+        if (!addSignatureField(state, fields, name, start, state->tokenIndex)) return 0;
+        if (indexModifier) *indexField = name;
+    }
+    return 1;
+}
+
 static char parseCompositeTypeBody(parserState *state, size_t depth, char isInterface) {
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Composite type nesting limit exceeded");
@@ -1053,7 +1161,7 @@ static char parseCompositeTypeBody(parserState *state, size_t depth, char isInte
     signatureFields members = {0};
     token indexField = {.type = EOF_TOKEN};
     while (tok.type != RIGHT_CURLY_BRACE) {
-        char indexModifier = !isInterface && isIndexName(tok);
+        char indexModifier = !isInterface && isIndexName(tok) && peek(state).type == IDENTIFIER;
         if (indexModifier) {
             if (indexField.type != EOF_TOKEN) {
                 signatureError(state, "Struct already has an indexing field");
@@ -1091,24 +1199,8 @@ static char parseCompositeTypeBody(parserState *state, size_t depth, char isInte
         } else if (isInterface) {
             if (!parseInterfaceConstraint(state, depth + 1)) goto invalid;
         } else {
-            if (!parseSignatureType(state, depth + 1)) goto invalid;
-            size_t end = state->tokenIndex;
-            SET_TOK;
-            do {
-                if (tok.type != IDENTIFIER) {
-                    signatureError(state, "Expected field name after type");
-                    goto invalid;
-                }
-                if (!addSignatureField(state, &members, tok, start, end)) goto invalid;
-                if (indexModifier) indexField = tok;
-                tok = advance(state);
-                if (tok.type != COMMA) break;
-                if (indexModifier) {
-                    signatureError(state, "Index modifier must designate exactly one field");
-                    goto invalid;
-                }
-                tok = advance(state);
-            } while (1);
+            if (!parseStructFields(state, &members, NULL, &indexField,
+                                   indexModifier, depth + 1)) goto invalid;
         }
         SET_TOK;
         if (tok.type != SEMICOLON) {
@@ -1167,6 +1259,27 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
     DEFINE_TOK;
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Function signature nesting limit exceeded");
+    if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "buffer")) {
+        tok = advance(state);
+        if (tok.type != LESS_THAN || !parseAngleTypes(state, depth + 1))
+            return signatureError(state, "Expected buffer element type in angle brackets");
+        tok = currentToken(state);
+        if (tok.type == LEFT_BRACKET) {
+            tok = advance(state);
+            if (tok.type != RIGHT_BRACKET) {
+                assignment(state);
+                if (state->isSynchronizing) return 0;
+                tok = currentToken(state);
+            }
+            if (tok.type != RIGHT_BRACKET) return signatureError(state, "Expected closing buffer dimension bracket");
+            advance(state);
+        }
+        // Empty suffixes after a complete buffer type denote built-in arrays.
+        while (currentToken(state).type == LEFT_BRACKET && peek(state).type == RIGHT_BRACKET) {
+            advance(state); advance(state);
+        }
+        return 1;
+    }
     if (tok.type == STAR) {
         advance(state);
         return parseSignatureType(state, depth + 1);
@@ -1260,7 +1373,7 @@ static char tryCallTypeArguments(parserState *state, struct expr_instantiation *
     if (angle) {
         if (!angleEnd(tok) || !closeAngle(&trial)) goto notTypes;
         tok = currentToken(&trial);
-        if (tok.type != LEFT_PAREN && tok.type != LEFT_CURLY_BRACE &&
+        if (tok.type != LEFT_PAREN && tok.type != LEFT_CURLY_BRACE && tok.type != LEFT_BRACKET &&
             tok.type != SEMICOLON && tok.type != COMMA && tok.type != RIGHT_PAREN &&
             tok.type != RIGHT_BRACKET && tok.type != RIGHT_CURLY_BRACE &&
             tok.type != DOT && tok.type != EOF_TOKEN) goto notTypes;
@@ -1279,13 +1392,93 @@ notTypes:
     return 0;
 }
 
+// Retain the type grammar's handling of nested angle closers and array dimensions.
+char parseTypeApplicationArguments(typeTokens span, typeTokens **arguments, size_t *count) {
+    *arguments = nullptr; *count = 0;
+    if (span.nTokens < 3 || (span.tokens[1].type != LEFT_BRACKET && span.tokens[1].type != LESS_THAN)) return 0;
+    token *tokens = calloc(span.nTokens + 1, sizeof(*tokens));
+    CHECK_MALLOC(tokens);
+    memcpy(tokens, span.tokens, span.nTokens * sizeof(*tokens));
+    tokens[span.nTokens] = (token){.type = EOF_TOKEN, .lexeme = "EOF"};
+    parserState state = {.tokens = tokens, .tokensLen = span.nTokens + 1, .tokenIndex = 1, .quietErrors = 1};
+    struct expr_instantiation instance = {0};
+    char ok = tryCallTypeArguments(&state, &instance) && currentToken(&state).type == EOF_TOKEN;
+    free(tokens);
+    if (!ok) {
+        for (size_t i = 0; i < instance.nTypeArguments; i++) free(instance.typeArguments[i].tokens);
+        free(instance.typeArguments);
+        return 0;
+    }
+    *arguments = instance.typeArguments; *count = instance.nTypeArguments;
+    return 1;
+}
+
 static char signatureEllipsis(parserState *state) {
     size_t i = state->tokenIndex;
     return i + 2 < state->tokensLen && state->tokens[i].type == DOT &&
            state->tokens[i + 1].type == DOT && state->tokens[i + 2].type == DOT;
 }
 
-// Named lists use type-before-name syntax: (int a, b, string c).
+// Parameters use name-before-type syntax; unnamed type lists remain valid.
+static char parseNameFirstParameters(parserState *state, signatureFields *fields, size_t depth) {
+    token tok = advance(state);
+    int named = -1;
+    while (tok.type != RIGHT_PAREN) {
+        size_t namesStart = state->tokenIndex, namesEnd = namesStart;
+        // Prefer an entire unnamed type when it ends at a field delimiter.
+        parserState trial = *state;
+        trial.quietErrors = 1;
+        char unnamed = parseSignatureType(&trial, depth + 1) &&
+            (currentToken(&trial).type == COMMA || currentToken(&trial).type == RIGHT_PAREN);
+        char hasNames = 0;
+        if (!unnamed || ((tok.type == IDENTIFIER || tok.type == UNDERSCORE) && peek(state).type == COMMA)) {
+            size_t cursor = namesStart;
+            while (cursor + 1 < state->tokensLen &&
+                   (state->tokens[cursor].type == IDENTIFIER || state->tokens[cursor].type == UNDERSCORE)) {
+                token next = state->tokens[cursor + 1];
+                if (next.type != COMMA) {
+                    if (next.type != RIGHT_PAREN && next.type != EOF_TOKEN) {
+                        hasNames = 1;
+                        namesEnd = cursor;
+                    }
+                    break;
+                }
+                cursor += 2;
+            }
+        }
+        if (named != -1 && named != hasNames)
+            return signatureError(state, "Cannot mix named and unnamed parameters");
+        named = hasNames;
+        if (hasNames) {
+            while (state->tokenIndex <= namesEnd) advance(state);
+        }
+        char variadic = signatureEllipsis(state);
+        if (variadic) { advance(state); advance(state); advance(state); }
+        size_t start = state->tokenIndex;
+        if (unnamed && !hasNames) {
+            state->tokenIndex = trial.tokenIndex;
+            state->pendingGreater = trial.pendingGreater;
+        } else if (!parseSignatureType(state, depth + 1)) return 0;
+        size_t end = state->tokenIndex;
+        if (hasNames) {
+            if (variadic && namesStart != namesEnd)
+                return signatureError(state, "Variadic parameter must have one name");
+            for (size_t n = namesStart; n <= namesEnd; n += 2)
+                if (!addSignatureField(state, fields, state->tokens[n], start, end)) return 0;
+        } else if (!addSignatureField(state, fields, (token){.type = EOF_TOKEN}, start, end)) return 0;
+        fields->variadic = variadic;
+        tok = currentToken(state);
+        if (tok.type == RIGHT_PAREN) break;
+        if (tok.type != COMMA) return signatureError(state, "Expected comma or closing parenthesis");
+        tok = advance(state);
+        if (variadic && tok.type != RIGHT_PAREN)
+            return signatureError(state, "Variadic parameter must be last");
+    }
+    advance(state);
+    return 1;
+}
+
+// Named result lists retain type-before-name syntax.
 // Unnamed lists use (int, string). Mixing the two styles is rejected.
 static char parseSignatureFields(parserState *state, signatureFields *fields,
                                  char allowVariadic, size_t depth) {
@@ -1293,6 +1486,7 @@ static char parseSignatureFields(parserState *state, signatureFields *fields,
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Function signature nesting limit exceeded");
     if (tok.type != LEFT_PAREN) return signatureError(state, "Expected function parameter list");
+    if (allowVariadic) return parseNameFirstParameters(state, fields, depth);
     tok = advance(state);
     int named = -1;
     size_t groupStart = 0, groupEnd = 0;
@@ -1362,8 +1556,8 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
 }
 
 // Type parameter declarations retain Go's name-before-constraint order:
-// [T, U any, V ~int | ~string] or <T, U: any, V: ~int | ~string>.
-// These names are types, not value parameters.
+// [T, U any, V ~int | ~string] or <T, U any, V ~int | ~string>.
+// Omitted constraints default to any. These names are types, not value parameters.
 static char parseTypeParameters(parserState *state, signatureFields *fields) {
     DEFINE_TOK;
     char angle = tok.type == LESS_THAN;
@@ -1378,28 +1572,80 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
             tok = advance(state);
             if (tok.type != COMMA) break;
             tok = advance(state);
+            if ((!angle && tok.type == RIGHT_BRACKET) || (angle && angleEnd(tok))) break;
         } while (1);
-        if (angle) {
-            if (tok.type != COLON) return signatureError(state, "Expected colon before type constraint");
-            tok = advance(state);
-        }
+        char implicitAny = (!angle && tok.type == RIGHT_BRACKET) || (angle && angleEnd(tok));
         size_t start = state->tokenIndex;
-        do {
+        if (!implicitAny) do {
             if (tok.type == TILDE) tok = advance(state);
             if (!parseSignatureType(state, 0)) return 0;
             SET_TOK;
             if (tok.type != BITWISE_OR) break;
             tok = advance(state);
         } while (1);
-        for (size_t i = 0; i < count; i++)
-            if (!addSignatureField(state, fields, state->tokens[namesStart + 2 * i],
-                                   start, state->tokenIndex)) return 0;
+        for (size_t i = 0; i < count; i++) {
+            token name = state->tokens[namesStart + 2 * i];
+            if (!addSignatureField(state, fields, name, start, state->tokenIndex)) return 0;
+            if (implicitAny) {
+                typeTokens *constraint = &fields->types[fields->count - 1];
+                free(constraint->tokens);
+                constraint->tokens = malloc(sizeof(token));
+                CHECK_MALLOC(constraint->tokens);
+                constraint->nTokens = 1;
+                constraint->tokens[0] = name;
+                constraint->tokens[0].type = ANY;
+                constraint->tokens[0].lexeme = "any";
+            }
+        }
         if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) break;
         if (tok.type != COMMA) return signatureError(state, "Expected comma after type constraint");
         tok = advance(state);
     }
     if (angle) return closeAngle(state);
     advance(state);
+    return 1;
+}
+
+// Receiver arguments declare names, rather than specializing the method.
+static char bindReceiverParameters(parserState *state, struct stmt_func *function) {
+    typeTokens base = function->receiverType;
+    if (base.nTokens && base.tokens[0].type == STAR) {
+        base.tokens++; base.nTokens--;
+    } else if (base.nTokens && base.tokens[base.nTokens - 1].type == STAR) base.nTokens--;
+    if (!base.nTokens || base.tokens[0].type != IDENTIFIER)
+        return signatureError(state, "Expected a struct receiver type or pointer to one");
+    if (base.nTokens == 1) return 1;
+    if (base.tokens[1].type != LESS_THAN && base.tokens[1].type != LEFT_BRACKET)
+        return signatureError(state, "Expected a struct receiver type or pointer to one");
+    typeTokens *arguments = NULL;
+    size_t count = 0;
+    if (!parseTypeApplicationArguments(base, &arguments, &count))
+        return signatureError(state, "Invalid receiver type parameters");
+    token *names = malloc(count * sizeof(*names));
+    CHECK_MALLOC(names);
+    char ok = 1;
+    for (size_t i = 0; i < count; i++) {
+        if (arguments[i].nTokens != 1 || arguments[i].tokens[0].type != IDENTIFIER) {
+            signatureError(state, "Receiver type arguments must be type parameter names");
+            ok = 0;
+            break;
+        }
+        names[i] = arguments[i].tokens[0];
+        if (!checkTypeName(state, names[i])) { ok = 0; break; }
+        for (size_t j = 0; j < i; j++) {
+            if (!strcmp(names[i].lexeme, names[j].lexeme)) {
+                signatureError(state, "Duplicate receiver type parameter");
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok) break;
+    }
+    for (size_t i = 0; i < count; i++) free(arguments[i].tokens);
+    free(arguments);
+    if (!ok) { free(names); return 0; }
+    function->nReceiverTypeParams = count;
+    function->receiverTypeParamNames = names;
     return 1;
 }
 
@@ -1411,7 +1657,11 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
     signatureFields parameters = {0}, results = {0}, typeParams = {0}, receiver = {0};
     if (!anonymous) {
         if (tok.type == LEFT_PAREN) {
-            if (!parseSignatureFields(state, &receiver, 0, 0)) goto invalid;
+            if (!parseNameFirstParameters(state, &receiver, 0)) goto invalid;
+            if (receiver.variadic) {
+                signatureError(state, "Method receivers cannot be variadic");
+                goto invalid;
+            }
             if (receiver.count != 1 || receiver.names[0].type == EOF_TOKEN) {
                 signatureError(state, "Expected one named method receiver");
                 goto invalid;
@@ -1421,6 +1671,7 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
             free(receiver.names);
             free(receiver.types);
             receiver = (signatureFields){0};
+            if (!bindReceiverParameters(state, &function)) goto invalid;
             SET_TOK;
         }
         if (tok.type != IDENTIFIER) {
@@ -1435,9 +1686,31 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
         goto invalid;
     }
     if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
+    for (size_t i = 0; i < function.nReceiverTypeParams; i++) {
+        token bound = function.receiverTypeParamNames[i];
+        if (!strcmp(bound.lexeme, function.receiverName.lexeme)) {
+            signatureError(state, "Receiver name duplicates a receiver type parameter");
+            goto invalid;
+        }
+        for (size_t j = 0; j < typeParams.count; j++) {
+            if (!strcmp(bound.lexeme, typeParams.names[j].lexeme)) {
+                signatureError(state, "Method type parameter redeclares a receiver type parameter");
+                goto invalid;
+            }
+        }
+    }
     if (!parseSignatureFields(state, &parameters, 1, 0)) goto invalid;
     SET_TOK;
     size_t resultStart = state->tokenIndex;
+    // A named function begins a new declaration, not a function result type.
+    // Diagnose the unterminated extern here instead of consuming the next func
+    // and reporting a parameter-list error at its name. Anonymous func(...)
+    // result types remain valid.
+    if (isExtern && ((tok.type == FUNC && peek(state).type == IDENTIFIER) ||
+                     tok.type == EXTERN || tok.type == EOF_TOKEN)) {
+        signatureError(state, "Expected semicolon after extern function");
+        goto invalid;
+    }
     if (tok.type == LEFT_PAREN) {
         if (!parseSignatureFields(state, &results, 0, 0)) goto invalid;
     } else if (tok.type != LEFT_CURLY_BRACE && !(isExtern && tok.type == SEMICOLON)) {
@@ -1509,6 +1782,97 @@ invalid:
     freeSignatureFields(&typeParams);
     freeSignatureFields(&receiver);
     free(function.receiverType.tokens);
+    free(function.receiverTypeParamNames);
+    free(function.type.tokens);
+    state->hasError = state->isSynchronizing = 1;
+    return (stmt){0};
+}
+
+// Extern declarations use C ordering: extern result name(type parameter, ...);
+static stmt parseExtern(parserState *state) {
+    token tok = advance(state);
+    struct stmt_func function = {.isExtern = 1, .name = {.type = EOF_TOKEN},
+                                 .receiverName = {.type = EOF_TOKEN}};
+    signatureFields parameters = {0}, results = {0};
+    size_t start = state->tokenIndex;
+    if (!parseSignatureType(state, 0)) goto invalid;
+    size_t end = state->tokenIndex;
+    char isVoid = end == start + 1 && !strcmp(state->tokens[start].lexeme, "void");
+    if (!isVoid && !addSignatureField(state, &results, (token){.type = EOF_TOKEN}, start, end)) goto invalid;
+    function.type = copySignatureSpan(state, start, isVoid ? start : end);
+    tok = currentToken(state);
+    if (tok.type != IDENTIFIER) {
+        signatureError(state, "Expected extern function name after return type");
+        goto invalid;
+    }
+    function.name = tok;
+    tok = advance(state);
+    if (tok.type != LEFT_PAREN) {
+        signatureError(state, "Expected extern function parameter list");
+        goto invalid;
+    }
+    tok = advance(state);
+    if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "void") && peek(state).type == RIGHT_PAREN)
+        tok = advance(state);
+    while (tok.type != RIGHT_PAREN) {
+        if (signatureEllipsis(state)) {
+            if (!parameters.count) {
+                signatureError(state, "C variadic declarations require a fixed parameter");
+                goto invalid;
+            }
+            advance(state); advance(state); tok = advance(state);
+            parameters.variadic = 1;
+            if (tok.type != RIGHT_PAREN) {
+                signatureError(state, "Variadic parameter must be last");
+                goto invalid;
+            }
+            break;
+        }
+        start = state->tokenIndex;
+        if (!parseSignatureType(state, 0)) goto invalid;
+        end = state->tokenIndex;
+        if (end == start + 1 && !strcmp(state->tokens[start].lexeme, "void")) {
+            signatureError(state, "void must be the only parameter");
+            goto invalid;
+        }
+        tok = currentToken(state);
+        token name = {.type = EOF_TOKEN};
+        if (tok.type == IDENTIFIER || tok.type == UNDERSCORE) {
+            name = tok;
+            tok = advance(state);
+        }
+        if (!addSignatureField(state, &parameters, name, start, end)) goto invalid;
+        if (tok.type == RIGHT_PAREN) break;
+        if (tok.type != COMMA) {
+            signatureError(state, "Expected comma or closing parenthesis");
+            goto invalid;
+        }
+        tok = advance(state);
+        if (tok.type == RIGHT_PAREN) {
+            signatureError(state, "Expected parameter after comma");
+            goto invalid;
+        }
+    }
+    tok = advance(state);
+    if (tok.type != SEMICOLON) {
+        signatureError(state, "Expected semicolon after extern function");
+        goto invalid;
+    }
+    advance(state);
+    function.nParams = parameters.count;
+    function.paramNames = parameters.names;
+    function.paramTypeNames = parameters.types;
+    function.isVariadic = parameters.variadic;
+    function.nResults = results.count;
+    function.resultNames = results.names;
+    function.resultTypes = results.types;
+    struct stmt_func *result = malloc(sizeof(*result));
+    CHECK_MALLOC(result);
+    *result = function;
+    return (stmt){.type = STMT_FUNC, .value = result};
+invalid:
+    freeSignatureFields(&parameters);
+    freeSignatureFields(&results);
     free(function.type.tokens);
     state->hasError = state->isSynchronizing = 1;
     return (stmt){0};
@@ -1730,7 +2094,7 @@ static stmt parseStruct(parserState *state) {
             SET_TOK;
             continue;
         }
-        char indexModifier = isIndexName(tok);
+        char indexModifier = isIndexName(tok) && peek(state).type == IDENTIFIER;
         if (indexModifier) {
             if (indexField.type != EOF_TOKEN) {
                 signatureError(state, "Struct already has an indexing field");
@@ -1745,25 +2109,9 @@ static stmt parseStruct(parserState *state) {
                 continue;
             }
         }
-        size_t start = state->tokenIndex;
-        if (!parseSignatureType(state, 0)) goto invalid;
-        size_t end = state->tokenIndex;
+        if (!parseStructFields(state, &fields, &valueParams, &indexField,
+                               indexModifier, 0)) goto invalid;
         SET_TOK;
-        do {
-            if (tok.type != IDENTIFIER) {
-                signatureError(state, "Expected field name after type");
-                goto invalid;
-            }
-            if (!addSignatureField(state, &fields, tok, start, end)) goto invalid;
-            if (indexModifier) indexField = tok;
-            tok = advance(state);
-            if (tok.type != COMMA) break;
-            if (indexModifier) {
-                signatureError(state, "Index modifier must designate exactly one field");
-                goto invalid;
-            }
-            tok = advance(state);
-        } while (1);
         if (tok.type != SEMICOLON) {
             signatureError(state, "Expected semicolon after struct fields");
             goto invalid;
@@ -1774,6 +2122,8 @@ static stmt parseStruct(parserState *state) {
         char found = 0;
         for (size_t i = 0; i < fields.count; i++)
             if (!strcmp(fields.names[i].lexeme, indexField.lexeme)) found = 1;
+        for (size_t i = 0; i < valueParams.count; i++)
+            if (!strcmp(valueParams.names[i].lexeme, indexField.lexeme)) found = 1;
         if (!found) {
             signatureError(state, "Index directive must name a field of this struct");
             goto invalid;
@@ -1789,12 +2139,26 @@ static stmt parseStruct(parserState *state) {
     result->typeParamNames = typeParams.names;
     result->typeParamConstraints = typeParams.types;
     result->nVarParams = valueParams.count;
-    result->varParamTypes = valueParams.types;
-    result->varParamNames = valueParams.names;
     result->indexField = indexField;
-    result->nFields = fields.count;
-    result->fieldNames = fields.names;
-    result->fieldTypes = fields.types;
+    result->nFields = valueParams.count + fields.count;
+    if (valueParams.count) {
+        result->fieldNames = malloc(sizeof(token) * result->nFields);
+        result->fieldTypes = malloc(sizeof(typeTokens) * result->nFields);
+        CHECK_MALLOC(result->fieldNames); CHECK_MALLOC(result->fieldTypes);
+        memcpy(result->fieldNames, valueParams.names, sizeof(token) * valueParams.count);
+        memcpy(result->fieldTypes, valueParams.types, sizeof(typeTokens) * valueParams.count);
+        if (fields.count) {
+            memcpy(result->fieldNames + valueParams.count, fields.names, sizeof(token) * fields.count);
+            memcpy(result->fieldTypes + valueParams.count, fields.types, sizeof(typeTokens) * fields.count);
+        }
+        result->varParamNames = result->fieldNames;
+        result->varParamTypes = result->fieldTypes;
+        free(valueParams.names); free(valueParams.types);
+        free(fields.names); free(fields.types);
+    } else {
+        result->fieldNames = fields.names;
+        result->fieldTypes = fields.types;
+    }
     return (stmt){.type = STMT_STRUCT, .value = result};
 invalid:
     // Recursive cleanup of method bodies/signatures remains separate AST work.
@@ -2137,9 +2501,7 @@ static stmt parseStatementImpl(parserState *state) {
         case SWITCH:
             return parseSwitch(state);
         case EXTERN:
-            tok = advance(state);
-            expect(FUNC, "Expected function declaration after extern", stmt);
-            return parseFuncDeclaration(state, 1, 1, 0);
+            return parseExtern(state);
         case BREAK:
         case CONTINUE:
         case GOTO:
@@ -2230,6 +2592,7 @@ static stmt parseStatementImpl(parserState *state) {
             if (tok.type == SEMICOLON) advance(state);
             return (stmt){.type = STMT_RETURN, .value = result};
         }
+        case UNDERSCORE:
         case IDENTIFIER:
             // A complete type followed by ';' or '=' retains the existing
             // declaration meaning. Otherwise ':' introduces any statement.

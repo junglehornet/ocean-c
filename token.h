@@ -1,5 +1,6 @@
 #ifndef ocean_c_token
 #define ocean_c_token
+#include <stddef.h>
 
 enum tokenType {
     // keywords and types
@@ -43,6 +44,7 @@ enum tokenType {
 
 typedef struct {
     char *lexeme;
+    size_t stringLength; // Decoded bytes, excluding the scanner storage terminator.
     union {
         long integer;
         double floating;

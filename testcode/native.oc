@@ -1,0 +1,20 @@
+package main;
+
+extern int write(i32 fd, buffer<i8>[] data, int count);
+
+func factorial(n int) int {
+    if (n < 2) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+func main() int {
+    greeting := "Hello from Ocean and LLVM!\n";
+    write(1, greeting.data, len(greeting));
+    result := factorial(5);
+    if (result == 120) {
+        return 0;
+    }
+    return 1;
+}

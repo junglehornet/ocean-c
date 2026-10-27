@@ -1,0 +1,14 @@
+func fill(data buffer<int>[], count int) {
+    for (i := 0; i < count; i++) {
+        data[i] = i + 1;
+    }
+}
+
+func main() int {
+    count := 4;
+    data: buffer<int>[count];
+    fill(data, count);
+    view: buffer<int>[] = data;
+    view[3] = 10;
+    return data[3] - 10;
+}

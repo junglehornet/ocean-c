@@ -12,10 +12,10 @@ func main() {
 }
 
 struct Color {
-	u8 red;
-	u8 green;
-	u8 blue;
-	u8 alpha;
+	red u8;
+	green u8;
+	blue u8;
+	alpha u8;
 }
 
 enum MazeObjType {
@@ -23,11 +23,11 @@ enum MazeObjType {
 }
 
 struct MazeObj {
-	Color dispColor;
-	MazeObjType type;
+	dispColor Color;
+	type MazeObjType;
 }
 
-interface MatrixScalar<T: any> {
+interface MatrixScalar<T any> {
 	// this specifies that a MatrixScalar can not be a Matrix.
 	-Matrix;
 	// to specify that a MatrixScalar *must* be a Matrix, you could say
@@ -44,10 +44,12 @@ interface MatrixScalar<T: any> {
 	// T + self;
 }
 
-struct Matrix<T: any> (u64 width, height) {
-	index T[height][width] underlying;
+struct Matrix<T any> (u64 width, height) {
+	index underlying T[height][width];
 	// or, underlying can be declared normally and then on another line you can write:
 	// index underlying;
+	// notice that arrays are written type[length]
+	// slices are similarly written as type[]
 
 	* (MatrixScalar<T> other) {
 		for (u64 row = 0; row < self[].length; row++) {

@@ -1,0 +1,14 @@
+package main;
+
+extern int write(i32 fd, buffer<i8>[] data, int count);
+
+func main() int {
+    greeting: string = "Hello" + ", Ocean!";
+    bytes: i8[] = greeting;
+    bytes[0] = 104;
+    greeting += "\n";
+    write(1, greeting.data, len(greeting));
+    withZero := "a\0b" + "c";
+    if (len(withZero) != 4 || withZero[1] != 0) { return 1; }
+    return 0;
+}

@@ -1,0 +1,5 @@
+func main() int {
+    myBuffer: buffer<int>[4] = {1, 2, 3, 4};
+    myBuffer[3] += 1;
+    return myBuffer[3] - 5;
+}

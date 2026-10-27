@@ -17,15 +17,19 @@ Supported declaration examples:
 
 ```Ocean
 func main() {}
-func add(int a, b) int { return a + b; }
-func split(string text) (string head, tail) { return; }
-func log(string prefix, ...string values) {}
-func identity[T any](T value) T { return value; }
-func pair[T, U any](T first, U second) (T, U) { return first, second; }
-func constrained[T ~int | ~string](T value) T { return value; }
+func add(a, b int) int { return a + b; }
+func split(text string) (string head, tail) { return; }
+func log(prefix string, values ...string) {}
+func identity[T any](value T) T { return value; }
+func pair[T, U any](first T, second U) (T, U) { return first, second; }
+func constrained[T ~int | ~string](value T) T { return value; }
 ```
 
-Value parameters and named results put types first; grouped names share a type.
+Value parameters put names before types (`a, b int`); grouped names share a type.
+Named results retain type-first syntax. Method receivers use name-before-type syntax.
+Extern declarations use C ordering: `extern int write(i32 fd, buffer<i8>[] data, int count);` or
+`extern void done(void);`. Parameter names are optional; `()` and `(void)`
+both denote no parameters. A trailing `...` is accepted after fixed parameters.
 Generic type parameters retain Go's name-before-constraint syntax. Unnamed
 parameters/results and trailing commas are accepted. Variadics must be last.
 Existing Ocean statement syntax still uses explicit semicolons; `return` also
@@ -33,14 +37,14 @@ allows an immediately following closing brace.
 
 The AST stores type/constraint tokens for subsequent type resolution. Inline struct/interface bodies, generic argument lists, and array dimensions
 are grammar-validated before their token spans are retained. Struct fields use
-type-first declarations; interfaces accept method signatures, embedded types,
+name-before-type declarations (`x, y int`); interfaces accept method signatures, embedded types,
 and union constraints. Dimensions accept integer literals, qualified names,
 parentheses, unary operators, and binary operators. Ambiguous suffixes such as
 `T[N]` remain unresolved until type checking. The parser does not evaluate array
 lengths, perform semantic type checking, verify return arity/types, or instantiate
 generics. The function-type spelling `func() int` is an unnamed function type
-returning `int`. Use `func() () callback` for a named parameter whose function
-type has no results, or `func() int callback` for a named callback returning `int`.
+returning `int`. Use `callback func() ()` for a named parameter whose function
+type has no results, or `callback func() int` for a named callback returning `int`.
 
 These tests include parser.c to exercise malformed declarations directly as well
 as through parseTokens; do not compile parser.c separately into the test binary.
@@ -83,14 +87,14 @@ import "math" as m;
 import ("io", _ "side-effects");
 type Count int;
 type Alias = []int;
-struct Point { int x, y; }
+struct Point { x, y int; }
 enum Color { RED, GREEN = 2, BLUE, }
-interface Reader { Read([]byte buffer) (int, error); }
-extern func write([]byte bytes) int;
-func (*Point self) Move(int x) int { return x; }
-f := func(int x) int { return x + 1; };
+interface Reader { Read(buffer []byte) (int, error); }
+extern int write([]byte bytes);
+func (self *Point) Move(x int) int { return x; }
+f := func(x int) int { return x + 1; };
 points := {Point{x: 1, y: 2}, Point{x: 3, y: 4}};
-func run(int x) {
+func run(x int) {
     defer cleanup();
     outer: for (;;) { if (x == 0) break outer; continue; }
     switch (x) {
@@ -117,7 +121,7 @@ switch (prepare(); item := value.(type)) {
     case int, []string: use(item);
     default: break;
 }
-identity := func[T any](T value) T { return value; };
+identity := func[T any](value T) T { return value; };
 ```
 
 Type assertions use `value.(Type)`. The special `.(type)` guard is restricted
@@ -134,13 +138,14 @@ functions, or range bindings, but cannot name a type or type parameter. In a
 struct body it introduces indexing delegation in either form:
 
 ```Ocean
-struct Values { index []int data; }
-struct Matrix { T[height][width] underlying; index underlying; }
+struct Values { index data []int; }
+struct Matrix { underlying T[height][width]; index underlying; }
 ```
 
 The AST's `stmt_struct.indexField` identifies the delegated field; EOF_TOKEN
 means no field was designated. A separate directive can precede the field
-it names. The parser validates uniqueness and field existence; the type checker
+it names. The two-identifier form `index data;` is reserved for a delegation
+directive. The parser validates uniqueness and field existence; the type checker
 must validate that the target can be indexed. The expression `self[]` accesses the delegated collection, while `self[i]`
 accesses an element. Both bracketed and angle-bracket parameters are accepted.
 
@@ -209,7 +214,7 @@ Each semicolon-terminated embedded type or union is retained in
 Methods remain in `stmt_interface.methods`. The parser validates the grammar;
 type resolution, type-set compatibility, and constraint satisfaction belong to
 semantic analysis. Angle-bracket interface parameters such as
-`interface Scalar<T: any> { ... }` are also accepted.
+`interface Scalar<T any> { ... }` are also accepted.
 
 ## Generic calls
 
@@ -219,7 +224,7 @@ instantiation, including standalone generic function values:
 ```Ocean
 identity[int](value);
 pkg.pair[pkg.Item, []string,](first, second);
-apply[map[string]int, func(int x) (int)](callback);
+apply[map[string]int, func(x int) (int)](callback);
 callback := identity[int];
 identity<int>(value);
 ```
@@ -244,8 +249,8 @@ parameter grammar as generic functions:
 
 ```Ocean
 struct Pair[T, U any] {
-    T first;
-    U second;
+    first T;
+    second U;
 }
 
 interface Mapper[T any, U ~int | ~string] {
@@ -254,8 +259,10 @@ interface Mapper[T any, U ~int | ~string] {
 }
 ```
 
-Grouped names share a constraint; trailing commas are accepted. Empty lists,
-missing constraints, duplicate parameter names, and reserved type names are
+Grouped names share a constraint; trailing commas are accepted. Omitted
+constraints default to `any`: `<T>` is equivalent to `<T any>`, and `<T, U>`
+defaults both names to `any`. This also applies to square-bracket declarations,
+interfaces, and anonymous functions. Empty lists, duplicate parameter names, and reserved type names are
 rejected. Both AST declaration nodes retain `nTypeParams`, `typeParamNames`,
 and `typeParamConstraints`; each constraint is a complete token span, excluding
 parameter separators. Struct constraints now use `typeTokens` rather than the
@@ -263,8 +270,8 @@ old unused single-token `typeParamInterfaces` field.
 
 Fields, indexing delegation, embedded interfaces, and method signatures may
 reference parameters. Binding those references and enforcing constraints remain
-semantic work. Angle parameters use a colon before each constraint group,
-for example `struct Pair<T, U: any> { T first; U second; }`. Nested type
+semantic work. Angle parameters place each constraint directly after its parameter names,
+for example `struct Pair<T, U any> { first T; second U; }`. Nested type
 arguments such as `Box<Box<int>>` are accepted without changing shift tokens.
 
 ## Struct value parameters
@@ -273,24 +280,34 @@ An optional value-parameter list follows the struct name and any type parameters
 
 ```Ocean
 struct Matrix[T any](u64 width, height) {
-    index T[height][width] underlying;
+    index underlying T[height][width];
 }
 
 struct Buffer(u64 capacity) {
-    byte[capacity] data;
+    data byte[capacity];
 }
 ```
 
-Value parameters use type-first declarations. Grouped names share a type;
+Struct value parameters retain type-before-name declarations (`int size`). Grouped names share a type;
 trailing commas and empty lists are accepted. Each parameter must have a name.
 Duplicate names, collisions with type parameters, blank/unnamed parameters,
 variadics, and default values are rejected. `index` remains a valid value name.
 
-The AST retains `nVarParams`, `varParamNames` (tokens), and `varParamTypes`
-(complete type spans). These replace the previously unused string-pointer
-arrays. Parameter references in field dimensions remain tokens for subsequent
-name resolution and constant evaluation. This adds declaration parsing; value
-argument application and struct instantiation are not implemented here.
+The complete `fieldNames`/`fieldTypes` arrays start with value parameters, in
+parameter declaration order, followed by body fields. `nFields` includes this
+prefix, and `nVarParams` marks its immutable extent. `varParamNames` and
+`varParamTypes` are non-owning views into that prefix. Field/parameter collisions
+are rejected, and indexing directives may refer to a parameter field.
+
+The semantic checker permits parameter initialization in composites and rejects
+later assignment, compound assignment, increments, simultaneous assignment, and
+mutable-address escapes. Ordinary fields and referenced buffer elements remain
+writable. Methods, implicit `self`, pointer receivers, and nested value fields
+respect the same rules, including concrete generic type arguments and nested
+generic field types. Built-in arrays have an immutable `size` parameter and
+mutable `data` storage supporting copy assignments and element writes.
+Value argument application remains unimplemented. Native struct values and
+concrete generic struct layouts are supported by the backend.
 
 ## Operator methods and custom interface constraints
 
@@ -298,7 +315,7 @@ Struct bodies accept operator methods with an implicit `self` receiver:
 
 ```Ocean
 struct Number[T any] {
-    T value;
+    value T;
     +(T other) T { return self.value + other; }
     -() T { return -self.value; }
 }
@@ -410,7 +427,7 @@ printing, and incorrect command-line success statuses on errors.
 
 ## Pending incomplete features
 
-The [pending inventory](pending/README.md) defines 64 future acceptance
+The [pending inventory](pending/README.md) defines 63 future acceptance
 contracts across 21 incomplete feature areas. CTest lists them individually
 under the `pending` label. Unmet contracts are reported as skipped/XFAIL;
 unexpected successes fail so they can be promoted to regression tests.
@@ -426,3 +443,126 @@ The default test run includes both groups. Python 3 is now required when
 `BUILD_TESTING` is enabled. Inventory validation and 26 harness self-tests are
 regular passing tests. Crashes and sanitizer reports fail the pending suite;
 they are not treated as missing features.
+
+`semantic_test` exercises the standalone `analyzeSemantics` pass and its CLI
+integration. The pass checks lexical names, duplicate declarations, basic
+operators, initializers, assignments, call arguments, return values and struct
+fields. It rewrites ambiguous single-name bracket expressions to index nodes
+when the name resolves to a value, and substitutes explicit generic arguments
+in function signatures. Each input file is currently analyzed independently.
+Package loading, generic constraints, constant dimensions, overload selection,
+label validation and control-flow completeness are not implemented yet.
+
+`backend_test.py` compiles single-file programs through both the native driver
+and saved LLVM IR, runs the executables, and checks exit status and output.
+It covers recursion, numeric casts, extern calls, branches, nested loops,
+shadowing, named results, short-circuit evaluation, and output preservation on
+failure. These tests require Clang and a working native linker/C runtime.
+
+Native function tests cover empty and nonempty variadic argument packs, fixed
+arguments, array expansion, rejection of buffer expansion, variadic forwarding,
+normal array fields, `len()`, and checked variadic indexing. They also cover C variadic ABI calls, heterogeneous
+multiple returns, named results, forwarding, unpacking, discards, and simultaneous
+assignment. Calls producing several values are expanded only when they are the
+sole expression in a declaration, return, argument list, or assignment RHS.
+
+Runtime buffer tests cover once-only bound evaluation, arithmetic and function
+call bounds, unsized parameter mutation, inferred backing storage, pointer
+aliases, C pointer interoperability, and stack restoration on block exit,
+`break`, and `continue`. Buffers carry no runtime length metadata.
+
+Built-in array tests verify `T[]`/`T[count]`, runtime counts, zero-length arrays,
+inline `int size` followed by payload bytes (including a native memory comparison),
+`.size`/`.data` access, `len()` derived from bytes, scalar element widths, nested
+arrays, arrays of fixed buffers, aliasing, function calls, stack restoration,
+and malformed calls and element types. `sizeof` tests ensure operands are not
+executed and that element storage sizes match native LLVM layout.
+
+`array_bounds_test.py` verifies bounds failures for reads, writes, increments,
+negative indices, empty and nested arrays, element widths, and recursion.
+Each case runs both the native compiler output and independently optimized
+LLVM IR, checks the exact source location and caret, and validates the call
+trace. Source replacement/deletion and filenames containing percent signs and
+quotes exercise embedded diagnostics. Raw buffer indexing stays unchecked.
+
+Array data-copy tests cover buffers, overlapping/self copies, literal capacity
+errors, zero/empty-string padding, nested defaults, RHS evaluation order, and
+unchanged array metadata. Struct parameter tests verify prefix order, canonical
+AST views, initialization, read-only mutations/addresses, and mutable payloads.
+
+Variadic array tests verify that parameters use the same native pointer-to-inline
+array representation as `T[]` (including a native byte comparison), without a
+private pointer/length view. They cover explicit items plus expansion, reference
+sharing versus concatenation copies, zero-item packs, ordinary array parameters,
+nested element types, single evaluation, normal array data assignment, caller
+stack lifetime, and bounds diagnostics in variadic callees.
+
+Contextual literal tests cover array/buffer/struct destinations, inference in
+nonempty declarations, nested fields and elements, multiple assignment, fixed
+buffer padding, and explicit `T[]{...}` / `buffer<T>{...}` prefixes. Function
+arguments and return values require explicit prefixes. Untyped call/return
+literals, ambiguous empty inference, scalar destinations, mismatched elements,
+and invalid keys are rejected. Native literal tests also verify single evaluation,
+array expansion, storage widths, zero values, and stack restoration.
+
+
+Strings are aliases for `i8[]`, with no implicit terminator. Backend regressions
+cover signed byte storage and casts, byte counts, embedded zeros, aliasing,
+empty strings, concatenation and `+=`, independent concatenation storage,
+mutable `.data`, nested default strings, string expansion, and loop stack
+restoration. String cases also execute saved LLVM IR with `-O2`. Bounds
+regressions verify source snippets and call traces for string indexing and
+oversized data literals. C integration uses explicit raw buffers and lengths;
+C string format tests append their own zero byte.
+
+
+Native struct regressions execute compiler output and optimized saved LLVM IR.
+They cover positional/keyed/nested composites, zero and empty defaults, value
+copies, arguments and returns, multiple returns, variadics, fixed buffers,
+arrays, field mutations, pointer dereferencing and equality, recursive pointers,
+local declarations, and immutable parameter fields. Generic layout assertions
+verify concrete field types, reuse of instantiations, and absence of runtime
+type argument fields. A linked C helper checks field access, alignment, padding,
+and sizes across two instantiations through pointer parameters. Invalid inline
+recursive values, expanding recursive specializations, runtime-sized inline
+fields, and C struct arguments/returns by value produce explicit errors.
+
+## Method receiver bindings
+
+Method receivers use `name type`, just like ordinary parameters and struct fields:
+
+```Ocean
+struct Node<T any> { value T; next *Node<T>; }
+func (n *Node<T>) set(value T) { n.value = value; }
+```
+
+`T` is declared by the receiver and inherits the corresponding struct parameter's
+constraint. Receiver bindings are positional and may be renamed, as in
+`func (n *Node<E>) get() E { return n.value; }`. Angle and square generic lists,
+value receivers, and prefix or suffix pointers are accepted. The receiver must
+name a struct, and its parameter count must match that struct. Each argument
+must be a distinct fresh type parameter name, rather than a concrete or nested
+type. Receiver bindings are scoped to the method signature and body.
+
+Method-specific parameters can be declared separately (`set<U any>`), but cannot
+redeclare a receiver binding. Receiver variables and ordinary parameters cannot
+reuse a receiver type parameter's name. Named results still use type-first syntax.
+Constraint spans are inherited from the struct; constraint satisfaction remains
+part of the compiler's unfinished generic semantics.
+
+Direct calls to named methods compile for concrete structs and generic struct
+specializations. The backend emits one function per method, concrete receiver type, and method
+type argument list, passing the receiver as an extra first argument. Pointer receivers borrow
+addressable values; value receivers receive copies, including calls through a
+pointer. Non-addressable temporaries cannot call pointer methods. Borrowing an
+immutable value field for a pointer method is rejected. Recursive calls, calls
+between methods, multiple results, and variadic parameters are supported.
+Method-specific parameters use explicit call arguments, for example
+`func (b Box<T>) take<U>(value U) U { return value; }` and
+`b.take<int>(7)`. Both angle and square lists work, omitted declaration
+constraints default to `any`, and the method bindings are independent of receiver
+bindings. Type arguments are resolved in the caller's scope, allowing recursive
+calls and calls between generic methods. Missing or incorrect type argument
+counts are diagnosed; argument inference is not implemented. Bound method values
+and operator dispatch remain unsupported by code generation. Backend tests exercise method calls with
+both unoptimized and optimized LLVM IR and verify specialization reuse.

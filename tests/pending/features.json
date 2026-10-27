@@ -4,7 +4,7 @@
     {
       "id": "unicode",
       "stage": "scanner",
-      "reason": "Unicode escapes, UTF-8 string bytes, and non-ASCII identifiers are incomplete.",
+      "reason": "Unicode escapes and non-ASCII identifiers are incomplete.",
       "syntax": "existing",
       "cases": [
         {
@@ -16,11 +16,6 @@
           "id": "long_escape",
           "source": "\"\\U0001F30A\"",
           "check": "wave"
-        },
-        {
-          "id": "utf8_string",
-          "source": "\"\u03a9\"",
-          "check": "omega"
         },
         {
           "id": "identifier",
@@ -102,7 +97,7 @@
       "cases": [
         {
           "id": "load_package",
-          "source": "package main; import \"example/math\" as m; func use(any value) {} func main() { use(m.Answer); }",
+          "source": "package main; import \"example/math\" as m; func use(value any) {} func main() { use(m.Answer); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -110,7 +105,7 @@
             }
           },
           "files": {
-            "main.oc": "package main; import \"example/math\" as m; func use(any value) {} func main() { use(m.Answer); }",
+            "main.oc": "package main; import \"example/math\" as m; func use(value any) {} func main() { use(m.Answer); }",
             "math/math.oc": "package math; Answer := 42;"
           }
         },
@@ -124,13 +119,13 @@
         },
         {
           "id": "missing_export",
-          "source": "import \"example/math\" as m; func use(any value) {} func main() { use(m.Missing); }",
+          "source": "import \"example/math\" as m; func use(value any) {} func main() { use(m.Missing); }",
           "expected": {
             "ok": false,
             "diagnostic": "unresolved_export"
           },
           "files": {
-            "main.oc": "import \"example/math\" as m; func use(any value) {} func main() { use(m.Missing); }",
+            "main.oc": "import \"example/math\" as m; func use(value any) {} func main() { use(m.Missing); }",
             "math/math.oc": "package math; Answer := 42;"
           }
         }
@@ -177,7 +172,7 @@
         },
         {
           "id": "shadowing",
-          "source": "func use(any value) {} func main() { x := 1; { x := \"inner\"; use(x); } use(x); }",
+          "source": "func use(value any) {} func main() { x := 1; { x := \"inner\"; use(x); } use(x); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -214,7 +209,7 @@
         },
         {
           "id": "call_arity",
-          "source": "func takes(int x) {} func main() { takes(); }",
+          "source": "func takes(x int) {} func main() { takes(); }",
           "expected": {
             "ok": false,
             "diagnostic": "argument_count"
@@ -222,7 +217,7 @@
         },
         {
           "id": "call_type",
-          "source": "func takes(int x) {} func main() { takes(\"text\"); }",
+          "source": "func takes(x int) {} func main() { takes(\"text\"); }",
           "expected": {
             "ok": false,
             "diagnostic": "argument_type"
@@ -238,7 +233,7 @@
         },
         {
           "id": "composite",
-          "source": "struct Point { int x; } func main() { value := Point{x: \"text\"}; }",
+          "source": "struct Point { x int; } func main() { value := Point{x: \"text\"}; }",
           "expected": {
             "ok": false,
             "diagnostic": "field_type"
@@ -254,7 +249,7 @@
       "cases": [
         {
           "id": "substitution",
-          "source": "func identity[T any](T value) T { return value; } func main() { x := identity[int](1); }",
+          "source": "func identity[T any](value T) T { return value; } func main() { x := identity[int](1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -264,7 +259,7 @@
         },
         {
           "id": "arity",
-          "source": "func identity[T any](T value) T { return value; } func main() { identity[int, string](1); }",
+          "source": "func identity[T any](value T) T { return value; } func main() { identity[int, string](1); }",
           "expected": {
             "ok": false,
             "diagnostic": "type_argument_count"
@@ -272,7 +267,7 @@
         },
         {
           "id": "constraint",
-          "source": "func number[T ~int](T value) T { return value; } func main() { number[string](\"text\"); }",
+          "source": "func number[T ~int](value T) T { return value; } func main() { number[string](\"text\"); }",
           "expected": {
             "ok": false,
             "diagnostic": "constraint_violation"
@@ -288,7 +283,7 @@
       "cases": [
         {
           "id": "indexed_callable",
-          "source": "func main() { callbacks := {func(int x) int { return x; }}; i := 0; result := callbacks[i](1); }",
+          "source": "func main() { callbacks := {func(x int) int { return x; }}; i := 0; result := callbacks[i](1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -298,7 +293,7 @@
         },
         {
           "id": "generic_callable",
-          "source": "func identity[T any](T value) T { return value; } func main() { identity[int](1); }",
+          "source": "func identity[T any](value T) T { return value; } func main() { identity[int](1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -316,7 +311,7 @@
       "cases": [
         {
           "id": "callable",
-          "source": "func identity[T any](T value) T { return value; } func main() { f := identity[int]; result := f(1); }",
+          "source": "func identity[T any](value T) T { return value; } func main() { f := identity[int]; result := f(1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -346,7 +341,7 @@
         },
         {
           "id": "type_argument",
-          "source": "struct Box[T any] { T value; } type IntBox Box[int];",
+          "source": "struct Box[T any] { value T; } type IntBox Box[int];",
           "expected": {
             "ok": true,
             "facts": {
@@ -357,7 +352,7 @@
         },
         {
           "id": "reserved_type",
-          "source": "struct Box[T any] { T value; } type Bad Box[index];",
+          "source": "struct Box[T any] { value T; } type Bad Box[index];",
           "expected": {
             "ok": false,
             "diagnostic": "reserved_type_name"
@@ -513,7 +508,7 @@
       "cases": [
         {
           "id": "resolve",
-          "source": "extern func external(int value) int; func main() { x := external(1); }",
+          "source": "extern int external(int value); func main() { x := external(1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -526,7 +521,7 @@
         },
         {
           "id": "missing",
-          "source": "extern func missing(); func main() { missing(); }",
+          "source": "extern void missing(void); func main() { missing(); }",
           "expected": {
             "ok": false,
             "diagnostic": "unresolved_extern"
@@ -543,7 +538,7 @@
       "cases": [
         {
           "id": "substitution",
-          "source": "struct Matrix[T any](u64 width, height) { T[height][width] data; } type M Matrix[int](3, 2);",
+          "source": "struct Matrix[T any](u64 width, height) { data T[height][width]; } type M Matrix[int](3, 2);",
           "expected": {
             "ok": true,
             "facts": {
@@ -556,7 +551,7 @@
         },
         {
           "id": "arity",
-          "source": "struct Buffer(u64 size) { byte[size] data; } type B Buffer();",
+          "source": "struct Buffer(u64 size) { data byte[size]; } type B Buffer();",
           "expected": {
             "ok": false,
             "diagnostic": "value_argument_count"
@@ -564,7 +559,7 @@
         },
         {
           "id": "type",
-          "source": "struct Buffer(u64 size) { byte[size] data; } type B Buffer(\"large\");",
+          "source": "struct Buffer(u64 size) { data byte[size]; } type B Buffer(\"large\");",
           "expected": {
             "ok": false,
             "diagnostic": "value_argument_type"
@@ -580,7 +575,7 @@
       "cases": [
         {
           "id": "selection",
-          "source": "struct Number { int value; +(int rhs) Number { return self; } +(string rhs) string { return rhs; } } func main() { n := Number{value: 1}; result := n + 2; }",
+          "source": "struct Number { value int; +(int rhs) Number { return self; } +(string rhs) string { return rhs; } } func main() { n := Number{value: 1}; result := n + 2; }",
           "expected": {
             "ok": true,
             "facts": {
@@ -623,7 +618,7 @@
       "cases": [
         {
           "id": "exclude",
-          "source": "struct Matrix {} interface Scalar { -Matrix; } func takes[T Scalar](T value) {} func main() { takes[Matrix](Matrix{}); }",
+          "source": "struct Matrix {} interface Scalar { -Matrix; } func takes[T Scalar](value T) {} func main() { takes[Matrix](Matrix{}); }",
           "expected": {
             "ok": false,
             "diagnostic": "constraint_violation"
@@ -631,7 +626,7 @@
         },
         {
           "id": "require",
-          "source": "struct Required {} interface Exact { =Required; } func takes[T Exact](T value) {} func main() { takes[int](1); }",
+          "source": "struct Required {} interface Exact { =Required; } func takes[T Exact](value T) {} func main() { takes[int](1); }",
           "expected": {
             "ok": false,
             "diagnostic": "constraint_violation"
@@ -639,14 +634,14 @@
         },
         {
           "id": "permit",
-          "source": "struct Optional {} interface Allowed { +Optional; } func takes[T Allowed](T value) {} func main() { takes[Optional](Optional{}); }",
+          "source": "struct Optional {} interface Allowed { +Optional; } func takes[T Allowed](value T) {} func main() { takes[Optional](Optional{}); }",
           "expected": {
             "ok": true
           }
         },
         {
           "id": "operator",
-          "source": "struct Opaque {} interface Multiply { self * int; } func takes[T Multiply](T value) {} func main() { takes[Opaque](Opaque{}); }",
+          "source": "struct Opaque {} interface Multiply { self * int; } func takes[T Multiply](value T) {} func main() { takes[Opaque](Opaque{}); }",
           "expected": {
             "ok": false,
             "diagnostic": "missing_required_operator"
@@ -662,7 +657,7 @@
       "cases": [
         {
           "id": "not_indexable",
-          "source": "struct Broken { index int value; }",
+          "source": "struct Broken { index value int; }",
           "expected": {
             "ok": false,
             "diagnostic": "not_indexable"
@@ -670,7 +665,7 @@
         },
         {
           "id": "element_type",
-          "source": "struct Values { index []int data; } func main() { values: Values; x := values[0]; }",
+          "source": "struct Values { index data []int; } func main() { values: Values; x := values[0]; }",
           "expected": {
             "ok": true,
             "facts": {
@@ -688,7 +683,7 @@
       "cases": [
         {
           "id": "success",
-          "source": "struct Box[T any] { T value; } func f() { x := Box[int]{value: 1}; }",
+          "source": "struct Box[T any] { value T; } func f() { x := Box[int]{value: 1}; }",
           "expected": {
             "ok": true,
             "facts": {
@@ -699,7 +694,7 @@
         },
         {
           "id": "recovery",
-          "source": "func broken(int x int y) {} func good() {}",
+          "source": "func broken(y int x int) {} func good() {}",
           "expected": {
             "ok": false,
             "facts": {
@@ -710,7 +705,7 @@
         },
         {
           "id": "partial_operator",
-          "source": "struct Broken { int value; +(int other) { return; } +(int other); }",
+          "source": "struct Broken { value int; +(int other) { return; } +(int other); }",
           "expected": {
             "ok": false,
             "facts": {

@@ -1,0 +1,19 @@
+func summarize(values ...int) (int, int) {
+    total := 0;
+    for (i := 0; i < len(values); i++) {
+        total += values[i];
+    }
+    return total, len(values);
+}
+
+func forward(values ...int) (int, int) {
+    return summarize(values...);
+}
+
+func main() int {
+    numbers := int[3];
+    numbers.data = {1, 2, 3};
+    total, count := forward(numbers...);
+    total, count = count, total;
+    return total + count - 9;
+}

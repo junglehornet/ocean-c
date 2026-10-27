@@ -1,12 +1,12 @@
 # Pending acceptance tests
 
 This inventory covers the incomplete compiler features documented in
-[the test README](../README.md). It defines **64 contracts across 21
+[the test README](../README.md). It defines **63 contracts across 21
 feature areas**, separate from the regression suites for implemented behavior.
 Completed parser contracts are covered by `parser_extensions_test` and the
 other parser regression suites.
 
-There are **12 executable probes** of current scanner/printer behavior
+There are **11 executable probes** of current scanner/printer behavior
 and **52 semantic/ownership fixtures** awaiting test drivers. The latter are
 acceptance specifications, not claims that missing compiler stages have been
 executed or tested successfully. Each fixture has a concrete source and expected

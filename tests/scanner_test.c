@@ -58,6 +58,10 @@ int main(void) {
            list->arr[1].line == 2 && list->arr[1].column == 2 &&
            list->arr[3].line == 3 && !strcmp(list->arr[3].filename, "scanner-test"));
     release(list);
+    list = scan("\n\n\tarr[index]");
+    assert(list->arr[0].line == 3 && list->arr[0].column == 2);
+    assert(list->arr[1].type == LEFT_BRACKET && list->arr[1].line == 3 && list->arr[1].column == 5);
+    release(list);
     enum tokenType names[] = {IDENTIFIER, IDENTIFIER};
     kinds("first /* outer /* nested */ still outer */ second // EOF comment", names, 2);
     kinds("first // comment\nsecond", names, 2);
@@ -92,9 +96,14 @@ int main(void) {
     assert(!strcmp(list->arr[0].lexeme, "'a'"));
     release(list);
     list = scan("\"\\08\" \"\\x00A\" \"\\e\"");
+    assert(list->arr[0].stringLength == 2 && list->arr[1].stringLength == 2);
     assert(!memcmp(list->arr[0].lexeme, "\0" "8\0", 3));
     assert(!memcmp(list->arr[1].lexeme, "\0A\0", 3));
     assert((unsigned char)list->arr[2].lexeme[0] == 27 && !list->arr[2].lexeme[1]);
+    release(list);
+    list = scan("\"Ω\"");
+    assert(list->arr[0].type == LITERAL_STRING && list->arr[0].stringLength == 2);
+    assert(!memcmp(list->arr[0].lexeme, "\xCE\xA9", 2));
     release(list);
     int unicodeStatus;
     char *unicodeOutput = capture_child(unicode_placeholders, &unicodeStatus);

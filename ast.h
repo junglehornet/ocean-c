@@ -84,12 +84,12 @@ struct stmt_struct {
     typeTokens *typeParamConstraints;
     token *typeParamNames;
     size_t nVarParams;
-    typeTokens *varParamTypes; // Complete type spans, one per value parameter.
-    token *varParamNames;
+    typeTokens *varParamTypes; // Non-owning view of the first nVarParams fieldTypes.
+    token *varParamNames; // Non-owning view of the first nVarParams fieldNames.
 
     size_t nOperatorMethods;
     struct stmt_func *operatorMethods; // name holds the operator token; receiver is implicit self.
-    size_t nFields;
+    size_t nFields; // Includes the immutable value-parameter prefix, in declaration order.
     typeTokens *fieldTypes;
     token *fieldNames;
 };
@@ -162,6 +162,9 @@ struct stmt_func {
     token name;
     token receiverName; // EOF_TOKEN when this is not a method.
     typeTokens receiverType;
+    // Names bind positionally to the receiver struct's type parameters.
+    size_t nReceiverTypeParams;
+    token *receiverTypeParamNames;
 
     size_t nParams;
     token *paramNames;
@@ -221,6 +224,7 @@ enum exprType {
     EXPR_TYPE_COMPOSITE,
     EXPR_TYPE_INSTANTIATION,
     EXPR_TYPE_ASSERTION,
+    EXPR_TYPE_ARRAY_NEW,
 };
 
 struct expr {
@@ -233,10 +237,13 @@ struct expr_identifier {
 };
 
 struct expr_call {
+    char spread; // Expand the final array argument.
+    char packsVariadic; // This call creates a caller-scoped ordinary array.
     expr func;
 
     size_t nParams;
     expr *params;
+    token location; // Opening call parenthesis, for runtime call traces.
 };
 
 // Generic values and expr_call.func for f[T, U](...). An identifier argument
@@ -245,6 +252,7 @@ struct expr_instantiation {
     expr parent;
     size_t nTypeArguments;
     typeTokens *typeArguments;
+    token location; // Opening bracket, retained when an ambiguous index is resolved.
 };
 
 struct expr_dot {
@@ -270,10 +278,17 @@ enum literalType {
 
 struct expr_literal {
     enum literalType type;
+    size_t stringLength;
     void *value;
 };
 
+struct expr_array_new {
+    typeTokens elementType;
+    expr count;
+};
+
 struct expr_unary {
+    typeTokens sizeofType; // Present for sizeof(T), rather than sizeof(value).
     expr child;
     enum unaryExprType operation;
 };
@@ -292,9 +307,13 @@ struct expr_assertion {
 struct expr_index {
     expr parent;
     expr index; // EXPR_TYPE_NULL denotes access to the delegated collection.
+    token location; // Opening subscript bracket.
 };
 
 struct expr_composite {
+    typeTokens literalType; // Resolved explicit prefix, for standalone construction.
+    token location;
+    char inferredArray; // An inferred declaration defaults to an array.
     expr type; // EXPR_TYPE_NULL for an inferred-type literal: {1, 2, 3}.
     size_t nEntries;
     expr *keys; // EXPR_TYPE_NULL entries for positional values.

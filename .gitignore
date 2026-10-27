@@ -1,1 +1,47 @@
-CMakeFiles
+# CMake build directories and generated configuration
+/build/
+/build-*/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+DartConfiguration.tcl
+cmake_install.cmake
+/Makefile
+/build.ninja
+/.ninja_deps
+/.ninja_log
+compile_commands.json
+
+# CTest output and generated fixtures
+Testing/
+/cli-fixtures/
+
+# Compiler and test executables from an in-source build
+/ocean-c
+/*_test
+/pending_probe
+
+# Compiled objects, libraries, executables, and debug data
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.dSYM/
+/a.out
+/a.ll
+
+# Coverage data and Python bytecode caches
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+__pycache__/
+*.py[cod]

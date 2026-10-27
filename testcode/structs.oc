@@ -1,0 +1,33 @@
+package main;
+
+struct Point {
+    x int;
+    y int;
+}
+
+struct Box<T any>(int tag) {
+    value T;
+}
+
+func make() Box<Point> {
+    return Box<Point>{7, {2, 3}};
+}
+
+func update(box *Box<Point>) {
+    box.value.x += 4;
+}
+
+func main() int {
+    original := make();
+    copy := original;
+    update(&copy);
+    boxes := Box<Point>[]{{8, {9, 10}}, original};
+    boxes[1].value.y++;
+    if (original.tag != 7 || original.value.x != 2 || copy.value.x != 6) {
+        return 1;
+    }
+    if (boxes[1].value.y != 4 || len(boxes) != 2) {
+        return 2;
+    }
+    return 0;
+}

@@ -20,6 +20,8 @@ target_sources(ocean-c
         scanner.c
         parser.c
         ast.c
+        semantic.c
+        backend.c
 )
 
 if(UNIX)
@@ -42,6 +44,8 @@ if(BUILD_TESTING)
         add_executable(ast_test tests/ast_test.c ast.c)
         list(APPEND ocean_test_targets ast_test)
     endif()
+    add_executable(semantic_test tests/semantic_test.c semantic.c parser.c scanner.c token.c dynarray.c)
+    list(APPEND ocean_test_targets semantic_test)
     add_executable(hashmap_test tests/hashmap_test.c c-hashmap/map.c)
     list(APPEND ocean_test_targets hashmap_test)
     foreach(test_name IN LISTS ocean_test_targets)
@@ -87,4 +91,12 @@ if(BUILD_TESTING)
     add_test(NAME pending_runner_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/pending_runner_test.py")
     set_tests_properties(pending_inventory pending_runner_test PROPERTIES TIMEOUT 30)
+
+    find_program(OCEAN_CLANG_EXECUTABLE clang REQUIRED)
+    add_test(NAME backend_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(backend_test PROPERTIES TIMEOUT 60)
+    add_test(NAME array_bounds_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/array_bounds_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(array_bounds_test PROPERTIES TIMEOUT 60)
 endif()

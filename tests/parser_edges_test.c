@@ -96,7 +96,7 @@ int main(void) {
     invalid("if (x := 1; ) {}"); invalid("if (x) {} else +;");
     invalid("for (a, b, c := range xs) {}"); invalid("for (item := range) {}");
     invalid("for (defer) {}"); invalid("defer f();");
-    invalid("func (Point p) M() (int p) {}");
+    invalid("func (p Point) M() (int p) {}");
     invalid("import \"io\""); invalid("import (\"io\", \"math\"");
     invalid("type A [pkg.]int;");
     assert(parseTokens(NULL).hasError);

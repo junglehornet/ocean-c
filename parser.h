@@ -23,8 +23,12 @@ struct parseResult {
     char *packageName;
 
     char hasError;
+    const char *sourceText; // Borrowed source, used to embed runtime diagnostics.
+    const char *sourceFilename;
 };
 
 parseResult parseTokens(tokenlist *tokens);
+expr *parseBufferDimension(typeTokens dimension);
+char parseTypeApplicationArguments(typeTokens span, typeTokens **arguments, size_t *count);
 
 #endif
