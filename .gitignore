@@ -15,10 +15,10 @@ compile_commands.json
 
 # CTest output and generated fixtures
 Testing/
-/cli-fixtures/
 
 # Compiler and test executables from an in-source build
 /ocean-c
+/ocean
 /*_test
 /pending_probe
 

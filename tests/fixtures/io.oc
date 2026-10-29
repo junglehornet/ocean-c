@@ -1,0 +1,147 @@
+package io;
+extern int write(i32 fd, buffer<i8>[] data, int count);
+extern i32 snprintf(buffer<i8>[] out, int size, buffer<i8>[] format, ...);
+
+func cStrOf(oceanString string) string {
+	oceanString += "\0";
+	return oceanString;
+}
+
+func Print(items ...any) {
+	totalString := Sprint(items...);
+	extern.write(1, totalString.data, len(totalString));
+}
+
+func Println(items ...any) {
+	Print(items...);
+	extern.write(1, "\n".data, 1);
+}
+
+func Sprint(items ...any) string {
+	totalString := "";
+	for (i, item := range items) {
+		if (i > 0 && !isString(items[i - 1]) && !isString(item)) totalString += " ";
+		totalString += sprintItem(item);
+	}
+	return totalString;
+}
+
+// Ccean's Sprintf (and Printf) functions don't use C-style format templates.
+// rather, {} is replaced with a variable
+func Sprintf(format string, items ...any) string {
+	str := "";
+	itemsIndex := 0;
+	for (i := 0; i < len(format); i++) {
+		c := format[i];
+		switch (c) {
+			case '{':
+				// handle formats
+				if (i + 1 < len(format) && format[i + 1] == '}') {
+					i++;
+					if (itemsIndex < len(items)) {
+						str += sprintItem(items[itemsIndex++]);
+					} else {
+						return panic "Sprintf() called with not enough variables to insert";
+					}
+				} else {
+					str += c;
+				}
+			case '\\':
+				if (i + 1 < len(format) && format[i + 1] == '{') {
+					str += '{';
+					i++;
+				} else if (i + 1 < len(format) && format[i + 1] == '\\') {
+					str += '\\';
+					i++;
+				} else {
+					str += c;
+				}
+			default:
+				str += c;
+		}
+	}
+	if (itemsIndex < len(items)) return panic "Sprintf() called with too many variables to insert.";
+	return str;
+}
+
+func isString(item any) bool {
+	switch (item.(type)) {
+		case string:
+			return true;
+		default:
+			return false;
+	}
+}
+
+func sprintItem(item any) string {
+	switch (item.(type)) {
+		case int:
+			return sprintInt(item.(int));
+		case i32:
+			return sprintInt(item.(i32)->int);
+		case i16:
+			return sprintInt(item.(i16)->int);
+		case i8:
+			return sprintInt(item.(i8)->int);
+		case float:
+			return sprintFloat(item.(float), 2);
+		case f32:
+			return sprintFloat(item.(f32)->float, 2);
+		case string:
+			return item.(string);
+		case buffer:
+			return "[buffer]";
+		case mixed any[]:
+			str := "[";
+			for (i, value := range item.(mixed any[])) {
+				str += (i > 0 ? " " : "") + sprintItem(value);
+			}
+			return str + "]";
+		default:
+			return "[unknown type]"
+	}
+}
+
+func digitToChar(x int) i8 {
+	if (x < 0 || x > 9) return panic "digitToChar() called with invalid value (<0 or >9)";
+	c := x->i8;
+	return c + 48;
+}
+
+func sprintInt(x int) string {
+    negative := x < 0;
+    // Keep the magnitude negative so the smallest signed integer is representable.
+    if (x > 0) x = -x;
+    str := "";
+    for (;;) {
+        str = digitToChar(-(x % 10)) + str;
+        x /= 10;
+        if (x == 0) break;
+    }
+    return negative ? "-" + str : str;
+}
+
+// -1 selects enough significant digits to round-trip a float.
+func sprintFloat(x float, decimals int) string {
+    if (decimals < -1) return panic "invalid decimal count";
+    format := cStrOf(decimals == -1 ? "%.17g" : "%.*f");
+    scratch := i8[1];
+    size := decimals == -1 ? extern.snprintf(scratch.data, 0, format.data, x)
+                          : extern.snprintf(scratch.data, 0, format.data, decimals->i32, x);
+    if (size < 0) return panic "float formatting failed";
+    bytes := i8[(size->int) + 1];
+    if (decimals == -1) {
+        extern.snprintf(bytes.data, len(bytes), format.data, x);
+    } else {
+        extern.snprintf(bytes.data, len(bytes), format.data, decimals->i32, x);
+    }
+    str := "";
+    hasPoint := false;
+    for (i := 0; i < size; i++) {
+        c := bytes[i];
+        str += c;
+        if (c == '.' || c == 'e' || c == 'E') hasPoint = true;
+    }
+    if (decimals == -1 && !hasPoint && x == x && x - x == 0.0) str += ".0";
+    return str;
+}

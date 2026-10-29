@@ -5,6 +5,7 @@
 
 char *getTokenTypeStr(enum tokenType t) {
     switch (t) {
+        case NULL_KEYWORD: return "NULL";
         /*
         case INT:
             return "INT";
@@ -35,6 +36,8 @@ char *getTokenTypeStr(enum tokenType t) {
             return "STRUCT";
         case FUNC:
             return "FUNC";
+        case PANIC:
+            return "PANIC";
         case RETURN:
             return "RETURN";
         case AMPERSAND_EQUALS:
@@ -49,6 +52,8 @@ char *getTokenTypeStr(enum tokenType t) {
             return "IMPORT";
         case ANY:
             return "ANY";
+        case MIXED:
+            return "MIXED";
         case INTERFACE:
             return "INTERFACE";
         case CONTINUE:

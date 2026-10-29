@@ -11,7 +11,7 @@ func factorial(n int) int {
 
 func main() int {
     greeting := "Hello from Ocean and LLVM!\n";
-    write(1, greeting.data, len(greeting));
+    extern.write(1, greeting.data, len(greeting));
     result := factorial(5);
     if (result == 120) {
         return 0;

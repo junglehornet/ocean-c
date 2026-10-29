@@ -38,7 +38,7 @@ enum unaryExprType {
 enum stmtType {
     STMT_NULL = 0,
     STMT_PACKAGE, STMT_IMPORT, STMT_VAR, STMT_STRUCT, STMT_INTERFACE,
-    STMT_FUNC, STMT_IF, STMT_EXPR, STMT_BLOCK, STMT_FOR, STMT_RETURN,
+    STMT_FUNC, STMT_IF, STMT_EXPR, STMT_BLOCK, STMT_FOR, STMT_RETURN, STMT_PANIC, STMT_RETURN_PANIC,
     STMT_TYPE, STMT_ENUM, STMT_BREAK, STMT_CONTINUE, STMT_GOTO,
     STMT_LABEL, STMT_DEFER, STMT_SWITCH, STMT_FALLTHROUGH,
 };
@@ -46,6 +46,7 @@ enum stmtType {
 typedef struct stmt {
     enum stmtType type;
     void *value;
+    token location; // First token of the statement.
 } stmt;
 
 struct stmt_block {
@@ -96,6 +97,7 @@ struct stmt_struct {
 
 struct stmt_type {
     token name;
+    const char *displayName;
     typeTokens underlying;
     char isAlias;
 };
@@ -171,6 +173,8 @@ struct stmt_func {
     typeTokens *paramTypeNames;
     char isVariadic; // Only the last parameter may be variadic.
     char isExtern;
+    const char *displayName; // Unqualified source name for diagnostics.
+    const char *externalName; // Original C symbol when package names are qualified.
 
     size_t nResults;
     token *resultNames; // EOF_TOKEN marks an unnamed parameter/result.
@@ -225,15 +229,19 @@ enum exprType {
     EXPR_TYPE_INSTANTIATION,
     EXPR_TYPE_ASSERTION,
     EXPR_TYPE_ARRAY_NEW,
+    EXPR_TYPE_ZERO,
+    EXPR_TYPE_TYPE_NAME,
 };
 
 struct expr {
     enum exprType type;
     void *underlying;
+    token location; // Literal/name token or the operator introducing this expression.
 };
 
 struct expr_identifier {
     token lexeme;
+    char externReference; // Explicit extern.name namespace access.
 };
 
 struct expr_call {
@@ -280,6 +288,11 @@ struct expr_literal {
     enum literalType type;
     size_t stringLength;
     void *value;
+};
+
+// zero(Type) and explicit mixed/interface literal prefixes retain type syntax.
+struct expr_zero {
+    typeTokens type;
 };
 
 struct expr_array_new {

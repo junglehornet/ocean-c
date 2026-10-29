@@ -6,9 +6,9 @@ enum tokenType {
     // keywords and types
     /*INT, FLOAT, I8, I16, I32, U8, U16, U32, U64,
     F32, STRING,*/ TYPE, STRUCT, FUNC, IMPORT,
-    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
+    ANY, MIXED, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
     SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
-    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT,
+    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC,
 
     // symbols
     LEFT_CURLY_BRACE, RIGHT_CURLY_BRACE, LEFT_PAREN, RIGHT_PAREN,
@@ -59,5 +59,10 @@ typedef struct {
 char *getTokenTypeStr(enum tokenType t);
 
 void printToken(token tok);
+
+/* Identifiers currently use the ASCII alphabet supported by the scanner. */
+static inline int exportedName(const char *name) {
+    return name && name[0] >= 'A' && name[0] <= 'Z';
+}
 
 #endif

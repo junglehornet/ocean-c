@@ -16,6 +16,11 @@ struct scope {
 };
 
 
+typedef struct sourceFile {
+    const char *filename, *text;
+    size_t packageId; // Zero outside a merged package graph.
+} sourceFile;
+
 struct parseResult {
     size_t nStatements;
     stmt *statements;
@@ -25,9 +30,23 @@ struct parseResult {
     char hasError;
     const char *sourceText; // Borrowed source, used to embed runtime diagnostics.
     const char *sourceFilename;
+    size_t nSources;
+    sourceFile *sources;
+    int isLibrary;
 };
 
+static inline const char *programSource(parseResult *program, const char *filename) {
+    if (filename)
+        for (size_t i = 0; i < program->nSources; i++) {
+            const char *a = program->sources[i].filename, *b = filename;
+            while (*a && *a == *b) { a++; b++; }
+            if (!*a && !*b) return program->sources[i].text;
+        }
+    return program->sourceText;
+}
+
 parseResult parseTokens(tokenlist *tokens);
+parseResult parseTokensWithSource(tokenlist *tokens, const char *source);
 expr *parseBufferDimension(typeTokens dimension);
 char parseTypeApplicationArguments(typeTokens span, typeTokens **arguments, size_t *count);
 

@@ -1,9 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 #include "backend.h"
-#include "dynarray.h"
-#include "parser.h"
-#include "scanner.h"
 #include "semantic.h"
+#include "package.h"
+#include "lsp.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,171 +14,225 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int main(int argc, char *argv[]) {
-    int checkOnly = 0, emitOnly = 0;
-    const char *output = NULL;
-    char **inputs = calloc((size_t)argc, sizeof(*inputs));
-    if (!inputs)
-        return 1;
-    size_t nInputs = 0;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--check"))
-            checkOnly = 1;
-        else if (!strcmp(argv[i], "--emit-llvm"))
-            emitOnly = 1;
-        else if (!strcmp(argv[i], "-o")) {
-            if (++i == argc) {
-                fprintf(stderr, "Error: -o requires an output path\n");
-                free(inputs);
-                return 1;
-            }
+static volatile sig_atomic_t runningChild, interrupted;
+static void forwardSignal(int signal) {
+    interrupted = signal;
+    if (runningChild > 0) kill((pid_t)runningChild, signal);
+}
+static int writeIR(const char *input, const char *output) {
+    size_t size = strlen(output) + 16;
+    char *staged = malloc(size);
+    if (!staged) return 1;
+    snprintf(staged, size, "%s.XXXXXX", output);
+    int fd = mkstemp(staged), failed = 0;
+    FILE *from = fopen(input, "rb"), *to = fd < 0 ? NULL : fdopen(fd, "wb");
+    if (!from || !to) { perror("could not create IR output"); failed = 1; }
+    else {
+        char buffer[8192]; size_t n;
+        while ((n = fread(buffer, 1, sizeof(buffer), from)))
+            if (fwrite(buffer, 1, n, to) != n) { failed = 1; break; }
+        if (ferror(from)) failed = 1;
+    }
+    if (from) fclose(from);
+    if (to) { if (fclose(to)) failed = 1; }
+    else if (fd >= 0) close(fd);
+    if (!failed && rename(staged, output)) { perror("could not save IR"); failed = 1; }
+    unlink(staged); free(staged); return failed;
+}
+static int sameFile(const char *a, const char *b) {
+    struct stat x, y;
+    return !stat(a, &x) && !stat(b, &y) && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+}
+static int packageMain(int argc, char **argv) {
+    int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, argumentStart = argc;
+    const char *location = NULL, *output = NULL;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--")) { argumentStart = i + 1; break; }
+        if (!strcmp(argv[i], "-o")) {
+            if (++i >= argc) { fprintf(stderr, "ocean: -o requires an output path\n"); return 1; }
             output = argv[i];
-        } else if (!strcmp(argv[i], "--help")) {
-            printf("Usage: ocean-c [--check | --emit-llvm] [-o output] source.oc\n");
-            free(inputs);
-            return 0;
-        } else if (argv[i][0] == '-') {
-            fprintf(stderr, "Error: unknown option: %s\n", argv[i]);
-            free(inputs);
-            return 1;
-        } else
-            inputs[nInputs++] = argv[i];
+        } else if (!strcmp(argv[i], "--emit-llvm")) emit = 1;
+        else if (!strcmp(argv[i], "--check")) check = 1;
+        else if (argv[i][0] == '-') {
+            if (run && location) { argumentStart = i; break; }
+            fprintf(stderr, "ocean: unknown option: %s\n", argv[i]); return 1;
+        } else if (!location) location = argv[i];
+        else if (run) { argumentStart = i; break; }
+        else { fprintf(stderr, "ocean build accepts one package location\n"); return 1; }
     }
-    if (!nInputs) {
-        fprintf(stderr, "Error: no input files included.\n");
-        free(inputs);
-        return 1;
+    if ((run && (output || emit || check)) || (check && (output || emit)) || (!run && argumentStart != argc)) {
+        fprintf(stderr, "ocean: incompatible build/run options\n"); return 1;
     }
-    if ((checkOnly && (emitOnly || output)) || (!checkOnly && nInputs != 1)) {
-        fprintf(stderr, "Error: compilation requires one input file; --check cannot be combined "
-                        "with output options\n");
-        free(inputs);
-        return 1;
+    if (!location) location = ".";
+    packageBuild *build = loadPackage(location);
+    parseResult *program = packageProgram(build);
+    if (!program) { freePackage(build); return 1; }
+    if (run && program->isLibrary) {
+        fprintf(stderr, "ocean run: package %s is not main\n", program->packageName);
+        freePackage(build); return 1;
     }
-    if (!output)
-        output = emitOnly ? "a.ll" : "a.out";
-    if (!checkOnly) {
-        struct stat inStat, outStat;
-        if (!stat(inputs[0], &inStat) && !stat(output, &outStat) &&
-            inStat.st_dev == outStat.st_dev && inStat.st_ino == outStat.st_ino) {
-            fprintf(stderr, "Error: output would overwrite the input file\n");
-            free(inputs);
-            return 1;
+    int failed = analyzeSemantics(program).nErrors != 0;
+    if (failed || check) { freePackage(build); return failed; }
+    char *temporaryDirectory = NULL, *temporaryExecutable = NULL, *defaultOutput = NULL;
+    struct sigaction oldInterrupt, oldTerminate, oldHangup;
+    if (run) {
+        const char *base = getenv("TMPDIR");
+        if (!base) base = "/tmp";
+        temporaryDirectory = malloc(strlen(base) + 32);
+        if (!temporaryDirectory) { freePackage(build); return 1; }
+        sprintf(temporaryDirectory, "%s/.ocean-run-XXXXXX", base);
+        if (!mkdtemp(temporaryDirectory)) {
+            perror("ocean run: temporary directory"); free(temporaryDirectory); freePackage(build); return 1;
         }
-    }
-    for (size_t i = 0; i < nInputs; i++) {
-        FILE *sourcefile = fopen(inputs[i], "rb");
-        if (!sourcefile) {
-            printf("Error: file not found: %s\n", inputs[i]);
-            exit(1);
-        }
-
-        struct stat sourceStat;
-        if (fstat(fileno(sourcefile), &sourceStat) != 0 ||
-            !S_ISREG(sourceStat.st_mode) || fseek(sourcefile, 0, SEEK_END) != 0) {
-            printf("Error: could not read input file: %s\n", inputs[i]);
-            fclose(sourcefile);
-            return 1;
-        }
-        long length = ftell(sourcefile);
-        if (length < 0 || fseek(sourcefile, 0, SEEK_SET) != 0) {
-            printf("Error: could not read input file: %s\n", inputs[i]);
-            fclose(sourcefile);
-            return 1;
-        }
-        size_t fsize = (size_t)length;
-
-        char *source = malloc(fsize + 1);
-        if (!source) {
-            printf("Error: Out of memory - could not malloc source code buffer\n");
-            exit(1);
-        }
-        if (fread(source, 1, fsize, sourcefile) != fsize || ferror(sourcefile)) {
-            printf("Error: could not read input file: %s\n", inputs[i]);
-            free(source);
-            fclose(sourcefile);
-            return 1;
-        }
-        fclose(sourcefile);
-        source[fsize] = 0;
-
-        tokenlist *list = scanTokens(source, inputs[i]);
-        if (checkOnly) {
-            printTokensFromFile(inputs[i], list);
-            printf("\n\n");
-        }
-        parseResult res = parseTokens(list);
-        res.sourceText = source;
-        res.sourceFilename = inputs[i];
-        semanticResult semantics = {0};
-        if (!res.hasError)
-            semantics = analyzeSemantics(&res);
-        int status = res.hasError || semantics.nErrors;
-        if (!status && !checkOnly) {
-            char irPath[] = "/tmp/ocean-ir-XXXXXX";
-            int fd = mkstemp(irPath);
-            FILE *ir = fd < 0 ? NULL : fdopen(fd, "w");
-            if (!ir) {
-                perror("could not create LLVM IR file");
-                if (fd >= 0)
-                    close(fd);
-                status = 1;
+        temporaryExecutable = malloc(strlen(temporaryDirectory) + 16);
+        if (!temporaryExecutable) { rmdir(temporaryDirectory); free(temporaryDirectory); freePackage(build); return 1; }
+        sprintf(temporaryExecutable, "%s/program", temporaryDirectory);
+        output = temporaryExecutable;
+        struct sigaction action = {0}; action.sa_handler = forwardSignal;
+        sigemptyset(&action.sa_mask);
+        interrupted = runningChild = 0;
+        sigaction(SIGINT, &action, &oldInterrupt);
+        sigaction(SIGTERM, &action, &oldTerminate);
+        sigaction(SIGHUP, &action, &oldHangup);
+    } else if (!output) {
+        // The directory's package name determines library artifacts; main builds
+        // use the directory name, matching the package-oriented CLI.
+        if (emit) output = "a.ll";
+        else {
+            const char *base = program->packageName;
+            if (!program->isLibrary) {
+                char *path = strdup(packageDirectory(build));
+                char *slash = strrchr(path, '/');
+                base = slash ? slash + 1 : path;
+                defaultOutput = strdup(*base ? base : "main");
+                free(path);
             } else {
-                status = emitLLVM(&res, ir);
-                if (fclose(ir))
-                    status = 1;
-                if (!status && emitOnly) {
-                    FILE *from = fopen(irPath, "rb"), *to = NULL;
-                    size_t len = strlen(output) + 16;
-                    char *staged = malloc(len);
-                    if (staged) {
-                        snprintf(staged, len, "%s.XXXXXX", output);
-                        int outFd = mkstemp(staged);
-                        if (outFd >= 0) {
-                            to = fdopen(outFd, "wb");
-                            if (!to)
-                                close(outFd);
-                        }
-                    }
-                    if (!from || !to) {
-                        perror("could not create IR output");
-                        status = 1;
-                    } else {
-                        char buffer[4096];
-                        size_t n;
-                        while ((n = fread(buffer, 1, sizeof(buffer), from))) {
-                            if (fwrite(buffer, 1, n, to) != n) {
-                                status = 1;
-                                break;
-                            }
-                        }
-                        if (ferror(from))
-                            status = 1;
-                    }
-                    if (from)
-                        fclose(from);
-                    if (to && fclose(to))
-                        status = 1;
-                    if (!status && rename(staged, output)) {
-                        perror("could not save LLVM IR");
-                        status = 1;
-                    }
-                    if (staged) {
-                        unlink(staged);
-                        free(staged);
-                    }
-                } else if (!status)
-                    status = compileLLVM(irPath, output);
+                defaultOutput = malloc(strlen(base) + 3);
+                if (defaultOutput) sprintf(defaultOutput, "%s.o", base);
             }
-            unlink(irPath);
-        }
-        free(list);
-        free(source);
-        if (status) {
-            free(inputs);
-            return 1;
+            output = defaultOutput;
         }
     }
-    free(inputs);
-    return 0;
+    if (!output) failed = 1;
+    for (size_t i = 0; !failed && i < program->nSources; i++)
+        if (sameFile(output, program->sources[i].filename)) {
+            fprintf(stderr, "ocean: output would overwrite an input file\n"); failed = 1;
+        }
+    char irPath[] = "/tmp/ocean-ir-XXXXXX";
+    int fd = failed ? -1 : mkstemp(irPath);
+    FILE *ir = fd < 0 ? NULL : fdopen(fd, "w");
+    if (!failed && !ir) {
+        perror("ocean: could not create IR file"); failed = 1;
+        if (fd >= 0) close(fd);
+    }
+    if (ir) {
+        failed = emitLLVM(program, ir);
+        if (fclose(ir)) failed = 1;
+        if (!failed) failed = emit ? writeIR(irPath, output)
+                                  : program->isLibrary ? compileLLVMObject(irPath, output)
+                                                       : compileLLVM(irPath, output);
+    }
+    unlink(irPath);
+    freePackage(build);
+    int status = failed ? 1 : 0;
+    if (run && !failed && !interrupted) {
+        char **arguments = calloc((size_t)(argc - argumentStart) + 2, sizeof(*arguments));
+        if (!arguments) status = 1;
+        else {
+            arguments[0] = temporaryExecutable;
+            for (int i = argumentStart; i < argc; i++) arguments[i - argumentStart + 1] = argv[i];
+            pid_t child = fork();
+            if (!child) {
+                signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGHUP, SIG_DFL);
+                execv(temporaryExecutable, arguments); perror("ocean run"); _exit(127);
+            }
+            if (child < 0) { perror("ocean run: fork"); status = 1; }
+            else {
+                runningChild = child;
+                if (interrupted) kill(child, interrupted);
+                int childStatus;
+                while (waitpid(child, &childStatus, 0) < 0) {
+                    if (errno == EINTR) continue;
+                    childStatus = -1; break;
+                }
+                runningChild = 0;
+                status = childStatus == -1 ? 1 : WIFEXITED(childStatus) ? WEXITSTATUS(childStatus)
+                                                                  : 128 + WTERMSIG(childStatus);
+            }
+            free(arguments);
+        }
+    } else if (run && interrupted) status = 128 + interrupted;
+    if (run) {
+        unlink(temporaryExecutable); rmdir(temporaryDirectory);
+        sigaction(SIGINT, &oldInterrupt, NULL); sigaction(SIGTERM, &oldTerminate, NULL); sigaction(SIGHUP, &oldHangup, NULL);
+    }
+    free(temporaryExecutable); free(temporaryDirectory); free(defaultOutput);
+    return status;
+}
+static int moduleMain(int argc, char **argv) {
+    const char *usage = "Usage: ocean mod init [name]\n";
+    if ((argc == 3 && !strcmp(argv[2], "--help")) ||
+        (argc == 4 && !strcmp(argv[2], "init") && !strcmp(argv[3], "--help"))) {
+        fputs(usage, stdout); return 0;
+    }
+    if (argc < 3 || argc > 4 || strcmp(argv[2], "init")) {
+        fputs(usage, stderr); return 1;
+    }
+    char *currentDirectory = NULL;
+    const char *name = argc == 4 ? argv[3] : NULL;
+    if (!name) {
+        currentDirectory = getcwd(NULL, 0);
+        if (!currentDirectory) { perror("ocean mod init: current directory"); return 1; }
+        const char *slash = strrchr(currentDirectory, '/');
+        name = slash ? slash + 1 : currentDirectory;
+    }
+    if (!validModulePath(name)) {
+        fprintf(stderr, "ocean mod init: invalid module name; provide a name such as github.com/user/project\n");
+        free(currentDirectory); return 1;
+    }
+    int fd = open("ocean.mod", O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd < 0) {
+        if (errno == EEXIST) fprintf(stderr, "ocean mod init: ocean.mod already exists\n");
+        else perror("ocean mod init: cannot create ocean.mod");
+        free(currentDirectory); return 1;
+    }
+    FILE *file = fdopen(fd, "w");
+    int failed = !file;
+    if (file) {
+        if (fprintf(file, "module %s\n\nocean 0.1\n", name) < 0) failed = 1;
+        if (fclose(file)) failed = 1;
+    } else close(fd);
+    if (failed) {
+        perror("ocean mod init: cannot write ocean.mod"); unlink("ocean.mod");
+    } else printf("ocean: created ocean.mod for module %s\n", name);
+    free(currentDirectory);
+    return failed;
+}
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "check")) {
+        if (argc == 3 && !strcmp(argv[2], "--lsp")) return oceanLsp();
+        if (argc == 3 && !strcmp(argv[2], "--help")) {
+            puts("Usage: ocean check [location]\n       ocean check --lsp"); return 0;
+        }
+        return packageMain(argc, argv);
+    }
+    if (argc > 1 && !strcmp(argv[1], "mod")) return moduleMain(argc, argv);
+    if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "run"))) {
+        if (argc == 3 && !strcmp(argv[2], "--help")) {
+            printf("Usage: ocean build [--check | --emit-llvm] [-o output] [location]\n"
+                   "       ocean run [location] [-- program-arguments]\n");
+            return 0;
+        }
+        return packageMain(argc, argv);
+    }
+    if (argc == 1 || (argc == 2 && (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")))) {
+        printf("Usage: ocean build [--check | --emit-llvm] [-o output] [location]\n"
+               "       ocean run [location] [-- program-arguments]\n"
+               "       ocean check [location]\n"
+               "       ocean check --lsp\n"
+               "       ocean mod init [name]\n");
+        return argc == 1 ? 1 : 0;
+    }
+    fprintf(stderr, "ocean: unknown command: %s\n", argv[1]);
+    return 1;
 }

@@ -9,11 +9,16 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 include_directories(.)
 
+find_path(OCEAN_FFI_INCLUDE_DIR ffi.h REQUIRED)
+
 add_executable(ocean-c)
+target_include_directories(ocean-c PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
 
 target_sources(ocean-c
     PRIVATE
         main.c
+        lsp.c
+        package.c
         dynarray.c
         c-hashmap/map.c
         token.c
@@ -27,6 +32,11 @@ target_sources(ocean-c
 if(UNIX)
     target_link_libraries(ocean-c PRIVATE m)
 endif()
+
+add_custom_target(ocean ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE_DIR:ocean-c>/ocean"
+    DEPENDS ocean-c)
+install(PROGRAMS "$<TARGET_FILE:ocean-c>" DESTINATION bin RENAME ocean)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -57,13 +67,11 @@ if(BUILD_TESTING)
         set_tests_properties(${test_name} PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 30)
     endforeach()
-    add_test(NAME cli_test COMMAND ${CMAKE_COMMAND}
-        "-DOCEAN_EXE=$<TARGET_FILE:ocean-c>"
-        "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_test.cmake")
-    set_tests_properties(cli_test PROPERTIES TIMEOUT 30)
 
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME semantic_diagnostics_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/semantic_diagnostics_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(semantic_diagnostics_test PROPERTIES TIMEOUT 30)
     add_executable(pending_probe tests/pending_probe.c parser.c scanner.c token.c dynarray.c ast.c)
     target_compile_options(pending_probe PRIVATE -UNDEBUG)
     if(UNIX)
@@ -93,10 +101,49 @@ if(BUILD_TESTING)
     set_tests_properties(pending_inventory pending_runner_test PROPERTIES TIMEOUT 30)
 
     find_program(OCEAN_CLANG_EXECUTABLE clang REQUIRED)
+    add_test(NAME fallthrough_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fallthrough_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(fallthrough_test PROPERTIES TIMEOUT 60)
+    add_test(NAME type_constraints_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/type_constraints_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(type_constraints_test PROPERTIES TIMEOUT 60)
     add_test(NAME backend_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(backend_test PROPERTIES TIMEOUT 60)
+    add_test(NAME type_definitions_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/type_definitions_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(type_definitions_test PROPERTIES TIMEOUT 60)
+    add_test(NAME mixed_arrays_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/mixed_arrays_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(mixed_arrays_test PROPERTIES TIMEOUT 60)
+    add_test(NAME io_backend_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/io_backend_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(io_backend_test PROPERTIES TIMEOUT 60)
+    add_test(NAME range_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/range_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(range_test PROPERTIES TIMEOUT 60)
+    add_test(NAME c_variadic_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_variadic_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(c_variadic_test PROPERTIES TIMEOUT 60)
+    add_test(NAME package_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(package_test PROPERTIES TIMEOUT 90)
+    add_test(NAME goto_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/goto_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(goto_test PROPERTIES TIMEOUT 60)
+    add_test(NAME panic_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/panic_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(panic_test PROPERTIES TIMEOUT 60)
     add_test(NAME array_bounds_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/array_bounds_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(array_bounds_test PROPERTIES TIMEOUT 60)
+    add_test(NAME constant_builtins_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/constant_builtins_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(constant_builtins_test PROPERTIES TIMEOUT 60)
+    add_test(NAME array_addition_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/array_addition_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(array_addition_test PROPERTIES TIMEOUT 60)
+    add_test(NAME array_values_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/array_values_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(array_values_test PROPERTIES TIMEOUT 60)
 endif()

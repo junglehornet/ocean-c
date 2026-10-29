@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "parser.h"
+#include "diagnostic.h"
 
 #include "dynarray.h"
 #include "token.h"
@@ -14,6 +15,7 @@
 
 typedef struct parserState {
     char *packageName;
+    const char *source;
 
     token *tokens;
     size_t tokenIndex;
@@ -90,7 +92,7 @@ static token peek(parserState *state) {
 
 #define expect(tokType, message, retType) do {\
         if (tok.type != tokType) {\
-            printf("[%s:%ld:%ld]: " message "\n", tok.filename, tok.line, tok.column);\
+            diagnostic(state->source, tok, "syntax", "error", "%s", message);\
             state->hasError = 1;\
             state->isSynchronizing = 1;\
             return (retType){0};\
@@ -124,7 +126,7 @@ static expr parseComposite(parserState *state, expr type) {
         expr key = {0};
         char hasKey = tok.type == COLON;
         if (keyed != -1 && keyed != hasKey) {
-            printf("[%s:%ld:%ld]: Cannot mix keyed and positional literal entries\n", tok.filename, tok.line, tok.column);
+            diagnostic(state->source, tok, "syntax", "error", "Cannot mix keyed and positional literal entries");
             goto invalid;
         }
         keyed = hasKey;
@@ -139,7 +141,7 @@ static expr parseComposite(parserState *state, expr type) {
         push_exprlist(&values, value);
         if (tok.type == RIGHT_CURLY_BRACE) break;
         if (tok.type != COMMA) {
-            printf("[%s:%ld:%ld]: Expected comma between literal entries\n", tok.filename, tok.line, tok.column);
+            diagnostic(state->source, tok, "syntax", "error", "Expected comma between literal entries");
             goto invalid;
         }
         tok = advance(state);
@@ -151,6 +153,7 @@ static expr parseComposite(parserState *state, expr type) {
     free_exprlist(&keys);
     free_exprlist(&values);
     CONSTRUCT_EXPR_RES(EXPR_TYPE_COMPOSITE, node, result);
+    result.location = location;
     return result;
 invalid:
     free_exprlist(&keys);
@@ -159,9 +162,50 @@ invalid:
     return (expr){0};
 }
 
+static expr atomicImpl(parserState *state);
 static expr atomic(parserState *state) {
+    token location = currentToken(state);
+    expr result = atomicImpl(state);
+    result.location = location;
+    return result;
+}
+
+static expr atomicImpl(parserState *state) {
     DEFINE_TOK;
     switch (tok.type) {
+        case MIXED:
+        case INTERFACE: {
+            size_t start = state->tokenIndex;
+            if (!parseSignatureType(state, 0)) return (expr){0};
+            struct expr_zero *prefix = calloc(1, sizeof(*prefix));
+            CHECK_MALLOC(prefix);
+            prefix->type = copySignatureSpan(state, start, state->tokenIndex);
+            expr name = {.type = EXPR_TYPE_TYPE_NAME, .underlying = prefix, .location = tok};
+            if (currentToken(state).type != LEFT_CURLY_BRACE) {
+                free(prefix->type.tokens); free(prefix);
+                signatureError(state, "Array type expression requires a literal body");
+                return (expr){0};
+            }
+            return parseComposite(state, name);
+        }
+        case EXTERN: {
+            tok = advance(state);
+            expect(DOT, "Expected '.' after extern in an expression", expr);
+            tok = advance(state);
+            expect(IDENTIFIER, "Expected extern function name after extern.", expr);
+            struct expr_identifier *identifier = malloc(sizeof(*identifier));
+            CHECK_MALLOC(identifier);
+            *identifier = (struct expr_identifier){.lexeme = tok, .externReference = 1};
+            advance(state);
+            return (expr){.type = EXPR_TYPE_IDENTIFIER, .underlying = identifier};
+        }
+        case NULL_KEYWORD: {
+            struct expr_literal *literal = malloc(sizeof(*literal));
+            CHECK_MALLOC(literal);
+            *literal = (struct expr_literal){.type = LITERAL_TYPE_NULL};
+            advance(state);
+            return (expr){.type = EXPR_TYPE_LITERAL, .underlying = literal};
+        }
         case LEFT_CURLY_BRACE:
             return parseComposite(state, (expr){0});
         case FUNC: {
@@ -170,7 +214,25 @@ static expr atomic(parserState *state) {
             return (expr){.type = EXPR_TYPE_FUNCTION, .underlying = function.value};
         }
         case UNDERSCORE:
+        case ANY:
         case IDENTIFIER:
+            if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "zero") &&
+                peek(state).type == LEFT_PAREN) {
+                advance(state);
+                tok = advance(state);
+                if (tok.type == RIGHT_PAREN) {
+                    signatureError(state, "zero requires exactly one type argument");
+                    return (expr){0};
+                }
+                size_t start = state->tokenIndex;
+                if (!parseSignatureType(state, 0)) return (expr){0};
+                SET_TOK;
+                expect(RIGHT_PAREN, "Expected closing parenthesis after zero type", expr);
+                struct expr_zero zero = {.type = copySignatureSpan(state, start, state->tokenIndex)};
+                advance(state);
+                CONSTRUCT_EXPR_RES(EXPR_TYPE_ZERO, zero, result);
+                return result;
+            }
             struct expr_identifier ident = {0};
             ident.lexeme = tok;
             expr ident_expr = {0};
@@ -219,11 +281,11 @@ static expr atomic(parserState *state) {
             tok = advance(state);
             return lit_str_expr;
         default:
-            printf("[%s:%ld:%ld] Unexpected '%s', expected expression\n", tok.filename, tok.line, tok.column, tok.lexeme);
+            diagnostic(state->source, tok, "syntax", "error", "Unexpected '%s', expected expression", tok.lexeme);
             state->isSynchronizing = 1;
             return (expr){0};
     }
-    printf("[%s:%ld:%ld] expected literal or identifier\n", tok.filename, tok.line, tok.column);
+    diagnostic(state->source, tok, "syntax", "error", "expected literal or identifier");
     return (expr){0};
 }
 
@@ -247,6 +309,7 @@ static expr primary(parserState *state) {
     struct expr_unary unary_temp = {0};
     for (size_t i = 0; i < PARSER_MAX_RECURSION_DEPTH; i++) {
         SET_TOK;
+        token location = tok;
         switch (tok.type) {
             case ARROW: {
                 advance(state);
@@ -367,7 +430,7 @@ static expr primary(parserState *state) {
                     if (tok.type == COMMA) {
                         tok = advance(state);
                     } else if (tok.type != RIGHT_PAREN) {
-                        printf("[%s:%ld:%ld] expected comma or right paren\n", tok.filename, tok.line, tok.column);
+                        diagnostic(state->source, tok, "syntax", "error", "expected comma or right paren");
                         state->isSynchronizing = 1;
                         return (expr){0};
                     }
@@ -404,6 +467,7 @@ static expr primary(parserState *state) {
             default:
                 goto endLoop;
         }
+        parent.location = location;
 
     }
     printf("Fatal compiler error: Parser maximum recursion depth reached.\n");
@@ -421,13 +485,16 @@ static expr secondaryImpl(parserState *state);
 static expr secondary(parserState *state) {
     if (state->syntaxDepth >= PARSER_MAX_RECURSION_DEPTH) {
         token tok = state->tokens[state->tokenIndex];
-        printf("[%s:%ld:%ld]: Parser nesting limit exceeded\n", tok.filename, tok.line, tok.column);
+        diagnostic(state->source, tok, "syntax", "error", "Parser nesting limit exceeded");
         state->hasError = state->isSynchronizing = 1;
         return (expr){0};
     }
+    token location = currentToken(state);
     state->syntaxDepth++;
     expr result = secondaryImpl(state);
     state->syntaxDepth--;
+    if (!result.location.filename)
+        result.location = location;
     return result;
 }
 
@@ -555,11 +622,13 @@ static expr binary(parserState *state, int minimumPrecedence) {
     enum binaryExprType operation;
     int precedence;
     while ((precedence = binaryOperator(tok.type, &operation)) >= minimumPrecedence) {
+        token location = tok;
         tok = advance(state);
         expr right = binary(state, precedence + 1);
         CHECK_SYNC;
         struct expr_binary node = {.left = left, .right = right, .operation = operation};
         CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, node, result);
+        result.location = location;
         left = result;
         SET_TOK;
     }
@@ -570,7 +639,7 @@ static expr ternaryImpl(parserState *state);
 static expr ternary(parserState *state) {
     if (state->syntaxDepth >= PARSER_MAX_RECURSION_DEPTH) {
         token tok = state->tokens[state->tokenIndex];
-        printf("[%s:%ld:%ld]: Parser nesting limit exceeded\n", tok.filename, tok.line, tok.column);
+        diagnostic(state->source, tok, "syntax", "error", "Parser nesting limit exceeded");
         state->hasError = state->isSynchronizing = 1;
         return (expr){0};
     }
@@ -585,6 +654,7 @@ static expr ternaryImpl(parserState *state) {
     CHECK_SYNC;
     DEFINE_TOK;
     if (tok.type == QUESTION_MARK) {
+        token location = tok;
         tok = advance(state);
         struct expr_ternary ternary_n = {0};
         ternary_n.condition = condition;
@@ -596,6 +666,7 @@ static expr ternaryImpl(parserState *state) {
         ternary_n.ifFalse = ternary(state);
         CHECK_SYNC;
         CONSTRUCT_EXPR_RES(EXPR_TYPE_TERNARY, ternary_n, res)
+        res.location = location;
         return res;
     }
     return condition;
@@ -605,7 +676,7 @@ static expr assignmentImpl(parserState *state);
 static expr assignment(parserState *state) {
     if (state->syntaxDepth >= PARSER_MAX_RECURSION_DEPTH) {
         token tok = state->tokens[state->tokenIndex];
-        printf("[%s:%ld:%ld]: Parser nesting limit exceeded\n", tok.filename, tok.line, tok.column);
+        diagnostic(state->source, tok, "syntax", "error", "Parser nesting limit exceeded");
         state->hasError = state->isSynchronizing = 1;
         return (expr){0};
     }
@@ -620,6 +691,7 @@ static expr assignmentImpl(parserState *state) {
     CHECK_SYNC;
     DEFINE_TOK;
     if (isAssignmentOperator(tok.type)) {
+        token location = tok;
         enum binaryExprType bType;
         switch (tok.type) {
             case EQUALS:
@@ -656,7 +728,7 @@ static expr assignmentImpl(parserState *state) {
                 bType = EXPR_BITSHIFT_RIGHT_EQUALS;
                 break;
             default:
-                printf("[%s:%ld:%ld]: Unsupported assignment operator %s\n", tok.filename, tok.line, tok.column, tok.lexeme);
+                diagnostic(state->source, tok, "syntax", "error", "Unsupported assignment operator %s", tok.lexeme);
                 state->hasError = state->isSynchronizing = 1;
                 return (expr){0};
         }
@@ -669,6 +741,7 @@ static expr assignmentImpl(parserState *state) {
         assign_n.right = assignment(state);
         CHECK_SYNC;
         CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, assign_n, res)
+        res.location = location;
         return res;
     }
     return variable;
@@ -688,6 +761,7 @@ static expr comma(parserState *state) {
     CHECK_SYNC;
     DEFINE_TOK;
     while (tok.type == COMMA) {
+        token location = tok;
         tok = advance(state);
         struct expr_binary binary_n = {0};
         binary_n.left = left;
@@ -696,6 +770,7 @@ static expr comma(parserState *state) {
         CHECK_SYNC;
         SET_TOK;
         CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, binary_n, res)
+        res.location = location;
         left = res;
     }
     size_t count = commaCount(&left);
@@ -712,21 +787,25 @@ static expr comma(parserState *state) {
                 targets = 0;
         }
         if (!targets) break;
+        token location = item->location;
         struct expr_binary *last = item->underlying;
         expr lhs = *commaItem(&left, 0), rhs = last->right;
         for (size_t j = 1; j <= i; j++) {
             struct expr_binary part = {.operation = EXPR_COMMA, .left = lhs,
                 .right = j == i ? last->left : *commaItem(&left, j)};
             CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, part, joined);
+            joined.location = location;
             lhs = joined;
         }
         for (size_t j = i + 1; j < count; j++) {
             struct expr_binary part = {.operation = EXPR_COMMA, .left = rhs, .right = *commaItem(&left, j)};
             CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, part, joined);
+            joined.location = location;
             rhs = joined;
         }
         struct expr_binary assignmentNode = {.operation = EXPR_ASSIGNMENT, .left = lhs, .right = rhs};
         CONSTRUCT_EXPR_RES(EXPR_TYPE_BINARY, assignmentNode, result);
+        result.location = location;
         freeCommaNodes(&left);
         free(last);
         return result;
@@ -780,7 +859,7 @@ static stmt parseDeclaration(parserState *state) {
         tok = advance(state);
     }
     if (tok.type != COLON) {
-        printf("[%s:%ld:%ld]: (Compiler Error) Tried to parse declaration where none is present\n", tok.filename, tok.line, tok.column);
+        diagnostic(state->source, tok, "syntax", "error", "(Compiler Error) Tried to parse declaration where none is present");
         exit(-2);
     }
     // parse var declaration
@@ -891,7 +970,7 @@ static void freeSignatureFields(signatureFields *fields) {
 static char signatureError(parserState *state, const char *message) {
     DEFINE_TOK;
     if (!state->quietErrors)
-        printf("[%s:%ld:%ld]: %s\n", tok.filename, tok.line, tok.column, message);
+        diagnostic(state->source, tok, "syntax", "error", "%s", message);
     state->hasError = state->isSynchronizing = 1;
     return 0;
 }
@@ -1259,10 +1338,26 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
     DEFINE_TOK;
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Function signature nesting limit exceeded");
+    if (tok.type == MIXED) {
+        size_t start = state->tokenIndex;
+        advance(state);
+        if (!parseSignatureType(state, depth + 1)) return 0;
+        size_t end = state->tokenIndex;
+        if (end < start + 4 || state->tokens[end - 2].type != LEFT_BRACKET ||
+            state->tokens[end - 1].type != RIGHT_BRACKET)
+            return signatureError(state, "mixed requires an array type ending in []");
+        return 1;
+    }
     if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "buffer")) {
         tok = advance(state);
-        if (tok.type != LESS_THAN || !parseAngleTypes(state, depth + 1))
-            return signatureError(state, "Expected buffer element type in angle brackets");
+        if (tok.type != LESS_THAN) {
+            // A bare family may also be the element of an ordinary array.
+            while (currentToken(state).type == LEFT_BRACKET && peek(state).type == RIGHT_BRACKET) {
+                advance(state); advance(state);
+            }
+            return 1;
+        }
+        if (!parseAngleTypes(state, depth + 1)) return 0;
         tok = currentToken(state);
         if (tok.type == LEFT_BRACKET) {
             tok = advance(state);
@@ -1293,7 +1388,11 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
         tok = advance(state);
         if (tok.type != LEFT_CURLY_BRACE)
             return signatureError(state, "Expected composite type body");
-        return parseCompositeTypeBody(state, depth + 1, isInterface);
+        if (!parseCompositeTypeBody(state, depth + 1, isInterface)) return 0;
+        while (currentToken(state).type == LEFT_BRACKET && peek(state).type == RIGHT_BRACKET) {
+            advance(state); advance(state);
+        }
+        return 1;
     }
     if (tok.type == FUNC) {
         advance(state);
@@ -1540,7 +1639,9 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
         if (tok.type != IDENTIFIER && tok.type != ANY)
             return signatureError(state, "Expected cast type; multi-token types require parentheses");
         if (!checkTypeName(state, tok)) return 0;
-        advance(state);
+        if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "buffer") && peek(state).type == LESS_THAN) {
+            if (!parseSignatureType(state, state->syntaxDepth + 1)) return 0;
+        } else advance(state);
     }
     size_t end = state->tokenIndex;
     SET_TOK;
@@ -1553,6 +1654,18 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
     }
     *target = copySignatureSpan(state, start, end);
     return 1;
+}
+
+// Cases and generic parameters share the type-constraint grammar.
+static char parseTypeConstraint(parserState *state) {
+    token tok = currentToken(state);
+    do {
+        if (tok.type == TILDE) advance(state);
+        if (!parseSignatureType(state, 0)) return 0;
+        tok = currentToken(state);
+        if (tok.type != BITWISE_OR) return 1;
+        tok = advance(state);
+    } while (1);
 }
 
 // Type parameter declarations retain Go's name-before-constraint order:
@@ -1576,13 +1689,8 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
         } while (1);
         char implicitAny = (!angle && tok.type == RIGHT_BRACKET) || (angle && angleEnd(tok));
         size_t start = state->tokenIndex;
-        if (!implicitAny) do {
-            if (tok.type == TILDE) tok = advance(state);
-            if (!parseSignatureType(state, 0)) return 0;
-            SET_TOK;
-            if (tok.type != BITWISE_OR) break;
-            tok = advance(state);
-        } while (1);
+        if (!implicitAny && !parseTypeConstraint(state)) return 0;
+        SET_TOK;
         for (size_t i = 0; i < count; i++) {
             token name = state->tokens[namesStart + 2 * i];
             if (!addSignatureField(state, fields, name, start, state->tokenIndex)) return 0;
@@ -1790,6 +1898,10 @@ invalid:
 
 // Extern declarations use C ordering: extern result name(type parameter, ...);
 static stmt parseExtern(parserState *state) {
+    if (state->functionDepth) {
+        signatureError(state, "Extern declarations are only allowed at file scope");
+        return (stmt){0};
+    }
     token tok = advance(state);
     struct stmt_func function = {.isExtern = 1, .name = {.type = EOF_TOKEN},
                                  .receiverName = {.type = EOF_TOKEN}};
@@ -1913,7 +2025,7 @@ static stmt parseFor(parserState *state) {
         state->tokens[cursor + 1].type == EQUALS &&
         state->tokens[cursor + 2].type == RANGE) {
         if (nBindings > 2) {
-            printf("[%s:%ld:%ld]: Expected one or two range bindings\n", tok.filename, tok.line, tok.column);
+            diagnostic(state->source, tok, "syntax", "error", "Expected one or two range bindings");
             state->hasError = state->isSynchronizing = 1;
             return (stmt){0};
         }
@@ -1965,7 +2077,7 @@ static stmt parseFor(parserState *state) {
                 }
             } else {
                 if (first.type != STMT_EXPR) {
-                    printf("[%s:%ld:%ld]: Expected expression for for condition\n", tok.filename, tok.line, tok.column);
+                    diagnostic(state->source, tok, "syntax", "error", "Expected expression for for condition");
                     goto invalid;
                 }
                 loop.condition = first.value;
@@ -1996,7 +2108,7 @@ static stmt parseTypeDeclaration(parserState *state) {
     tok = advance(state);
     expect(IDENTIFIER, "Expected type name", stmt);
     if (!checkTypeName(state, tok)) return (stmt){0};
-    struct stmt_type node = {.name = tok};
+    struct stmt_type node = {.name = tok, .displayName = tok.lexeme};
     tok = advance(state);
     if (tok.type == EQUALS) {
         node.isAlias = 1;
@@ -2390,7 +2502,7 @@ static stmt parseSwitch(parserState *state) {
                 advance(state);
                 if (node.isTypeSwitch) {
                     size_t start = state->tokenIndex;
-                    if (!parseSignatureType(state, 0)) goto clauseError;
+                    if (!parseTypeConstraint(state)) goto clauseError;
                     typeTokens *types = realloc(clause.types, (clause.nTypes + 1) * sizeof(*types));
                     CHECK_MALLOC(types);
                     clause.types = types;
@@ -2477,13 +2589,15 @@ static stmt parseStatementImpl(parserState *state);
 static stmt parseStatement(parserState *state) {
     if (state->syntaxDepth >= PARSER_MAX_RECURSION_DEPTH) {
         token tok = state->tokens[state->tokenIndex];
-        printf("[%s:%ld:%ld]: Parser nesting limit exceeded\n", tok.filename, tok.line, tok.column);
+        diagnostic(state->source, tok, "syntax", "error", "Parser nesting limit exceeded");
         state->hasError = state->isSynchronizing = 1;
         return (stmt){0};
     }
+    token location = currentToken(state);
     state->syntaxDepth++;
     stmt result = parseStatementImpl(state);
     state->syntaxDepth--;
+    result.location = location;
     return result;
 }
 
@@ -2501,7 +2615,8 @@ static stmt parseStatementImpl(parserState *state) {
         case SWITCH:
             return parseSwitch(state);
         case EXTERN:
-            return parseExtern(state);
+            if (peek(state).type != DOT) return parseExtern(state);
+            goto expressionStatement;
         case BREAK:
         case CONTINUE:
         case GOTO:
@@ -2554,12 +2669,30 @@ static stmt parseStatementImpl(parserState *state) {
             node->call = call;
             return (stmt){.type = STMT_DEFER, .value = node};
         }
+        case PANIC: {
+            if (!state->functionDepth) {
+                signatureError(state, "Panic is only allowed inside a function");
+                return (stmt){0};
+            }
+            advance(state);
+            expr *message = parseExpr(state);
+            if (!message || state->isSynchronizing) return (stmt){0};
+            SET_TOK;
+            expect(SEMICOLON, "Expected semicolon after panic message", stmt);
+            advance(state);
+            return (stmt){.type = STMT_PANIC, .value = message};
+        }
         case RETURN: {
             if (!state->functionDepth) {
                 signatureError(state, "Return is only allowed inside a function");
                 return (stmt){0};
             }
             tok = advance(state);
+            if (tok.type == PANIC) {
+                stmt result = parseStatement(state);
+                if (result.type == STMT_PANIC) result.type = STMT_RETURN_PANIC;
+                return result;
+            }
             exprlist values = {0};
             init_exprlist(&values);
             while (tok.type != SEMICOLON && tok.type != RIGHT_CURLY_BRACE) {
@@ -2715,6 +2848,7 @@ static stmt parseStatementImpl(parserState *state) {
         case FUNC:
             return parseFunc(state);
         default:
+        expressionStatement:;
             stmt expr = parseDeclarationExpr(state);
             if (state->isSynchronizing) {
                 state->hasError = 1;
@@ -2746,7 +2880,7 @@ static stmtlist *parseBlock(parserState *state) {
         SET_TOK;
     }
     if (tok.type == EOF_TOKEN) {
-        printf("[%s:%ld:%ld]: Expected end of block\n", tok.filename, tok.line, tok.column);
+        diagnostic(state->source, tok, "syntax", "error", "Expected end of block");
         state->hasError = state->isSynchronizing = 1;
         free_stmtlist(statements);
         free(statements);
@@ -2834,13 +2968,14 @@ static void recoverTopLevel(parserState *state, size_t start) {
     state->isSynchronizing = 0;
 }
 
-parseResult parseTokens(tokenlist *tokensList) {
-    parseResult result = {0};
+parseResult parseTokens(tokenlist *tokensList) { return parseTokensWithSource(tokensList, NULL); }
+parseResult parseTokensWithSource(tokenlist *tokensList, const char *source) {
+    parseResult result = {.sourceText = source};
     if (!tokensList || tokensList->top <= 0 || !tokensList->arr) {
         result.hasError = 1;
         return result;
     }
-    parserState state = {.tokens = to_tokenarray(tokensList), .tokensLen = tokensList->top};
+    parserState state = {.tokens = to_tokenarray(tokensList), .tokensLen = tokensList->top, .source = source};
     stmtlist statements = {0};
     init_stmtlist(&statements);
     // Require the scanner's EOF sentinel before exposing tokens to the parser.
@@ -2855,8 +2990,8 @@ parseResult parseTokens(tokenlist *tokensList) {
             tok = advance(&state);
             if (state.packageName) signatureError(&state, "Duplicate package declaration");
             else if (statements.top) signatureError(&state, "Package declaration must precede other declarations");
-            else if (tok.type != IDENTIFIER && tok.type != LITERAL_STRING)
-                signatureError(&state, "Expected package name");
+            else if (tok.type != IDENTIFIER)
+                signatureError(&state, "Expected unquoted package name");
             else {
                 state.packageName = strdup(tok.lexeme);
                 CHECK_MALLOC(state.packageName);

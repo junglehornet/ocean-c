@@ -21,16 +21,20 @@ static void invalid(char *source) {
     checks++;
 }
 int main(void) {
+    valid("func casts(x buffer<i8>) { a := x->buffer<i8>; b := a->(buffer<i8>[]); }");
     struct stmt_func *implicit = valid("func myFunc<T>(thing T) {}");
     assert(implicit->nTypeParams == 1 && implicit->typeParamConstraints[0].nTokens == 1);
     assert(implicit->typeParamConstraints[0].tokens[0].type == ANY &&
            !strcmp(implicit->typeParamConstraints[0].tokens[0].lexeme, "any"));
     implicit = valid("func grouped<T, U,>(a T, b U) {}");
     assert(implicit->nTypeParams == 2 && implicit->typeParamConstraints[1].tokens[0].type == ANY);
-    implicit = valid("func mixed<T ~int, U>(a T, b U) {}");
+    implicit = valid("func grouped<T ~int, U>(a T, b U) {}");
     assert(implicit->typeParamConstraints[0].tokens[0].type == TILDE &&
            implicit->typeParamConstraints[1].tokens[0].type == ANY);
     valid("func trailing<T, U any, V,>(value V) {}");
+    valid("func arrays(a mixed any[], b any[]) mixed any[] {}");
+    invalid("func mixed() {}");
+    invalid("func bad(a mixed any) {}");
     invalid("func bad<T,,>() {}");
     invalid("func bad<T, T>() {}");
     invalid("func bad<T:>() {}");

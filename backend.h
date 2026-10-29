@@ -6,4 +6,5 @@
 int emitLLVM(parseResult *program, FILE *output);
 /* Uses clang from PATH, with the host target and system linker. */
 int compileLLVM(const char *irPath, const char *outputPath);
+int compileLLVMObject(const char *irPath, const char *outputPath);
 #endif

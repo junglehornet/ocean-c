@@ -1,5 +1,10 @@
 # Function parser tests
 
+CLI tests invoke `ocean build`, `ocean build --check`, and
+`ocean build --emit-llvm`; source fixtures include `package main;`. IR assertions
+use package-qualified symbols and distinguish source function bodies from runtime
+helpers. Default executable names follow the package directory name.
+
 Run from the repository root:
 
 ```sh
@@ -105,7 +110,8 @@ func run(x int) {
 }
 ```
 
-Imports are AST declarations, not package loading. Type names, constraints,
+These parser-only tests inspect import AST declarations. Package loading is
+covered separately by `package_test.py`. Type names, constraints,
 label targets, return types, and extern linkage still require semantic analysis.
 See the [pending feature inventory](pending/README.md) for remaining limitations.
 
@@ -378,8 +384,6 @@ The CTest suite now contains:
   replacement callbacks, get-or-insert behavior, resizing through every insertion
   API, iteration order/early exit, clearing/reuse, and binary/zero-length keys.
   The optional removal feature is disabled in the dependency and is not tested.
-- `cli_test`: missing arguments/files, valid and empty files, multiple files,
-  read failures, scanning errors, and parsing errors, including exit statuses.
 
 Scanner, array, token, and AST tests use POSIX subprocesses to check APIs that
 exit or abort, so those targets are registered on Unix systems. Assertions stay
@@ -566,3 +570,147 @@ calls and calls between generic methods. Missing or incorrect type argument
 counts are diagnosed; argument inference is not implemented. Bound method values
 and operator dispatch remain unsupported by code generation. Backend tests exercise method calls with
 both unoptimized and optimized LLVM IR and verify specialization reuse.
+
+## Pointer null values
+
+`null` is scanned as a reserved keyword and parsed as `LITERAL_TYPE_NULL`.
+It has no primitive or struct value. Typed pointer destinations accept it in
+initializers, assignments, arguments, returns, casts, composite fields, and
+conditional expressions. Equality is symmetric (`p == null`, `null == p`), and
+null equals null. Other operators, primitive/struct destinations, and inferred
+null-only variables or arrays are rejected.
+
+Pointer defaults remain zero addresses, distinct from explicit null. Native null
+uses a reserved module marker without changing pointer size or struct layout.
+Pointer dereferences and struct field accesses check for this marker and trap;
+value-receiver calls also check before copying a pointed-to struct. Structs and
+primitives keep zero initialization. Tests cover null/zero distinctions, typed
+null propagation, generic method results, linked lists, and invalid dereferences.
+
+`semantic_diagnostics_test.py` checks type mismatch diagnostics in both frontend
+and executable compilation modes. It verifies file, line and column, the source
+line and caret, and expected/actual type names across operators, assignments,
+conditions, calls, returns, literals, and resolved index expressions. Coverage
+includes generic receiver parameters, pointers, arrays, fixed buffers, numeric
+type spellings, function signatures, tabs, CRLF input, and paths with spaces.
+
+
+`zero(Type)` is covered by parser and semantic suites, the AST printer suite,
+and native/optimized LLVM backend tests. Cases include scalars, pointers versus
+explicit null, empty arrays/strings, recursive generic structs, fixed buffers
+containing reference fields, struct value parameters, generic receiver methods,
+and explicitly instantiated generic functions. Tests also check returned empty
+values, repeated loop use, `sizeof(zero(T))`, and malformed/non-type arguments.
+
+
+`constant_builtins_test.py` inspects unoptimized LLVM IR to verify scalar and
+aggregate `zero` values are constants and `sizeof` uses target-layout constant
+expressions. It covers concrete generic functions/methods, padded records,
+long aggregate constants, fixed buffers, reference types, and unevaluated
+`sizeof` operands. The emitted module runs through native, `-O0`, and `-O2`
+builds, with expected sizes obtained from the host ABI.
+
+
+`array_values_test.py` verifies runtime-sized array value semantics at `-O0` and
+`-O2`, including independent callee-stack copies, assignments, nested arrays,
+structs, value/pointer receivers, explicit `*T[]` sharing, argument snapshots,
+variadics, generic functions, caller-frame returns, and lexical scope lifetimes.
+It inspects the indirect parameter ABI and tests direct, mutual, and generic
+recursion returning arrays, nested arrays, and structs containing arrays. Recursive
+returns use temporary heap transport that is freed after copying onto the caller stack.
+Whole-value replacement through an explicit pointer must fit the destination's existing storage.
+
+
+`panic_test.py` exercises panic statements in native and optimized IR, including
+string expressions, literal percent signs, embedded NUL bytes, source excerpts
+that survive source-file removal, recursive/generic/method call traces, terminating
+control flow, and invalid messages or syntax.
+
+
+`goto_test.py` checks forward and backward jumps, labels after terminated code,
+nested-scope stack cleanup, retained array values, separate namespaces for generic
+and array-returning function expansions, labeled loop control, and rejection of
+undefined/duplicate labels or jumps into blocks or over declarations.
+
+
+The panic tests also cover `return panic`, including caller-source attribution
+through methods, generic functions, recursive and inlined array returns,
+multiple-result and void functions, and the entry-function fallback.
+
+
+`package_test.py` exercises shared directory scope, package entry points,
+qualified generics and methods, capitalized exports, private declarations and
+methods, filtered dot imports, shared globals and array lifetimes, import
+aliases and namespace isolation, standard library resolution, module manifests,
+local replacements, real Git downloads through a local URL rewrite, cache reuse,
+cross-file diagnostics and caller-directed panics, file-local labels, invalid
+package graphs, object output, and run cleanup on exit or signals. Tests use
+`OCEAN_SRC`, `OCEAN_MOD_CACHE`, and `TMPDIR` to avoid installed sources or network
+access. Both `ocean` and the legacy `ocean-c` executable are built.
+
+`c_variadic_test.py` checks runtime C variadic expansion against a native C
+fixture at `-O0` and `-O2`, including mixed fixed/variadic types, scalar return
+ABIs, pointer mutation, empty expansions, and repeated calls. The backend suite
+also covers heterogeneous `...any` forwarding, typed arrays forwarded to `...any`,
+default promotions, and integer/floating-point register overflow. libffi development
+headers are required to build the compiler; linking generated IR that uses runtime
+C calls requires `-lffi`.
+
+
+Extern calls use `extern.name(...)`; declarations are file-scoped. The package
+and backend tests cover sibling-file isolation, imports not exposing externs,
+redeclaring a C function in multiple files, ordinary functions and local variables
+with the same name, missing qualifiers, and rejection of nested declarations.
+
+## Type constraints and type switches
+
+`ctest --output-on-failure -R type_constraints_test` checks native and optimized
+execution of generic-family parameters, nested constraints, generic function and
+struct constraints, type-switch narrowing, first-match ordering, default cases,
+small scalar type identity, and switch control flow. It also checks rejection
+of incompatible specializations, unresolved case types, family member access,
+and value-parameter constraints. Buffer coverage includes bare and element-typed
+families, fixed and runtime-sized storage, unsized views, inline and indirect
+boxed payloads, nested constraints, and rejection of unrelated types. This suite
+uses the package build CLI.
+
+## Implicit returns and diagnostic severity
+
+`fallthrough_test.py` checks implicit zero returns at `-O0` and `-O2`, including
+scalars, pointers, aggregates, arrays, generic functions, methods, multiple
+results, and named results. It verifies warnings in check/build/IR modes,
+reachability through branches, loops, switches, and gotos, and one warning per
+generic declaration. It checks colored warning/error headers, excerpts, carets,
+plain redirected output, and `NO_COLOR` precedence across frontend/backend
+source diagnostics. Warnings must leave compilation and execution successful.
+
+## Array addition
+
+`array_addition_test.py` checks concatenation, single-element append/prepend,
+chaining, `+=`, empty inputs, type inference, generic returns, and left-to-right
+operand snapshots. Native, `-O0`, and `-O2` runs verify recursive value copies for
+nested arrays, strings, structs, fixed-buffer elements, pointer elements, and
+`any` arrays. Semantic checks reject incompatible operands and immutable targets.
+
+`io_backend_test.py` exercises the IO library fixture at O0/O2: printing,
+format substitutions and escapes, signed integer boundaries, float rounding,
+`i16`/`f32` arithmetic and C varargs, value switches and fallthrough, homogeneous
+`any[]` arrays, mixed `...any` packs, array-family switches, and diagnostics.
+The fixture mirrors `../ocean-src/io/io.oc` so the suite is self-contained.
+
+`mixed_arrays_test.py` checks `mixed any[]`, homogeneous and mixed named-interface
+arrays, empty-interface equivalence, method signatures and pointer method sets,
+embedded interfaces and unions, generic receiver substitutions, array casts and
+type switches, variadic packs, recursive copies, and runtime conformance checks.
+Valid programs run at both `-O0` and `-O2`.
+
+Mixed array constraint tests explicitly accept homogeneous interface arrays and
+conforming concrete arrays in generic arguments and type switches, and reject
+concrete arrays whose element type does not satisfy the interface.
+
+`type_definitions_test.py` covers distinct `type Name Underlying` declarations and
+transparent `type Name = Underlying` aliases. It checks raw-buffer casts, numeric
+operations, aggregate layout and value copies, forward/local/imported types,
+recursive pointers, alias chains and generic struct aliases, methods and method
+sets, generic constraints, native varargs, boxed identity, cycle diagnostics, and
+rejection of implicit interchange. Valid programs run at `-O0` and `-O2`.

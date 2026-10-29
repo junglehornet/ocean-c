@@ -15,6 +15,10 @@ static void printed(expr tree, const char *expected) {
     free(output);
 }
 int main(void) {
+    token zeroType[] = {{.type = IDENTIFIER, .lexeme = "int"}};
+    struct expr_zero zero = {.type = {1, zeroType}};
+    printed((expr){.type = EXPR_TYPE_ZERO, .underlying = &zero}, "(ZERO int)\n");
+
     struct expr_identifier id = {.lexeme = {.type = IDENTIFIER, .lexeme = "x"}};
     expr x = {.type = EXPR_TYPE_IDENTIFIER, .underlying = &id};
     long integer = 42;
@@ -24,6 +28,7 @@ int main(void) {
     printed(lit, "42\n");
     literal.type = LITERAL_TYPE_FLOAT; literal.value = &real; printed(lit, "1.250000\n");
     literal.type = LITERAL_TYPE_STRING; literal.value = "hello"; printed(lit, "\"hello\"\n");
+    literal.type = LITERAL_TYPE_NULL; literal.value = NULL; printed(lit, "null\n");
     literal.type = LITERAL_TYPE_INT; literal.value = &integer;
     printed(x, "x\n");
     const char *unaryNames[] = {"NEGATE", "BITWISE_NOT", "LOGICAL_NOT", "DEREFERENCE",

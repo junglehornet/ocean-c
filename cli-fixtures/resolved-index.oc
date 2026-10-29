@@ -1,0 +1,1 @@
+func main() { callbacks := {func(x int) int { return x; }}; i := 0; result := callbacks[i](1); }

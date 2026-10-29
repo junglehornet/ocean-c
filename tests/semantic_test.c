@@ -12,6 +12,36 @@ static parseResult analyze(char *source, int valid) {
     return p;
 }
 int main(void) {
+    analyze("func use(p *int[]) {} func main() { a := {1, 2}; use(&a); }", 1);
+    analyze("func use(p *int[]) {} func main() { x := 1; a := {&x}; use(a); }", 0);
+
+    analyze("func main() { a: int = zero(int); b: bool = zero(bool); f: float = zero(float); s: string = zero(string); p: *int = zero(*int); xs: int[] = zero(int[]); }", 1);
+    analyze("struct Box<T> { value T; } func main() { b: Box<int> = zero(Box<int>); n: buffer<Box<int> >[3] = zero(buffer<Box<int> >[3]); }", 1);
+    analyze("func reset<T any>(value *T) { *value = zero(T); } func main() { x := 7; reset<int>(&x); }", 1);
+    analyze("struct Box<T> { value T; } func (b *Box<T>) reset() { b.value = zero(T); }", 1);
+    analyze("struct S(int count) { value bool; } func main() { s := zero(S); }", 1);
+    analyze("func main() { zero: *int; zero = null; }", 1);
+    analyze("func main() { x: bool = zero(int); }", 0);
+    analyze("func main() { x := zero(Missing); }", 0);
+    analyze("func main() { x := 1; y := zero(x); }", 0);
+    analyze("func main() { x := zero(any); }", 0);
+    analyze("func main() { n := 2; x := zero(buffer<int>[n]); }", 0);
+    analyze("struct Box<T> {} func main() { b := zero(Box<int, bool>); }", 0);
+
+    analyze("func main() { p: *int = null; p = null; if (p == null && null == p) {} }", 1);
+    analyze("struct S { value int; } func none() *S { return null; } func main() { p := none(); }", 1);
+    analyze("func main() { x: int = null; }", 0);
+    analyze("func main() { x: bool = null; }", 0);
+    analyze("func main() { x: float = null; }", 0);
+    analyze("struct S { value int; } func main() { s: S = null; }", 0);
+    analyze("struct S { value int; } func main() { s: S; if (s == null) {} }", 0);
+    analyze("func main() { x: string = null; }", 0);
+    analyze("func main() { x: int[] = null; }", 0);
+    analyze("func main() { x := null; }", 0);
+    analyze("func main() { x := {null}; }", 0);
+    analyze("func main() { p: *int; if (p < null) {} }", 0);
+    analyze("func main() { x := &null; }", 0);
+
     analyze("struct Box<T> { value T; } func (b Box<T>) pair<U>(other U) (T, U) { return b.value, other; } func main() { b := Box<int>{1}; x, y := b.pair<bool>(true); result: int = x; flag: bool = y; }", 1);
     analyze("struct Box<T> {} func (b Box<T>) take<U>(value U) U { return value; } func main() { b := Box<int>{}; b.take(1); }", 0);
     analyze("struct Box<T> {} func (b Box<T>) take<U>(value U) U { return value; } func main() { b := Box<int>{}; b.take<int>(true); }", 0);
@@ -75,11 +105,27 @@ int main(void) {
     analyze("func main() { b: buffer<int>; }", 0);
     analyze("func main() { b: buffer<int>[2] = {0: 1}; }", 0);
     analyze("func main() { b: buffer<buffer<int>[2]>[2] = {{1, 2}, {3, 4}}; b[1][0]++; }", 1);
-    analyze("extern i32 puts(string text); func main() { puts(\"hello\"); }", 1);
-    analyze("extern void notify(void); func main() { notify(); }", 1);
-    analyze("extern i32 printf(string format, ...); func main() { printf(\"%d\", 1); }", 1);
-    analyze("extern i32 printf(string format, ...); func main() { printf(); }", 0);
-    analyze("extern i32 puts(string text); func main() { puts(1); }", 0);
+    analyze("extern i32 puts(string text); func main() { extern.puts(\"hello\"); }", 1);
+    analyze("extern i32 abs(i32 value); func main() int { return extern.abs(-3); }", 1);
+    analyze("extern i32 abs(i32 value); func main() int { return abs(-3); }", 0);
+    analyze("extern i32 abs(i32 value); func main() int { abs := 4; return abs + extern.abs(-3); }", 1);
+    analyze("extern int len(int value); func main() int { return extern.len(4); }", 1);
+    analyze("extern void notify(void); func main() { extern.notify(); }", 1);
+    analyze("extern void free(*void p); func main() { x := 1; extern.free(&x); p: *void = &x; p = &x; }", 1);
+    analyze("func main() { p: *void; q: *int = p; }", 0);
+    analyze("func main() { p: **int; q: **void = p; }", 0);
+    analyze("extern *void malloc(int n); extern void free(*void p); func main() { p := extern.malloc(8); q := p -> (*int); extern.free(q -> (*void)); }", 1);
+    analyze("func main() { p: *void; x := *p; }", 0);
+    analyze("func main() { p: *void; bits := p -> int; q := bits -> (*int); }", 1);
+    analyze("func main() { p: *void; x := p -> float; }", 0);
+    analyze("func main() { x: void; }", 0);
+    analyze("func main() { x := void[3]; }", 0);
+    analyze("struct Bad { value void; } func main() {}", 0);
+    analyze("func main() { x := zero(void); }", 0);
+    analyze("func main() int { return sizeof(void); }", 0);
+    analyze("extern i32 printf(string format, ...); func main() { extern.printf(\"%d\", 1); }", 1);
+    analyze("extern i32 printf(string format, ...); func main() { extern.printf(); }", 0);
+    analyze("extern i32 puts(string text); func main() { extern.puts(1); }", 0);
     analyze("func f(xs ...int) int { return len(xs) + xs[0]; } func main() { f(1, 2); f(); }", 1);
     analyze("func f(xs ...int) {} func main() { f(\"bad\"); }", 0);
     analyze("func f(n int, xs ...int) {} func main() { f(); }", 0);
@@ -182,7 +228,7 @@ int main(void) {
     analyze("func use(a i8[]) {} func main() { s: string = i8[]{65}; a: i8[] = \"abc\"; use(s); s = a + s; s += a; s.data = {66}; s[0] = 67; n := len(s); }", 1);
     analyze("func main() { s := \"abc\"; s.size = 0; }", 0);
     analyze("func main() { s: string = int[]{1}; }", 0);
-    analyze("func main() { s := \"abc\" + 1; }", 0);
+    analyze("func main() { s := \"abc\" + 1; }", 1);
     analyze("func main() { s := \"abc\" - \"d\"; }", 0);
     analyze("func main() { s := i8[]{65} + i8[]{66}; }", 1);
     analyze("func main() { s := \"abc\"; s -= \"d\"; }", 0);

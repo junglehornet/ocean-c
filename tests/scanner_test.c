@@ -32,11 +32,11 @@ static void rejected(char *source, const char *diagnostic) {
     release(list);
 }
 int main(void) {
-    enum tokenType keywords[] = {TYPE, STRUCT, FUNC, IMPORT, ANY, INTERFACE,
+    enum tokenType keywords[] = {TYPE, STRUCT, FUNC, IMPORT, ANY, MIXED, INTERFACE,
         CONTINUE, BREAK, ENUM, IF, DEFER, SWITCH, FALLTHROUGH, EXTERN, FOR,
-        GOTO, AS, PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT};
-    kinds("type struct func import any interface continue break enum if defer "
-          "switch fallthrough extern for goto as package else range return case default",
+        GOTO, AS, PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC};
+    kinds("type struct func import any mixed interface continue break enum if defer "
+          "switch fallthrough extern for goto as package else range return case default null panic",
           keywords, sizeof(keywords) / sizeof(*keywords));
     enum tokenType operators[] = {LEFT_CURLY_BRACE, RIGHT_CURLY_BRACE, LEFT_PAREN,
         RIGHT_PAREN, LEFT_BRACKET, RIGHT_BRACKET, UNDERSCORE, SEMICOLON, COMMA,

@@ -25,9 +25,24 @@ static char *format_ast(const char *format, ...) {
 }
 
 static char* stringOf(expr e) {
+    if (e.type == EXPR_TYPE_ZERO || e.type == EXPR_TYPE_TYPE_NAME) {
+        struct expr_zero *zero = e.underlying;
+        char *str = format_ast(e.type == EXPR_TYPE_ZERO ? "(ZERO " : "(TYPE ");
+        for (size_t i = 0; i < zero->type.nTokens; i++) {
+            char *next = format_ast("%s%s", str, zero->type.tokens[i].lexeme);
+            free(str);
+            str = next;
+        }
+        char *result = format_ast("%s)", str);
+        free(str);
+        return result;
+    }
     if (e.type == EXPR_TYPE_LITERAL) {
         char *str = NULL;
         switch ((*(struct expr_literal*)e.underlying).type) {
+            case LITERAL_TYPE_NULL:
+                str = format_ast("null");
+                break;
             case LITERAL_TYPE_INT:
                 str = format_ast("%ld", *(long*)((struct expr_literal*)e.underlying)->value);
                 break;

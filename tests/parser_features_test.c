@@ -64,6 +64,20 @@ static void fixture(const char *path, size_t count) {
 }
 
 int main(void) {
+    expr zeroExpr = expression("zero(int);");
+    assert(zeroExpr.type == EXPR_TYPE_ZERO && zeroExpr.location.line == 1 && zeroExpr.location.column == 1);
+    struct expr_zero *zero = zeroExpr.underlying;
+    assert(zero->type.nTokens == 1 && !strcmp(zero->type.tokens[0].lexeme, "int"));
+    zeroExpr = expression("zero(*Box<buffer<T>[4]>);");
+    assert(zeroExpr.type == EXPR_TYPE_ZERO && ((struct expr_zero *)zeroExpr.underlying)->type.tokens[0].type == STAR);
+    zeroExpr = expression("zero(Box<int>).value;");
+    assert(zeroExpr.type == EXPR_TYPE_DOT && ((struct expr_dot *)zeroExpr.underlying)->parent.type == EXPR_TYPE_ZERO);
+    zeroExpr = expression("zero(buffer<int>[3])[1];");
+    assert(zeroExpr.type == EXPR_TYPE_INDEX && ((struct expr_index *)zeroExpr.underlying)->parent.type == EXPR_TYPE_ZERO);
+    invalid("zero();"); invalid("zero(int, bool);"); invalid("zero(1);"); invalid("zero(int + 1);");
+    invalid("zero(int;");
+    truncatedInputs("zero(*Box<buffer<T>[4]>);");
+
     expr e = expression("a - b - c;");
     bin(bin(e, EXPR_SUBTRACT)->left, EXPR_SUBTRACT);
     e = expression("a / b * c % d;"); bin(bin(bin(e, EXPR_MODULO)->left, EXPR_MULTIPLY)->left, EXPR_DIVIDE);
@@ -78,7 +92,10 @@ int main(void) {
     e = expression("(a)[i].field;"); assert(e.type == EXPR_TYPE_DOT);
     e = expression("a ? b, c : d;"); assert(e.type == EXPR_TYPE_TERNARY);
     valid("package main; func main() {}", 1);
-    valid("package \"legacy\";", 0);
+    invalid("package \"legacy\";");
+    invalid("package `main`;");
+    invalid("package 123;");
+    invalid("package ;");
     parseResult r = valid("package demo; import \"io\"; import \"math\" as m; import alias \"path\";", 3);
     assert(!strcmp(r.packageName, "demo"));
     struct stmt_import *imp = r.statements[1].value;
@@ -292,6 +309,10 @@ int main(void) {
     invalid("import (\"io\" \"math\");");
     invalid("struct Point { x int; x string; }"); invalid("struct Point { int; }");
     invalid("enum E { A, A }"); invalid("type X = ;"); invalid("x : int garbage;");
+    valid("extern i32 abs(i32 value); func main() int { return extern.abs(-3); }", 2);
+    valid("extern void notify(); func main() { extern.notify(); }", 2);
+    invalid("func main() { extern i32 abs(i32 value); }");
+    invalid("func main() { extern.(); }");
     invalid("interface I { M(); M(); }"); invalid("extern func f() {}");
     invalid("break;"); invalid("continue;"); invalid("goto label;"); invalid("return;");
     invalid("func f() { defer x + 1; }"); invalid("func f() { goto; }");

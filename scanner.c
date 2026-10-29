@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "scanner.h"
+#include "diagnostic.h"
 
 void printTokensFromFile(char *filename, tokenlist *list) {
     printf("Warning: printTokensFromFile() called. If you are a user and this is an official build\n"
@@ -28,17 +29,17 @@ void printTokensFromFile(char *filename, tokenlist *list) {
 const enum tokenType keyword_types[] = {
     //INT, FLOAT, I8, I16, I32, U8, U16, U32, U64,
     /*F32, STRING,*/ TYPE, STRUCT, FUNC, IMPORT,
-    ANY, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
+    ANY, MIXED, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
     SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
-    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT,
+    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC,
 };
 
 const char *keywords[] = {
     //"int", "float", "i8", "i16", "i32", "u8", "u16", "u32", "u64",
     /*"f32", "string",*/ "type", "struct", "func", "import",
-    "any", "interface", "continue", "break", "enum", "if", "defer",
+    "any", "mixed", "interface", "continue", "break", "enum", "if", "defer",
     "switch", "fallthrough", "extern", "for", "goto", "as",
-    "package", "else", "range", "return", "case", "default",
+    "package", "else", "range", "return", "case", "default", "null", "panic",
 };
 
 unsigned long hashes[NKEYWORDS] = {};
@@ -305,14 +306,14 @@ tokenlist *scanTokens(char *source, char *filename) {
                 size_t start = state.offset;
                 char first = next_char(&state);
                 if (first == '\0' || first == '\n' || first == '\'') {
-                    printf("[%s:%ld:%ld]: Invalid character literal\n", filename, state.thisLine, state.thisColumn);
+                    diagnostic(state.source, (token){.filename = filename, .line = state.thisLine, .column = state.thisColumn}, "scanner", "error", "Invalid character literal");
                     scanning_error = 1;
                     break;
                 }
                 uint16_t c = scan_literal_char(&state);
                 if (scanning_error) break;
                 if (next_char(&state) != '\'') {
-                    printf("[%s:%ld:%ld]: Expected closing quote after character literal\n", filename, state.thisLine, state.thisColumn);
+                    diagnostic(state.source, (token){.filename = filename, .line = state.thisLine, .column = state.thisColumn}, "scanner", "error", "Expected closing quote after character literal");
                     scanning_error = 1;
                     break;
                 }
@@ -341,7 +342,7 @@ tokenlist *scanTokens(char *source, char *filename) {
                     charlist chars = {0};
                     init_charlist(&chars);
                     if (!is_alphaNumeric(currentChar)) {
-                        printf("[%s:%ld:%ld]: Unexpected or invalid character: '%c'. Note: Only the characters A-Z, a-z, 0-9, and underscores are allowed in identifiers.\n", state.filename, state.line, state.column, currentChar);
+                        diagnostic(state.source, (token){.filename = state.filename, .line = state.line, .column = state.column}, "scanner", "error", "Unexpected or invalid character: '%c'. Note: Only the characters A-Z, a-z, 0-9, and underscores are allowed in identifiers.", currentChar);
                         free_charlist(&chars);
                         scanning_error = 1;
                         break;
@@ -412,7 +413,7 @@ static uint16_t scan_numn(struct scannerState *state, char minn, char maxn, char
         next_char(state);
     } while (1);
     if (count < (size_t)minn || value > 255) {
-        printf("[%s:%ld:%ld]: Invalid escape sequence\n", state->filename, state->line, state->column);
+        diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "error", "Invalid escape sequence");
         scanning_error = 1;
         return UINT16_MAX;
     }
@@ -424,12 +425,12 @@ static void scan_literal_string(struct scannerState *state) {
 
     for (char currentChar = next_char(state);;currentChar = next_char(state)) {
         if (currentChar == '\0') {
-            printf("[%s:%ld:%ld] Error: End of file inside string literal\n", state->filename, state->line, state->column);
+            diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "error", "End of file inside string literal");
             scanning_error = 1;
             return;
         }
         if (currentChar == '\n') {
-            printf("[%s:%ld:%ld] Error: Unescaped newline inside string literal\n", state->filename, state->line, state->column);
+            diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "error", "Unescaped newline inside string literal");
             scanning_error = 1;
             return;
         }
@@ -462,7 +463,7 @@ static token scan_raw_string(struct scannerState *state) {
 
     for (char currentChar = next_char(state); currentChar != '`'; currentChar = next_char(state)) {
         if (currentChar == '\0') {
-            printf("[%s:%ld:%ld]: Unterminated raw string\n", state->filename, state->thisLine, state->thisColumn);
+            diagnostic(state->source, (token){.filename = state->filename, .line = state->thisLine, .column = state->thisColumn}, "scanner", "error", "Unterminated raw string");
             scanning_error = 1;
             return (token){.type = EOF_TOKEN};
         }
@@ -498,7 +499,7 @@ static void scan_literal_number(struct scannerState *state) {
     while (is_digit(state->source[state->offset], 1)) {
         int digit = char_to_decimal(state->source[state->offset]);
         if (digit >= base || integer > (LONG_MAX - digit) / base) {
-            printf("[%s:%ld:%ld]: invalid numeric digit or integer overflow\n", state->filename, line, column);
+            diagnostic(state->source, (token){.filename = state->filename, .line = line, .column = column}, "scanner", "error", "invalid numeric digit or integer overflow");
             scanning_error = 1;
             return;
         }
@@ -508,7 +509,7 @@ static void scan_literal_number(struct scannerState *state) {
         next_char(state);
     }
     if (!digits) {
-        printf("[%s:%ld:%ld]: Expected numeric digit after base prefix\n", state->filename, line, column);
+        diagnostic(state->source, (token){.filename = state->filename, .line = line, .column = column}, "scanner", "error", "Expected numeric digit after base prefix");
         scanning_error = 1;
         return;
     }
@@ -522,7 +523,7 @@ static void scan_literal_number(struct scannerState *state) {
         do {
             int digit = char_to_decimal(state->source[state->offset]);
             if (digit >= base) {
-                printf("[%s:%ld:%ld]: invalid numeric digit\n", state->filename, line, column);
+                diagnostic(state->source, (token){.filename = state->filename, .line = line, .column = column}, "scanner", "error", "invalid numeric digit");
                 scanning_error = 1;
                 return;
             }
@@ -549,7 +550,7 @@ static uint16_t scan_literal_char(struct scannerState *state) {
     
     switch (currentChar) {
         case '\n':
-            printf("[%s:%ld:%ld] Error: newline encountered while scanning char\n", state->filename, state->line, state->column);
+            diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "error", "newline encountered while scanning char");
             scanning_error = 1;
             return -1;
         case '\\':
@@ -575,10 +576,10 @@ static uint16_t scan_literal_char(struct scannerState *state) {
                     next_char(state);
                     return scan_numn(state, 2, 2, 16, 1);
                 case 'u':
-                    printf("[%s:%ld:%ld] Warning: ocean-c does not support unicode yet and \\u is ignored.\n", state->filename, state->line, state->column);
+                    diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "warning", "ocean-c does not support unicode yet and \\u is ignored.");
                     return 'u';
                 case 'U':
-                    printf("[%s:%ld:%ld] Warning: ocean-c does not support unicode yet and \\U is ignored.\n", state->filename, state->line, state->column);
+                    diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "warning", "ocean-c does not support unicode yet and \\U is ignored.");
                     return 'U';
                 default:
                     return scan_numn(state, 1, 3, 8, 0);
@@ -597,7 +598,7 @@ static void multiline_comment(struct scannerState *state) {
                     printf("Syntax errors encountered during scanning, quitting.\n");
                     exit(1);
                 } else {
-                    printf("[%s:%ld:%ld]: Unterminated block comment\n", state->filename, state->thisLine, state->thisColumn);
+                    diagnostic(state->source, (token){.filename = state->filename, .line = state->thisLine, .column = state->thisColumn}, "scanner", "error", "Unterminated block comment");
                     scanning_error = 1;
                     return;
                 }

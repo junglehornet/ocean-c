@@ -1,0 +1,3 @@
+extern i32 puts(i8[])
+
+func main() { puts("hello?"); }

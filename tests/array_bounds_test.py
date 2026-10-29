@@ -18,14 +18,16 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
     native = root / "native"
     optimized = root / "optimized"
     ir = root / "module.ll"
+    display_source = os.path.relpath(source)
     checks = 0
 
     def failure(text, index, length, marker, focus, frames, message=None):
         global checks
+        text = "package main;\n" + text
         source.write_bytes(text.encode())
-        built = run([compiler, str(source), "-o", str(native)])
+        built = run([compiler, "build", str(source), "-o", str(native)])
         assert built.returncode == 0, built.stdout + built.stderr
-        emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+        emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
         assert emitted.returncode == 0, emitted.stdout + emitted.stderr
         built = run([clang, "-Wno-override-module", "-O2", "-x", "ir", str(ir), "-o", str(optimized)])
         assert built.returncode == 0, built.stderr
@@ -43,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
             assert result.stdout == "", result
             report = result.stderr
             assert (message or f"index {index}, length {length}") in report, report
-            assert f"{source}:{number}:{column}" in report, report
+            assert f"{display_source}:{number}:{column}" in report, report
             snippet = f" {number} | {line}"
             assert snippet in report, report
             caret = report.split(snippet + "\n", 1)[1].splitlines()[0]
@@ -53,8 +55,8 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
             assert len(trace) == len(frames), report
             for entry, name in zip(trace, frames):
                 assert entry.startswith(f"  at {name} ("), report
-                assert str(source) in entry, report
-            assert trace[0] == f"  at {frames[0]} ({source}:{number}:{column})", report
+                assert display_source in entry, report
+            assert trace[0] == f"  at {frames[0]} ({display_source}:{number}:{column})", report
             reports.append(report)
         assert reports[0] == reports[1], reports
         checks += 1
@@ -67,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
             "return", "a[-1]", ["main"])
     failure("func main() int { a := int[0]; return a[0]; }", 0, 0,
             "return", "a[0]", ["main"])
-    failure('extern i32 puts(buffer<i8>[] s);\nfunc main() { a := int[1]; a[1] = puts("must not execute\\0".data); }',
+    failure('extern i32 puts(buffer<i8>[] s);\nfunc main() { a := int[1]; a[1] = extern.puts("must not execute\\0".data); }',
             1, 1, "must not execute", "a[1]", ["main"])
     failure("func main() { a := int[2]; a[2]++; }", 2, 2,
             "a[2]++", "a[2]", ["main"])
@@ -97,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
             "a.data", "data", ["fill", "main"], message="Array data literal too large: literal length 3 exceeds array length 2")
     failure("func main() { a := string[0]; a.data = {\"x\"}; }", 1, 0,
             "a.data", "data", ["main"], message="Array data literal too large: literal length 1 exceeds array length 0")
-    failure('extern i32 puts(buffer<i8>[] s); func item() int { puts("must not run\\0".data); return 1; }\nfunc main() { a := int[1]; a.data = {item(), 2}; }', 2, 1,
+    failure('extern i32 puts(buffer<i8>[] s); func item() int { extern.puts("must not run\\0".data); return 1; }\nfunc main() { a := int[1]; a.data = {item(), 2}; }', 2, 1,
             "a.data", "data", ["main"], message="Array data literal too large: literal length 2 exceeds array length 1")
 
     failure('func main() int { s := "abc"; return s[3]; }', 3, 3,
@@ -113,6 +115,12 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
             "return xs[2]", "xs[2]", ["read", "main"])
     failure("func fill(xs ...int) { xs.data = {1, 2}; }\nfunc main() { a := int[1]; fill(a...); }", 2, 1,
             "xs.data", "data", ["fill", "main"], message="Array data literal too large: literal length 2 exceeds array length 1")
+
+    failure("func main() int { return zero(int[])[0]; }", 0, 0,
+            "return", ")[0]", ["main"])
+    failure("func first<T>(values T[]) T { return values[0]; }\n"
+            "func main() int { return first<int>(zero(int[])); }", 0, 0,
+            "return values[0]", "values[0]", ["first", "main"])
 
     failure("func main() int { return int[]{1, 2}[2]; }", 2, 2,
             "return", "[2]", ["main"])

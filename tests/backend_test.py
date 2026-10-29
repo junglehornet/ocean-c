@@ -1,13 +1,14 @@
 """Compile source -> LLVM IR -> native executable and check observable behavior."""
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 # Length-aware Ocean helpers, using explicit raw buffers at the C boundary.
-PRINT = "extern int write(i32 fd, buffer<i8>[] data, int count); func puts(s string) i32 { write(1, s.data, len(s)); newline: buffer<i8>[1] = {10}; write(1, newline, 1); return 0->i32; } "
-COMPARE = "extern i32 memcmp(buffer<i8>[] a, buffer<i8>[] b, int count); func strcmp(a string, b string) i32 { return memcmp(a.data, b.data, len(a)); } "
+PRINT = "extern int write(i32 fd, buffer<i8>[] data, int count); func puts(s string) i32 { extern.write(1, s.data, len(s)); newline: buffer<i8>[1] = {10}; extern.write(1, newline, 1); return 0->i32; } "
+COMPARE = "extern i32 memcmp(buffer<i8>[] a, buffer<i8>[] b, int count); func strcmp(a string, b string) i32 { return extern.memcmp(a.data, b.data, len(a)); } "
 
 compiler, clang = map(os.path.abspath, sys.argv[1:])
 
@@ -21,20 +22,119 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     ir = root / "module.ll"
 
     def program(text, status=0, stdout="", optimize=False):
-        source.write_text(text)
-        built = run([compiler, str(source), "-o", str(exe)])
+        source.write_text("package main; " + text)
+        built = run([compiler, "build", str(source), "-o", str(exe)])
         assert built.returncode == 0, built.stdout + built.stderr
         result = run([str(exe)])
         assert (result.returncode, result.stdout) == (status, stdout), result
-        emitted = run([compiler, "--emit-llvm", "-o", str(ir), str(source)])
+        emitted = run([compiler, "build", "--emit-llvm", "-o", str(ir), str(source)])
         assert emitted.returncode == 0, emitted.stdout + emitted.stderr
         assert "define i32 @main()" in ir.read_text()
-        verified = run([clang, "-Wno-override-module", "-O2" if optimize else "-O0", "-x", "ir", str(ir), "-o", str(exe)])
+        verified = run([clang, "-Wno-override-module", "-O2" if optimize else "-O0", "-x", "ir", str(ir), "-o", str(exe), "-lffi"])
         assert verified.returncode == 0, verified.stderr
         result = run([str(exe)])
         assert (result.returncode, result.stdout) == (status, stdout), result
 
+    program("func main() int { return sizeof(*void); }", 8, optimize=True)
+    program("extern *void malloc(int bytes); extern void free(*void memory); "
+            "func main() int { p := extern.malloc(sizeof(int)) -> (*int); *p = 42; "
+            "result := *p; extern.free(p); return result; }", 42, optimize=True)
+    program("struct Holder { value *void; } func erase(p *int) *void { return p; } "
+            "func pair(p *int) (*void, *void) { return p, p; } "
+            "func main() int { x := 7; p: *void = &x; p = &x; h := Holder{value: &x}; "
+            "a, b: *void = pair(&x); a, b = &x, &x; "
+            "q := true ? &x : p; r := false ? p : &x; "
+            "if (p != &x || &x != p || h.value != p || erase(&x) != p || "
+            "a != b || q != r) return 1; return *(p -> (*int)); }", 7, optimize=True)
+    program("func consume(p *void) int { return *(p -> (*int)); } "
+            "func main() int { a := int[]{8}; p: *void = a.data; return consume(a.data); }", 8, optimize=True)
+    # C void pointers and explicit casts retain pointer identity and the native ABI.
+    program("extern *void malloc(int bytes); extern void free(*void memory); "
+            "struct Node<T> { value T; next *Node<T>; } "
+            "func main() int { raw := extern.malloc(sizeof(Node<int>)); "
+            "if (raw == zero(*void)) panic \"allocation failed\"; "
+            "node := raw -> (*Node<int>); *node = Node<int>{value: 42, next: null}; "
+            "result := node.value; extern.free(node -> (*void)); return result; }", 42, optimize=True)
+    program("func main() int { x := 7; p := (&x) -> (*void); bits := p -> int; "
+            "q := bits -> (*int); *q = 9; return x; }", 9, optimize=True)
+    program("extern *void malloc(int bytes); extern void free(*void memory); "
+            "func main() int { raw := extern.malloc(16); b := raw -> (buffer<int>[]); "
+            "b[0] = 3; b[1] = 5; result := b[0] + b[1]; extern.free(b -> (*void)); return result; }", 8, optimize=True)
+    program("func main() int { a := (true -> int) -> float; b := 3.5 -> int; "
+            "if (!(a -> bool) || (0 -> bool) || !(3 -> bool) || (0.0 -> bool)) return 1; "
+            "return (a -> int) + b + ((-2) -> i8 -> int); }", 2, optimize=True)
+    program("extern *void malloc(int bytes); extern void free(*void memory); "
+            "func recur(n int) int[] { if (n == 0) return int[]{7}; return recur(n - 1); } "
+            "func main() int { raw := extern.malloc(8); p := raw -> (*int); *p = 2; "
+            "a := recur(3); result := a[0] + *p; extern.free(raw); return result; }", 9, optimize=True)
+
+    # Strings compare full byte contents, including embedded NULs and length.
+    program('func main() int { a := "hello"; b := "hel" + "lo"; '
+            'if (!(a == b) || a != b || "a" == "ab" || !("ab" != "a") || '
+            '"abc" == "abd" || !("abc" != "abd")) return 1; return 0; }', optimize=True)
+    program('func main() int { a := zero(string); b := ""; '
+            'if (!(a == b) || a != b || a == "x" || !("x" != a)) return 1; '
+            'if (!("a\\0b" == "a\\0b") || "a\\0b" == "a\\0c" || '
+            '"a\\0b" == "a") return 2; return 0; }', optimize=True)
+    program('func same<T>(a T, b T) bool { return a == b; } '
+            'func main() int { a := "abc"; b := a; b[1] = 120; '
+            'bytes: i8[] = "abc"; if (a == b || !(a != b) || !(bytes == a) || '
+            '!same<string>(a, "abc")) return 1; return 0; }', optimize=True)
+    program(COMPARE + 'func make(n *int) string { (*n)++; return "same"; } '
+            'func main() int { n := 0; if (!(make(&n) == make(&n)) || n != 2) return 1; '
+            'if (make(&n) != make(&n) || n != 4) return 2; return 0; }', optimize=True)
+
+    program("extern i32 abs(i32 value); func abs(value int) int { return value + 1; } "
+            "func main() int { return abs(3) + extern.abs(-7); }", 11, optimize=True)
+    program("extern i32 abs(i32 value); func main() int { abs := 4; return abs + extern.abs(-3); }", 7, optimize=True)
+
+    program("extern i32 abs(i32 value); func abs(value int) int { return 99; } "
+            "func main() int { b: buffer<int>[extern.abs(-3)]; b[extern.abs(-2)] = 7; "
+            "return b[2]; }", 7, optimize=True)
+    assert ir.read_text().count('call i32 @"abs"') == 2
+
+    # zero(Type) matches declared defaults, including concrete generic substitutions.
+    program("func main() int { return zero(int); }", 0, optimize=True)
+    program("func main() int { if (!zero(bool) && zero(float) == 0.0 && zero(i32) == 0 && zero(i8) == 0) return 7; return 1; }", 7, optimize=True)
+    program("func main() int { p: *int; q := zero(*int); if (p == q && q != null) return 7; return 1; }", 7, optimize=True)
+    program("func main() int { s := zero(string); xs := zero(int[]); if (s.size == 0 && len(xs) == 0) return 7; return 1; }", 7, optimize=True)
+    program("func main() int { b := zero(buffer<int>[3]); b[1] = 7; return b[0] + b[1] + b[2]; }", 7, optimize=True)
+    program("struct Box<T> { value T; } func main() int { b := zero(Box<Box<int>>); return b.value.value; }", 0, optimize=True)
+    program("struct Node<T> { value T; next *Node<T>; } func main() int { n := zero(Node<int>); if (n.value == 0 && n.next == zero(*Node<int>) && n.next != null) return 7; return 1; }", 7, optimize=True)
+    program("struct S(int count) { text string; } func main() int { s := zero(S); if (s.count == 0 && s.text.size == 0) return 7; return 1; }", 7, optimize=True)
+    program("func main() int { a := zero(buffer<string>[2]); b: buffer<string>[2]; if (a[0].size + a[1].size + b[0].size + b[1].size == 0) return 7; return 1; }", 7, optimize=True)
+    program("struct S { text string; items int[]; } func main() int { a := zero(buffer<S>[2]); if (a[1].text.size == 0 && a[0].items.size == 0) return 7; return 1; }", 7, optimize=True)
+    program("func reset<T any>(value *T) { *value = zero(T); } func main() int { x := 42; flag := true; reset<int>(&x); reset[bool](&flag); if (x == 0 && !flag) return 7; return 1; }", 7, optimize=True)
+    program("struct Box<T> { value T; } func reset<T>(p *T) { *p = zero(T); } func main() int { b := Box<int>{99}; reset<Box<int>>(&b); return b.value; }", 0, optimize=True)
+    program("struct Box<T> { value T; } func (b *Box<T>) reset() { b.value = zero(T); } func main() int { b := Box<int>{99}; b.reset(); return b.value; }", 0, optimize=True)
+    program("struct Factory {} func (f Factory) empty<T>() T { return zero(T); } func main() int { f := Factory{}; s := f.empty<string>(); if (s.size == 0) return 7; return 1; }", 7, optimize=True)
+    program("func zeroOf<T>() T { return zero(T); } func main() int { s := zeroOf<string>(); a := zeroOf<int[]>(); if (s.size + a.size == 0) return 7; return 1; }", 7, optimize=True)
+    program("func countDown<T>(n int) T { if (n == 0) return zero(T); return countDown<T>(n - 1); } func main() int { return countDown<int>(10); }", 0, optimize=True)
+    program("struct Box<T> { value T; } func main() int { return zero(Box<int>).value + zero(buffer<int>[3])[1]; }", 0, optimize=True)
+    program("func main() int { return sizeof(zero(buffer<int>[3])); }", 24, optimize=True)
+    program("func main() int { sum := 0; for (i := 0; i < 100000; i++) { z := zero(string); sum += z.size; } return sum; }", 0, optimize=True)
+
     program("struct Box<T> { value T; } func (b Box<T>) get() T { return b.value; } func main() int { b := Box<int>{7}; return b.get(); }", 7, optimize=True)
+    # Null is pointer-only and distinct from zero-address default pointers.
+    program("func main() int { zero: *int; p: *int = null; if (zero != null && p == null && p != zero && null == p && null == null && !(null != null)) { return 7; } return 1; }", 7, optimize=True)
+    program("struct S { value int; next *S; } func none() *S { return null; } func main() int { s: S; p := none(); if (s.value == 0 && s.next != null && p == null) { return sizeof(s); } return 1; }", 16, optimize=True)
+    program("struct Node<T> { value T; next *Node<T>; } func (n *Node<T>) append(other *Node<T>) { for (n.next != null) { n = n.next; } n.next = other; } func main() int { a := Node<int>{3, null}; b := Node<int>{4, null}; a.append(&b); return a.next.value; }", 4, optimize=True)
+    program("func take(p *int) bool { return p == null; } func main() int { x := 4; p: *int = null; q := &x; p, q = q, p; if (q == null && *p == 4 && take(null)) { return 7; } return 1; }", 7, optimize=True)
+    program("func main() int { x := 7; p := true ? null : &x; q := false ? null : &x; r: *int = true ? null : null; if (p == null && r == null) { return *q; } return 1; }", 7, optimize=True)
+    program("func main() int { p := null->(*int); if (p == null) { return 7; } return 1; }", 7, optimize=True)
+    program("struct S {} func (s S) empty<U>() *U { return null; } func main() int { s := S{}; p := s.empty<int>(); if (p == null) { return 7; } return 1; }", 7, optimize=True)
+    program("func main() int { values: buffer<*int>[2] = {null}; if (values[0] == null && values[1] != null) { return 7; } return 1; }", 7, optimize=True)
+    program("func main() int { x := 7; xs := {&x, null}; if (xs[1] == null) { return *xs[0]; } return 1; }", 7, optimize=True)
+    # Explicit null must never be dereferenced as if it were a zeroed object.
+    for invalid_access in [
+        "func main() int { p: *int = null; return *p; }",
+        "struct S { value int; } func main() int { p: *S = null; return p.value; }",
+        "struct S { value int; } func (s S) get() int { return s.value; } func main() int { p: *S = null; return p.get(); }",
+    ]:
+        source.write_text("package main; " + invalid_access)
+        built = run([compiler, "build", str(source), "-o", str(exe)])
+        assert built.returncode == 0, built.stdout + built.stderr
+        assert run([str(exe)]).returncode != 0
     # Method-specific parameters specialize independently of receiver bindings.
     program("struct Box<T> { value T; } func (b Box<T>) pair<U>(other U) (T, U) { return b.value, other; } func main() int { b := Box<int>{3}; x, y := b.pair<int>(4); return x + y; }", 7, optimize=True)
     program("struct Box<T> { value T; } func (b Box<T>) take<U any>(other U) U { return other; } func main() int { b := Box<int>{1}; x := b.take<int>(7); flag := b.take<bool>(true); y := b.take<int>(3); if (flag) { return x + y; } return 0; }", 10, optimize=True)
@@ -97,7 +197,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func sum(b buffer<int>[2]) int { b[0]++; return b[0] + b[1]; } func main() int { b: buffer<int>[2] = {2, 3}; return sum(b) + b[0] + sum(buffer<int>[2]{4, 5}); }", 18)
     program("func make() buffer<int>[2] { return buffer<int>[2]{6, 7}; } func main() int { return make()[1]; }", 7)
 
-    program("extern void srand(i32 seed); extern i32 abs(i32); func main() int { srand(1); return abs(-5); }", 5)
+    program("extern void srand(i32 seed); extern i32 abs(i32); func main() int { extern.srand(1); return extern.abs(-5); }", 5)
 
     program("func sum(values ...int) int { total := 0; for (i := 0; i < len(values); i++) { total += values[i]; } return total; } func main() int { return sum() + sum(2, 3, 4); }", 9)
     program("func add(base int, values ...int) int { for (i := 0; i < len(values); i++) { base += values[i]; } return base; } func main() int { return add(5) + add(1, 2, 3); }", 11)
@@ -113,12 +213,33 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func pair() (int, int) { return 2, 5; } func add(a int, b int) int { return a + b; } func sum(xs ...int) int { n := 0; for (i := 0; i < len(xs); i++) { n += xs[i]; } return n; } func main() int { return add(pair()) + sum(pair()); }", 14)
     program("func pair(x int) (int, int) { if (x == 0) { return 1, 2; } return pair(x - 1); } func main() int { a, b := pair(3); return a + b; }", 3)
     program("func pair() (buffer<int>[2], float, bool, i32) { return buffer<int>[2]{3, 4}, 2.5, true, 8; } func main() int { b, f, ok, n := pair(); if (ok) { return b[1] + f->int + n; } return 0; }", 14)
-    program("extern i32 printf(buffer<i8>[] format, ...); func main() { printf(\"%s %d %.1f %d\\n\\0\".data, \"ok\\0\".data, 4->i32, 2.5, true); }", stdout="ok 4 2.5 1\n")
+    # Runtime C varargs: homogeneous arrays, heterogeneous forwarding, register
+    # overflow, default promotions, empty tails, prefixes, and return values.
+    program('extern i32 printf(buffer<i8> format, ...); '
+            'func println(format string, values ...any) i32 { '
+            'return extern.printf((format + "\\n\\0").data, values...); } '
+            'func relay(format string, values ...any) i32 { return println(format, values...); } '
+            'func main() int { n := relay("%d %.1f %s %d %d", -7, 2.5, "ok\\0".data, true, -3->i8); '
+            'if (n != 15) return 1; relay("empty"); values := int[]{11, 12}; relay("%ld %ld %ld", 10, values...); '
+            'relay("%d %d %d %d %d %d %d %d %d", 1,2,3,4,5,6,7,8,9); '
+            'relay("%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f", 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0); '
+            'return 0; }', stdout="-7 2.5 ok 1 -3\nempty\n10 11 12\n1 2 3 4 5 6 7 8 9\n1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0\n", optimize=True)
+    program('extern i32 printf(buffer<i8> format, ...); '
+            'func numbers(n int) int[] { a := int[n]; for (i := 0; i < n; i++) a[i] = i + 2; return a; } '
+            'func main() { extern.printf("%ld %ld %ld\\n\\0".data, 1, numbers(2)...); '
+            'empty := int[0]; extern.printf("empty\\n\\0".data, empty...); '
+            'small: i8[] = {-8, 7}; extern.printf("%d %d\\n\\0".data, small...); '
+            'flags: bool[] = {true, false}; extern.printf("%d %d\\n\\0".data, flags...); }',
+            stdout="1 2 3\nempty\n-8 7\n1 0\n", optimize=True)
+    program('extern i32 printf(buffer<i8> format, ...); '
+            'func first(values ...any) { extern.printf("%d %.1f\\n\\0".data, values[0], values[1]); } '
+            'func main() { first(7, 2.5); }', stdout="7 2.5\n", optimize=True)
+    program("extern i32 printf(buffer<i8>[] format, ...); func main() { extern.printf(\"%s %d %.1f %d\\n\\0\".data, \"ok\\0\".data, 4->i32, 2.5, true); }", stdout="ok 4 2.5 1\n")
     program("func tick(b buffer<int>[1]) (int, int) { return b[0] + 1, b[0] + 2; } func main() int { b: buffer<int>[2]; i := 0; i, b[i] = tick(buffer<int>[1]{5}); return i + b[0]; }", 13)
 
     program(PRINT + 'func pair() (int, int) { puts("once"); return 4, 5; } func main() int { a, b := pair(); return a + b; }', 9, stdout="once\n")
     program("func main() int { a := 1; b := 2; a, b = b, ++a; return a * 10 + b; }", 22)
-    program("func f(xs ...int) int { list := xs; list[0]++; return len(list) + xs[0]; } func main() int { return f(5, 6); }", 8)
+    program("func f(xs ...int) int { list := xs; list[0]++; return len(list) + xs[0]; } func main() int { return f(5, 6); }", 7)
     program("func pair() (int, int) { return 3, 4; } func main() int { b: buffer<int>[2]; i := 0; b[i], b[1] = pair(); return b[0] + b[1]; }", 7)
 
     program("func fill(b buffer<int>[], n int) { for (i := 0; i < n; i++) { b[i] = i + 1; } } func main() int { n := 4; b: buffer<int>[n]; fill(b, n); return b[0] + b[3]; }", 5)
@@ -131,19 +252,19 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { b: buffer<int>[2] = {3, 4}; view: buffer<int>[] = b; view[1] = 8; return b[1]; }", 8)
     program("func main() int { n := 2; b: buffer<buffer<int>[2]>[n]; b[1][0] = 9; return b[1][0]; }", 9)
     program(PRINT + 'func main() { n := 2; b: buffer<string>[n]; b[0] = "runtime"; puts(b[0]); }', stdout="runtime\n")
-    program("extern i32 memcmp(buffer<i32>[] a, buffer<i32>[] b, int size); func main() int { a: buffer<i32>[2] = {3, 4}; b: buffer<i32>[] = {3, 4}; return memcmp(a, b, 8); }", 0)
-    program("extern buffer<int>[] malloc(int bytes); extern void free(buffer<int>[] data); func main() int { b: buffer<int>[] = malloc(32); b[3] = 6; result := b[3]; free(b); return result; }", 6)
+    program("extern i32 memcmp(buffer<i32>[] a, buffer<i32>[] b, int size); func main() int { a: buffer<i32>[2] = {3, 4}; b: buffer<i32>[] = {3, 4}; return extern.memcmp(a, b, 8); }", 0)
+    program("extern buffer<int>[] malloc(int bytes); extern void free(buffer<int>[] data); func main() int { b: buffer<int>[] = extern.malloc(32); b[3] = 6; result := b[3]; extern.free(b); return result; }", 6)
     # Each iteration allocates a large VLA; continue/break must restore the scope's stack.
     program("func main() int { n := 100000; result := 0; for (i := 0; i < 200; i++) { b: buffer<int>[n]; b[0] = i; if (i < 100) { continue; } result = b[0]; if (i == 101) { break; } } return result; }", 101)
     program("func main() int { n := 200000; for (i := 0; i < 100; i++) { if (i % 2 == 0) { b: buffer<int>[n]; b[n - 1] = i; } else { b: buffer<int>[n]; b[0] = i; } } return 3; }", 3)
 
-    program('extern i32 sscanf(buffer<i8>[] text, buffer<i8>[] format, ...); func main() int { b: buffer<i32>[] = {0}; sscanf("7\\0".data, "%d\\0".data, b); return b[0]; }', 7)
+    program('extern i32 sscanf(buffer<i8>[] text, buffer<i8>[] format, ...); func main() int { b: buffer<i32>[] = {0}; extern.sscanf("7\\0".data, "%d\\0".data, b); return b[0]; }', 7)
 
-    source.write_text("func last(b buffer<int>[], n int) int { return b[n - 1]; } func main() int { n := 3; { b: buffer<int>[n]; b[2] = 4; value := last(b, n); } return 0; }")
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; func last(b buffer<int>[], n int) int { return b[n - 1]; } func main() int { n := 3; { b: buffer<int>[n]; b[2] = 4; value := last(b, n); } return 0; }")
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     runtime = ir.read_text()
-    assert 'define i64 @"ocean.last"(ptr %arg0, i64 %arg1)' in runtime
+    assert 'define i64 @"ocean.__pkg0_last"(ptr %arg0, i64 %arg1)' in runtime
     assert "alloca i64, i64 %" in runtime
     assert "getelementptr i64, ptr" in runtime and "getelementptr inbounds" not in runtime
     assert "call void @llvm.stackrestore.p0" in runtime
@@ -155,11 +276,11 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { n := 3; a: int[] = int[n++]; n = 10; return len(a) + a.size; }", 27)
     program("func count(n int) int { return n + 1; } func main() int { a := float[count(2)]; a[1] = 2.5; return len(a) + a.size; }", 27)
     program("func main() int { a: int[]; b := int[0]; c := int[-0]; return len(a) + len(b) + len(c); }", 0)
-    program("func fill(a int[]) { for (i := 0; i < len(a); i++) { a.data[i] = i + 2; } } func main() int { a := int[3]; fill(a); alias := a; alias[2] = 8; return a[0] + a[2]; }", 10)
+    program("func fill(a *int[]) { for (i := 0; i < len(*a); i++) { (*a).data[i] = i + 2; } } func main() int { a := int[3]; fill(&a); copy := a; copy[2] = 8; return a[0] + a[2]; }", 6)
     program("func main() int { a: int[][] = int[][2]; a[0] = int[3]; a[1] = int[4]; return len(a) + len(a[0]) + len(a[1]); }", 9)
     program("func main() int { a: buffer<int>[2][] = buffer<int>[2][3]; a[1][0] = 7; return a.size + len(a) + a[1][0]; }", 58)
     program(PRINT + 'func main() { a := string[2]; a[0] = "array"; puts(a.data[0]); }', stdout="array\n")
-    program("extern i32 memcmp(int[] a, buffer<int>[] expected, int bytes); func main() int { a := int[2]; a[0] = 11; a[1] = 22; expected: buffer<int>[3] = {16, 11, 22}; return memcmp(a, expected, 24); }", 0)
+    program("extern i32 memcmp(int[] a, buffer<int>[] expected, int bytes); func main() int { a := int[2]; a[0] = 11; a[1] = 22; expected: buffer<int>[3] = {16, 11, 22}; return extern.memcmp(a, expected, 24); }", 0)
     program("func main() int { n := 100000; result := 0; for (i := 0; i < 100; i++) { a := int[n]; a[0] = i; if (i < 98) { continue; } result = a[0]; break; } return result; }", 98)
     program("func main() int { n := 3; a := int[n++]; return n; }", 4)
     program("func main() int { n := 3; size := sizeof(++n); return n + size + sizeof(i32); }", 15)
@@ -174,8 +295,8 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func total(arrays ...int[]) int { n := 0; for (i := 0; i < len(arrays); i++) { n += len(arrays[i]); } return n; } func main() int { return total(int[2], int[3]); }", 5)
     program("func named() (int[] a, int n) { n = len(a); return; } func main() int { _, n := named(); return n; }", 0)
 
-    source.write_text("func main() int { n := 5; a: int[] = int[n]; a.data[0] = 4; return len(a); }")
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; func main() int { n := 5; a: int[] = int[n]; a.data[0] = 4; return len(a); }")
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     layout = ir.read_text()
     assert "getelementptr { i64, [0 x i64] }" in layout
@@ -190,24 +311,24 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { a := int[3]; a.data = {1, 2, 3}; a.data = {a[1], a[0]}; return a[0] * 10 + a[1] + a[2]; }", 21)
     program("func main() int { a := int[3]; a.data = {1, 2, 3}; a.data = {}; return a[0] + a[1] + a[2] + len(a); }", 3)
     program("func main() int { a := i32[2]; b: buffer<i32>[3] = {5, 6, 7}; a.data = b; b[0] = 9; return a[0] + a[1] + a.size; }", 19)
-    program("func fill(a int[], source buffer<int>[]) { a.data = source; } func main() int { a := int[3]; b: buffer<int>[3] = {4, 5, 6}; fill(a, b); return a[0] + a[2] + len(a); }", 13)
+    program("func fill(a *int[], source buffer<int>[]) { (*a).data = source; } func main() int { a := int[3]; b: buffer<int>[3] = {4, 5, 6}; fill(&a, b); return a[0] + a[2] + len(a); }", 13)
     program("func main() int { a := int[2]; a.data = {3, 4}; a.data = a.data; return a[0] + a[1]; }", 7)
     program(COMPARE + 'func main() int { a := string[3]; a.data = {"hi"}; return strcmp(a[1], "") + strcmp(a[2], ""); }', 0)
     program("func main() int { a := float[3]; a.data = {2.5}; return (a[0] + a[1] + a[2])->int; }", 2)
     program("func main() int { a := bool[3]; a.data = {true}; if (a[0] && !a[1] && !a[2]) { return 4; } return 0; }", 4)
     program("func main() int { a: int[][] = int[][3]; a.data = {{1, 2}, {3}}; return len(a) + len(a[0]) + len(a[1]) + len(a[2]) + a[0][1]; }", 8)
     program(COMPARE + 'func main() int { a := buffer<string>[2][2]; a.data = {{"hi"}}; return strcmp(a[0][1], "") + strcmp(a[1][0], ""); }', 0)
-    program("func source(b buffer<int>[], calls buffer<int>[]) buffer<int>[] { calls[0]++; return b; } func target(a int[], calls buffer<int>[]) int[] { calls[0]++; return a; } func main() int { a := int[2]; b: buffer<int>[2] = {5, 6}; calls: buffer<int>[1]; target(a, calls).data = source(b, calls); return calls[0] + a[0] + a[1]; }", 13)
+    program("func source(b buffer<int>[], calls buffer<int>[]) buffer<int>[] { calls[0]++; return b; } func target(a int[], calls buffer<int>[]) int[] { calls[0]++; return a; } func main() int { a: int[] = {0, 0}; b: buffer<int>[2] = {5, 6}; calls: buffer<int>[1]; target(a, calls).data = source(b, calls); return calls[0] + a[0] + a[1]; }", 2)
     program("func main() int { n := 100000; result := 0; for (i := 0; i < 100; i++) { a := int[n]; a.data = {i}; if (i < 98) { continue; } result = a[0] + a[n - 1]; break; } return result; }", 98)
     program("func main() int { a := int[0]; a.data = {}; b: buffer<int>[] = {}; a.data = b; return len(a); }", 0)
 
     program("func sum(xs ...int) int { total := 0; for (i := 0; i < len(xs); i++) { total += xs[i]; } return total; } func main() int { a := int[3]; a.data = {2, 3, 4}; return sum(a...); }", 9)
     program("func sum(base int, xs ...int) int { for (i := 0; i < len(xs); i++) { base += xs[i]; } return base; } func main() int { a := int[2]; a.data = {3, 4}; return sum(5, 1, 2, a...); }", 15)
-    program("func change(xs ...int) { xs[0] = 9; } func main() int { a := int[2]; a.data = {1, 2}; change(a...); return a[0]; }", 9)
+    program("func change(xs ...int) { xs[0] = 9; } func main() int { a := int[2]; a.data = {1, 2}; change(a...); return a[0]; }", 1)
     program("func change(xs ...int) { xs[1] = 9; } func main() int { a := int[2]; a.data = {1, 2}; change(8, a...); return a[0]; }", 1)
-    program("func fill(xs ...int) { xs.data = {7}; } func main() int { a := int[3]; a.data = {1, 2, 3}; fill(a...); return a[0] + a[1] + a[2] + len(a); }", 10)
+    program("func fill(xs ...int) { xs.data = {7}; } func main() int { a := int[3]; a.data = {1, 2, 3}; fill(a...); return a[0] + a[1] + a[2] + len(a); }", 9)
     program("func inspect(a int[]) int { return len(a) + a.size; } func f(xs ...int) int { copy: int[] = xs; return inspect(copy); } func main() int { return f(1, 2, 3); }", 27)
-    program("extern i32 memcmp(int[] a, buffer<int>[] expected, int bytes); func f(xs ...int) i32 { expected: buffer<int>[3] = {16, 2, 3}; return memcmp(xs, expected, 24); } func main() int { return f(2, 3); }", 0)
+    program("extern i32 memcmp(int[] a, buffer<int>[] expected, int bytes); func f(xs ...int) i32 { expected: buffer<int>[3] = {16, 2, 3}; return extern.memcmp(xs, expected, 24); } func main() int { return f(2, 3); }", 0)
     program("func collect(xs ...int) int[] { return xs; } func main() int { a := collect(2, 3); return len(a) + a[1]; }", 5)
     program("func sum(xs ...int) int { n := 0; for (i := 0; i < len(xs); i++) { n += xs[i]; } return n; } func forward(xs ...int) int { return sum(xs...); } func main() int { a := int[2]; a.data = {4, 5}; return forward(a...); }", 9)
     program("func count(xs ...int) int { return len(xs); } func main() int { a := int[0]; return count(a...) + count() + count(1, a...); }", 1)
@@ -217,14 +338,18 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func get(a int[], calls buffer<int>[]) int[] { calls[0]++; return a; } func count(xs ...int) int { return len(xs); } func main() int { a := int[2]; calls: buffer<int>[1]; return count(7, get(a, calls)...) + calls[0]; }", 4)
     program("func count(xs ...int) int { return len(xs); } func main() int { total := 0; for (i := 0; i < 150; i++) { total += count(1, 2, 3); } return total % 100; }", 50)
 
-    source.write_text("func inspect(a int[]) int { return len(a); } func f(xs ...int) int { return inspect(xs) + xs.size; } func main() int { return f(1, 2); }")
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; func inspect(a int[]) int { return len(a); } func f(xs ...int) int { return inspect(xs) + xs.size; } func main() int { return f(1, 2); }")
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     variadic_ir = ir.read_text()
-    assert 'define i64 @"ocean.f"(ptr %arg0)' in variadic_ir
-    assert 'define i64 @"ocean.inspect"(ptr %arg0)' in variadic_ir
+    assert 'define i64 @"ocean.__pkg0_f"(ptr %arg0)' in variadic_ir
+    assert 'define i64 @"ocean.__pkg0_inspect"(ptr %arg0)' in variadic_ir
     assert "getelementptr { i64, [0 x i64] }" in variadic_ir
-    assert "{ ptr, i64 }" not in variadic_ir
+    # Runtime helpers may use any boxes; typed variadic functions must not.
+    typed_functions = re.findall(r'define i64 @"ocean.__pkg0_(?:f|inspect)"[^\n]*\{(.*?)^}',
+                                 variadic_ir, re.MULTILINE | re.DOTALL)
+    assert len(typed_functions) == 2
+    assert all("{ ptr, i64 }" not in body for body in typed_functions)
 
     program("func count(xs ...int) int { return len(xs); } func main() int { a := int[100000]; a.data = {}; total := 0; for (i := 0; i < 100; i++) { total += count(1, a...); } return total % 100; }", 0)
     program("func replace(xs ...int) int { xs = int[1]; xs[0] = 7; return len(xs); } func main() int { a := int[3]; return replace(a...) + len(a); }", 4)
@@ -254,16 +379,18 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { b: buffer<int>[2] = {1, 2}; views: buffer<buffer<int>[]>[1] = {b}; views[0][0] = 7; return b[0]; }", 7)
 
     # Inspect unchecked accesses without executing out-of-range memory operations.
-    source.write_text("func main() int { b: buffer<int>[2]; b[-1] = 9; return b[99]; }")
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; func main() int { b: buffer<int>[2]; b[-1] = 9; return b[99]; }")
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
-    unchecked = ir.read_text()
+    # Inspect the source function, excluding unrelated runtime safety checks.
+    unchecked = re.search(r'define i64 @"ocean.main"\(\) \{(.*?)^}',
+                          ir.read_text(), re.MULTILINE | re.DOTALL).group(1)
     assert "getelementptr [2 x i64]" in unchecked
     assert "inbounds" not in unchecked and "icmp" not in unchecked and "@llvm.trap" not in unchecked
 
 
     program('func main() int { s: string; return len(s) + s.size; }', optimize=True)
-    program('func main() int { s: string = "abc"; a: i8[] = s; a[0] = 65; return s[0]; }', 65, optimize=True)
+    program('func main() int { s: string = "abc"; a: i8[] = s; a[0] = 65; return s[0]; }', 97, optimize=True)
     program('func main() int { a: i8[] = {65, 66}; s: string = a; return len(s) + sizeof(s[0]); }', 3, optimize=True)
     program('func main() int { s := "a\\0b" + "\\0c"; return len(s) + s[2] + s[3]; }', 103, optimize=True)
     program('func main() int { s := "ab"; t := s + "cd"; t[0] = 90; if (s[0] == 97 && len(t) == 4 && t[3] == 100) { return 7; } return 1; }', 7, optimize=True)
@@ -277,8 +404,8 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
 
     program(PRINT + 'func main() { s := "é" + `é`; puts(s); }', stdout="éé\n", optimize=True)
     program('func main() int { s := "é"; return len(s) + s[0]->int + 64; }', 5, optimize=True)
-    source.write_text('func main() int { s := "abc"; return len(s); }')
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; " + 'func main() int { s := "abc"; return len(s); }')
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     literal_ir = ir.read_text()
     assert 'constant [3 x i8] c"\\61\\62\\63"' in literal_ir
@@ -308,8 +435,8 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("struct S { x int; y int; } func make(n buffer<int>[]) S { n[0]++; return S{n[0], 2}; } func main() int { n: buffer<int>[] = {0}; return make(n).x + n[0]; }", 2, optimize=True)
     program("struct Empty<T any> { data int; } func main() int { a := Empty<int>{4}; b := Empty<bool>{5}; return sizeof(a) + sizeof(b) + a.data + b.data; }", 25, optimize=True)
 
-    source.write_text("struct Box<T any> { value T; } func main() int { a := Box<int>{1}; b := Box<bool>{true}; c := Box<int>{2}; return a.value + c.value; }")
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; struct Box<T any> { value T; } func main() int { a := Box<int>{1}; b := Box<bool>{true}; c := Box<int>{2}; return a.value + c.value; }")
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     layouts = [line for line in ir.read_text().splitlines() if line.startswith("%ocean.struct.") and " = type " in line]
     assert len(layouts) == 2, layouts
@@ -320,9 +447,21 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
 
     program("struct Node { value int; next *Node; } func main() int { b := Node{value: 2}; a := Node{1, &b}; if (a.next == &b && &a != &b) { return a.next.value; } return 0; }", 2, optimize=True)
     program("struct Box<T any> { value T; } func main() int { a := Box<int>[]{{3}, {4}}; a[1].value++; return a.size + len(a) + a[1].value; }", 23, optimize=True)
+    # Concrete generic record types and addressed literals inside specializations.
+    program("struct Optional<T> { value T; ok bool; } "
+            "func (o Optional<T>) unwrap() T { if (!o.ok) panic \"empty optional\"; return o.value; } "
+            "struct Node<T> { value T; next *Node<T>; } "
+            "func (n *Node<T>) read() T { node: *Node<T> = n; previous: *Node<T> = null; "
+            "if (previous == null) return node.value; panic \"unreachable\"; } "
+            "func local<T>(value T) T { node: *Node<T> = &Node<T>{value: value, next: null}; "
+            "return node.read(); } "
+            "func main() int { first := &Node<int>{value: 3, next: null}; "
+            "second := &Node<i8>{value: 4, next: null}; "
+            "answer := Optional<int>{value: first.read(), ok: true}; "
+            "return answer.unwrap() + second.read() + local<int>(5); }", 12, optimize=True)
     # Verify concrete layouts against host C structs, through pointer parameters.
-    source.write_text("struct Check<T any> { tag i8; value T; active bool; } extern i32 inspect(*Check<int> a, *Check<i8> b, int sa, int sb); func main() int { a := Check<int>{1, 7, true}; b := Check<i8>{-3, 9, true}; result := inspect(&a, &b, sizeof(a), sizeof(b)); if (a.value != 21) { return 2; } return result; }")
-    emitted = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+    source.write_text("package main; struct Check<T any> { tag i8; value T; active bool; } extern i32 inspect(*Check<int> a, *Check<i8> b, int sa, int sb); func main() int { a := Check<int>{1, 7, true}; b := Check<i8>{-3, 9, true}; result := extern.inspect(&a, &b, sizeof(a), sizeof(b)); if (a.value != 21) { return 2; } return result; }")
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     helper = root / "struct layout.c"
     helper.write_text("""#include <stdint.h>
@@ -343,17 +482,29 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     assert run([str(exe)]).returncode == 0
 
     def rejected(text, diagnostic):
-        source.write_text(text)
+        source.write_text("package main; " + text)
         exe.write_text("existing output")
-        result = run([compiler, str(source), "-o", str(exe)])
+        result = run([compiler, "build", str(source), "-o", str(exe)])
         assert result.returncode != 0, text
         assert diagnostic in result.stdout + result.stderr, result
         assert exe.read_text() == "existing output", "failure replaced previous output"
         ir.write_text("existing IR")
-        result = run([compiler, "--emit-llvm", str(source), "-o", str(ir)])
+        result = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
         assert result.returncode != 0, text
         assert ir.read_text() == "existing IR"
 
+    rejected("extern i32 abs(i32 value); func main() int { return abs(-3); }", "extern.name")
+    rejected("func main() int { return extern.abs(-3); }", "not declared in this file")
+    rejected("func main() { extern i32 abs(i32 value); }", "file scope")
+    rejected("extern i32 abs(i32 value); func main() { extern.(); }", "Expected extern function name")
+    rejected("func main() { raw: *void; p: *int = raw; }", "type mismatch")
+    rejected("func main() { p: **int; raw: **void = p; }", "type mismatch")
+    rejected("func main() { a: buffer<*int>[1]; b: buffer<*void>[1] = a; }", "type mismatch")
+    rejected("func main() { p: *void; x := *p; }", "before dereferencing")
+    rejected("func main() { x := 1.0 -> (*void); }", "invalid conversion")
+    rejected("func main() { a := int[]{1}; p := a -> (*void); }", "invalid conversion")
+    rejected("func main() { x := zero(void); }", "void has no value representation")
+    rejected("func main() int { return sizeof(void); }", "void has no storage size")
     rejected("struct P(int tag) { x int; } func main() { p := P{1,2}; p.tag = 3; }", "immutable")
     rejected("struct P<T any>(T parameter) { value T; } func main() { p := P<int>{1,2}; p.parameter++; }", "immutable")
     rejected("struct P { x int; } struct Box<T any>(T parameter) {} func main() { b := Box<P>{{1}}; b.parameter.x = 3; }", "immutable")
@@ -365,9 +516,17 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("struct S { x int; } extern void use(S value); func main() {}", "ABI lowering")
     rejected("struct Grow<T any> { next *Grow<T[]>; } func main() { g: Grow<int>; }", "specialization nesting")
     rejected("struct S { value S; } func main() {}", "recursive struct")
+    rejected("func main() { x := zero(); }", "zero requires exactly one type argument")
+    rejected("func main() { x := zero(int, bool); }", "closing parenthesis after zero type")
+    rejected("func main() { x := zero(Missing); }", "unresolved type")
+    rejected("func main() { x := 1; z := zero(x); }", "expected a type")
+    rejected("func main() { x := zero(any); }", "zero requires a storage type")
+    rejected("func main() { n := 3; x := zero(buffer<int>[n]); }", "zero requires a fixed-size buffer")
+    rejected("func main() { zero(int) = 1; }", "writable value")
+    rejected("func main() { x: bool = zero(int); }", "type mismatch")
     rejected("func f() {}", "requires func main")
-    rejected("func main() int {}", "without returning")
-    rejected("func main() int { if (true) { return 1; } }", "without returning")
+    program("func main() int {}", 0)
+    program("func main() int { if (true) { return 1; } }", 1)
     rejected("func main() { break; }", "Branch statement")
     rejected("func main() { continue; }", "Branch statement")
     program("struct Point {} func main() {}")
@@ -380,7 +539,11 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("struct S {} func (s S) take<U>(value U) U { return value; } func main() { s := S{}; s.take<int>(true); }", "type mismatch")
     rejected("struct S {} func (s *S) take<U>(value U) U { return value; } func make() S { return S{}; } func main() { make().take<int>(1); }", "addressable")
     rejected("struct S {} func (s S) take<U>(value U) U { return value; } func main() { s := S{}; s.take<Missing>(1); }", "unresolved type")
-    rejected("func id[T any](x T) T { return x; } func main() {}", "generic functions")
+    rejected("func main() { x: int = null; }", "type mismatch")
+    rejected("struct S {} func main() { x: S = null; }", "type mismatch")
+    rejected("func main() { x := null; }", "explicit pointer type")
+    rejected("func main() { x: *int = 0; }", "type mismatch")
+    rejected("func id[T any](x T) T { return x; } func main() { id(1); }", "explicit type arguments")
     rejected("func pair() (int, bool) { return 1, true; } func main() { a := pair(); }", "initializer count mismatch")
     rejected("func pair() (int, bool) { return 1, true; } func main() { a, b, c := pair(); }", "initializer count mismatch")
     rejected("func pair() (int, bool) { return 1, true; } func main() { a, b: int = pair(); }", "type mismatch")
@@ -428,7 +591,7 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("func f(n int, xs ...int) {} func main() { a := int[2]; f(a...); }", "expanded argument requires")
     rejected("func f(xs ...int) {} func main() { a := int[2]; f(a.data...); }", "buffer expansion is not supported")
     rejected("func f(xs ...int) int { return xs.length; } func main() {}", "only has size and data")
-    rejected("extern i32 printf(string format, ...); func main() { a := int[2]; printf(\"%d\", a...); }", "expanded argument requires")
+    rejected("extern i32 printf(string format, ...); func main() { a := int[2]; extern.printf(\"%d\", a.data...); }", "buffer expansion is not supported")
     rejected("func pair(a int[]) (int, int[]) { return 1, a; } func f(n int, xs ...int) {} func main() { a := int[2]; f(pair(a)...); }", "not multiple return values")
     rejected("func use(a int[]) {} func main() { use({1, 2, 3}); }", "standalone literal requires an explicit type")
     rejected("func use(b buffer<int>[]) {} func main() { use({1, 2}); }", "standalone literal requires an explicit type")
@@ -442,29 +605,29 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("func main() { b := buffer<int>[1]{1, 2}; }", "too many elements")
     rejected("func main() { a := int[]{0: 1}; }", "positional")
     rejected("func main() { a := int[1]; b := a{1, 2}; }", "literal prefix must name")
-    source.write_text("extern int missing(void); func main() int { return missing(); }")
+    source.write_text("package main; extern int missing(void); func main() int { return extern.missing(); }")
     exe.write_text("existing output")
-    result = run([compiler, str(source), "-o", str(exe)])
+    result = run([compiler, "build", str(source), "-o", str(exe)])
     assert result.returncode != 0 and "clang failed" in result.stderr, result
     assert exe.read_text() == "existing output"
 
-    source.write_text("func main() {}")
+    source.write_text("package main; func main() {}")
     original = source.read_text()
-    result = run([compiler, str(source), "-o", str(source)])
+    result = run([compiler, "build", str(source), "-o", str(source)])
     assert result.returncode != 0 and source.read_text() == original
-    result = run([compiler, str(source), str(source)])
-    assert result.returncode != 0 and "one input file" in result.stderr
-    result = run([compiler, "-o"])
+    result = run([compiler, "build", str(source), str(source)])
+    assert result.returncode != 0 and "one package location" in result.stderr
+    result = run([compiler, "build", "-o"])
     assert result.returncode != 0 and "requires an output path" in result.stderr
-    result = run([compiler, "--unknown"])
+    result = run([compiler, "build", "--unknown"])
     assert result.returncode != 0 and "unknown option" in result.stderr
-    result = run([compiler, str(source), "-o", str(exe)], env={**os.environ, "PATH": ""})
+    result = run([compiler, "build", str(source), "-o", str(exe)], env={**os.environ, "PATH": ""})
     assert result.returncode != 0 and "could not execute clang" in result.stderr
     assert exe.read_text() == "existing output"
-    result = run([compiler, "--emit-llvm", str(source), "-o", str(ir)], env={**os.environ, "PATH": ""})
+    result = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)], env={**os.environ, "PATH": ""})
     assert result.returncode == 0, result
-    result = run([compiler, str(source)], cwd=root)
-    assert result.returncode == 0 and (root / "a.out").is_file()
-    assert run([str(root / "a.out")]).returncode == 0
+    result = run([compiler, "build", str(source)], cwd=root)
+    assert result.returncode == 0 and (root / root.name).is_file()
+    assert run([str(root / root.name)]).returncode == 0
     assert not list(root.glob("*.??????")), "temporary output was not cleaned up"
 print("backend end-to-end tests passed")
