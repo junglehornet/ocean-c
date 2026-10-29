@@ -69,6 +69,9 @@ if(BUILD_TESTING)
     endforeach()
 
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME lsp_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/lsp_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(lsp_test PROPERTIES TIMEOUT 30)
     add_test(NAME semantic_diagnostics_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/semantic_diagnostics_test.py" "$<TARGET_FILE:ocean-c>")
     set_tests_properties(semantic_diagnostics_test PROPERTIES TIMEOUT 30)

@@ -40,9 +40,25 @@ or `--` are forwarded to the executable.
 ```sh
 build/ocean build --emit-llvm . -o hello.ll
 build/ocean build --check .
+build/ocean check ./hello.oc
+build/ocean check --lsp
 ```
 
 `--emit-llvm` defaults to `a.ll`; `--check` checks the complete package graph.
+
+`ocean check [file-or-directory]` checks syntax and semantics for the package and
+its imports without generating LLVM, object files, or an executable. It defaults
+to the current directory and exits with a nonzero status on errors.
+
+`ocean check --lsp` starts the Ocean language server over stdin/stdout using
+[Language Server Protocol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/)
+framing. Configure an editor's Ocean language client to run `ocean` with arguments
+`["check", "--lsp"]`. The server supports initialization, shutdown, full-document
+synchronization, and syntax/semantic diagnostics on open, change, and save. Open
+buffers, including new unsaved files, are checked together with their package and
+imports without modifying source files. Diagnostic positions use UTF-16. Completion,
+hover, and navigation are not currently implemented.
+
 Both `ocean` and `ocean-c` use this command interface. A standalone source file
 can be passed as the location and must include a package declaration.
 
