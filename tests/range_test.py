@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
             "for (j, n := range int[]{4, 5}) { sum += item * n; continue outer; } } "
             "return sum + i + item; }", 70)
     program('func main() int { a := string[]{"ab", "c"}; sum := 0; '
-            'for (i, item := range a) { item[0] = 120; sum += len(item); } '
+            'for (i, item := range a) { sum += len(item); item = "replacement"; free(item); } '
             'if (a[0] != "ab" || a[1] != "c") return 1; return sum; }', 3)
     program("func make(n *int) int[] { (*n)++; return int[]{4, 6}; } "
             "func main() int { n := 0; sum := 0; for (i, item := range make(&n)) { "

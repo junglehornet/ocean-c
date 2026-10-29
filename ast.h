@@ -231,6 +231,7 @@ enum exprType {
     EXPR_TYPE_ARRAY_NEW,
     EXPR_TYPE_ZERO,
     EXPR_TYPE_TYPE_NAME,
+    EXPR_TYPE_MAKE, EXPR_TYPE_NEW,
 };
 
 struct expr {
@@ -298,6 +299,7 @@ struct expr_zero {
 struct expr_array_new {
     typeTokens elementType;
     expr count;
+    char buffer; // Allocate raw buffer storage rather than a collection value.
 };
 
 struct expr_unary {
@@ -321,6 +323,7 @@ struct expr_index {
     expr parent;
     expr index; // EXPR_TYPE_NULL denotes access to the delegated collection.
     token location; // Opening subscript bracket.
+    char tryIndex; // Two-binding indexing returns (value, success).
 };
 
 struct expr_composite {

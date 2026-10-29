@@ -77,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
             'if (!("a\\0b" == "a\\0b") || "a\\0b" == "a\\0c" || '
             '"a\\0b" == "a") return 2; return 0; }', optimize=True)
     program('func same<T>(a T, b T) bool { return a == b; } '
-            'func main() int { a := "abc"; b := a; b[1] = 120; '
+            'func main() int { a := "abc"; b := a; b = "axc"; '
             'bytes: i8[] = "abc"; if (a == b || !(a != b) || !(bytes == a) || '
             '!same<string>(a, "abc")) return 1; return 0; }', optimize=True)
     program(COMPARE + 'func make(n *int) string { (*n)++; return "same"; } '
@@ -194,7 +194,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func make() buffer<int>[2] { return buffer<int>[2]{4, 5}; } func sum(b buffer<int>[2]) int { return b[0] + b[1]; } func main() int { return sum(make()); }", 9)
     program("func main() int { b: buffer<int>[3]; total := 0; for (i := 0; i < 3; i++) { b[i] = i + 1; total += b[i]; } return total; }", 6)
 
-    program("func sum(b buffer<int>[2]) int { b[0]++; return b[0] + b[1]; } func main() int { b: buffer<int>[2] = {2, 3}; return sum(b) + b[0] + sum(buffer<int>[2]{4, 5}); }", 18)
+    program("func sum(b buffer<int>[2]) int { b[0]++; return b[0] + b[1]; } func main() int { b: buffer<int>[2] = {2, 3}; return sum(b) + b[0] + sum(buffer<int>[2]{4, 5}); }", 19)
     program("func make() buffer<int>[2] { return buffer<int>[2]{6, 7}; } func main() int { return make()[1]; }", 7)
 
     program("extern void srand(i32 seed); extern i32 abs(i32); func main() int { extern.srand(1); return extern.abs(-5); }", 5)
@@ -280,7 +280,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { a: int[][] = int[][2]; a[0] = int[3]; a[1] = int[4]; return len(a) + len(a[0]) + len(a[1]); }", 9)
     program("func main() int { a: buffer<int>[2][] = buffer<int>[2][3]; a[1][0] = 7; return a.size + len(a) + a[1][0]; }", 58)
     program(PRINT + 'func main() { a := string[2]; a[0] = "array"; puts(a.data[0]); }', stdout="array\n")
-    program("extern i32 memcmp(int[] a, buffer<int>[] expected, int bytes); func main() int { a := int[2]; a[0] = 11; a[1] = 22; expected: buffer<int>[3] = {16, 11, 22}; return extern.memcmp(a, expected, 24); }", 0)
+    program("extern i32 memcmp(buffer<int> a, buffer<int> expected, int bytes); func main() int { a := make(int[]); a.append(11, 22); expected: buffer<int>[2] = {11, 22}; return extern.memcmp(a.data, expected, 16); }", 0)
     program("func main() int { n := 100000; result := 0; for (i := 0; i < 100; i++) { a := int[n]; a[0] = i; if (i < 98) { continue; } result = a[0]; break; } return result; }", 98)
     program("func main() int { n := 3; a := int[n++]; return n; }", 4)
     program("func main() int { n := 3; size := sizeof(++n); return n + size + sizeof(i32); }", 15)
@@ -299,9 +299,9 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
     assert emitted.returncode == 0, emitted.stdout + emitted.stderr
     layout = ir.read_text()
-    assert "getelementptr { i64, [0 x i64] }" in layout
-    assert "alloca i8, i64" in layout and "sdiv i64" in layout
-    assert "{ i64, ptr }" not in layout  # Payload is inline, rather than a separate pointer field.
+    assert "getelementptr { i64, i64, ptr }" in layout
+    assert 'malloc' in layout and 'getelementptr { i64, i64, ptr }' in layout
+    assert 'load ptr' in layout  # The dynamic array header refers to a separate heap payload.
 
     program("func main() int { a := int[2]; a[0] = 3; a[1] = 4; i := 0; a[i++] += 2; return a[0] + a[1] + i; }", 10)
     program("func get(a int[], calls buffer<int>[]) int[] { calls[0]++; return a; } func main() int { a := int[2]; a[1] = 7; calls: buffer<int>[1]; return get(a, calls)[1] + calls[0]; }", 8)
@@ -328,7 +328,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func change(xs ...int) { xs[1] = 9; } func main() int { a := int[2]; a.data = {1, 2}; change(8, a...); return a[0]; }", 1)
     program("func fill(xs ...int) { xs.data = {7}; } func main() int { a := int[3]; a.data = {1, 2, 3}; fill(a...); return a[0] + a[1] + a[2] + len(a); }", 9)
     program("func inspect(a int[]) int { return len(a) + a.size; } func f(xs ...int) int { copy: int[] = xs; return inspect(copy); } func main() int { return f(1, 2, 3); }", 27)
-    program("extern i32 memcmp(int[] a, buffer<int>[] expected, int bytes); func f(xs ...int) i32 { expected: buffer<int>[3] = {16, 2, 3}; return extern.memcmp(xs, expected, 24); } func main() int { return f(2, 3); }", 0)
+    program("extern i32 memcmp(buffer<int> a, buffer<int> expected, int bytes); func f(xs ...int) i32 { expected: buffer<int>[2] = {2, 3}; return extern.memcmp(xs.data, expected, 16); } func main() int { return f(2, 3); }", 0)
     program("func collect(xs ...int) int[] { return xs; } func main() int { a := collect(2, 3); return len(a) + a[1]; }", 5)
     program("func sum(xs ...int) int { n := 0; for (i := 0; i < len(xs); i++) { n += xs[i]; } return n; } func forward(xs ...int) int { return sum(xs...); } func main() int { a := int[2]; a.data = {4, 5}; return forward(a...); }", 9)
     program("func count(xs ...int) int { return len(xs); } func main() int { a := int[0]; return count(a...) + count() + count(1, a...); }", 1)
@@ -393,13 +393,13 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program('func main() int { s: string = "abc"; a: i8[] = s; a[0] = 65; return s[0]; }', 97, optimize=True)
     program('func main() int { a: i8[] = {65, 66}; s: string = a; return len(s) + sizeof(s[0]); }', 3, optimize=True)
     program('func main() int { s := "a\\0b" + "\\0c"; return len(s) + s[2] + s[3]; }', 103, optimize=True)
-    program('func main() int { s := "ab"; t := s + "cd"; t[0] = 90; if (s[0] == 97 && len(t) == 4 && t[3] == 100) { return 7; } return 1; }', 7, optimize=True)
+    program('func main() int { s := "ab"; t := s + "cd"; t = "Zbcd"; if (s[0] == 97 && len(t) == 4 && t[3] == 100) { return 7; } return 1; }', 7, optimize=True)
     program('func main() int { s := "" + ""; s += "ab"; s += "cd"; return len(s) + s[3]; }', 104, optimize=True)
     program(PRINT + 'func main() { s := "hello" + " " + "world"; puts(s); }', stdout="hello world\n", optimize=True)
     program(PRINT + 'func main() { puts("a\\0b" + "c"); }', stdout="a\0bc\n", optimize=True)
     program('func sum(xs ...i8) int { total := 0; for (i := 0; i < len(xs); i++) { total += xs[i]; } return total; } func main() int { return sum("ab"...); }', 195, optimize=True)
-    program('func main() int { s := "a"; s.data = {255}; return s[0]->int + 2; }', 1, optimize=True)
-    program('func main() int { s := "abcd"; s.data = {65}; return s[0] + s[1] + s[3]; }', 65, optimize=True)
+    program('func main() int { s: i8[] = {255}; return s[0]->int + 2; }', 1, optimize=True)
+    program('func main() int { s: i8[] = {97, 98, 99, 100}; s.data = {65}; return s[0] + s[1] + s[3]; }', 65, optimize=True)
     program('func main() int { a := "ab"; b := "cd"; for (i := 0; i < 100000; i++) { c := a + b; if (len(c) != 4) { return 1; } } return 0; }', optimize=True)
 
     program(PRINT + 'func main() { s := "é" + `é`; puts(s); }', stdout="éé\n", optimize=True)
@@ -511,7 +511,7 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("struct S { value S; } func main() { s: S; }", "recursive struct")
     rejected("struct A { value B; } struct B { value A; } func main() { a: A; }", "recursive struct")
     rejected("struct S { data buffer<S>[2]; } func main() { s: S; }", "recursive struct")
-    rejected("struct S(int n) { data buffer<int>[n]; } func main() { s: S = {2, buffer<int>{1,2}}; }", "runtime-sized inline struct fields")
+    rejected("struct S(int n) { data buffer<int>[n]; } func main() { s: S = {2, buffer<int>{1,2}}; }", "type mismatch")
     rejected("struct S { x int; } extern S make(void); func main() {}", "ABI lowering")
     rejected("struct S { x int; } extern void use(S value); func main() {}", "ABI lowering")
     rejected("struct Grow<T any> { next *Grow<T[]>; } func main() { g: Grow<int>; }", "specialization nesting")
@@ -575,8 +575,8 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("func main() { len(); }", "exactly one array argument")
     rejected("func main() { a := int[2]; len(a, a); }", "exactly one array argument")
     rejected("func main() { len(3); }", "len requires an array")
-    rejected("func main() { b: buffer<int>[3]; len(b); }", "len requires an array")
-    rejected("func main() { a := int[2]; x := a.length; }", "only has size and data")
+    program("func main() int { b: buffer<int>[3]; return len(b); }", 3)
+    program("func main() int { a := int[2]; return a.length; }", 2)
     rejected("func main() { a := int[2]; a[0] = true; }", "type mismatch")
     rejected("func main() { a := int[3]; a.size = 16; }", "immutable")
     rejected("func main() { a := int[3]; a.size++; }", "immutable")

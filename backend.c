@@ -20,11 +20,18 @@ typedef struct {
     int throughPointer;
     const char *homogeneousArray; // Indexed writes retain the array element identity.
     Kind elementRequirement;
+    const char *length; // Lexical metadata for a sized raw buffer.
 } Value;
+typedef struct DynamicArrayTemporary {
+    Value slot;
+    Kind kind;
+    struct DynamicArrayTemporary *next;
+} DynamicArrayTemporary;
 typedef struct Binding {
     const char *name;
     Value address;
     struct Binding *next;
+    int autoRelease; // Scope-owned value; pointers never own their pointees.
 } Binding;
 typedef struct Scope {
     Binding *bindings;
@@ -48,6 +55,9 @@ typedef struct BufferKind {
     struct stmt_struct *record; // Shape 5: concrete user struct; type arguments are compiler-only.
     Kind *arguments;
     size_t nArguments;
+    int immutableString; // Read-only i8 dynamic array with capacity equal to length.
+    int dynamicArray; // Heap payload with a {length, capacity, data} header.
+    int fixedArray; // Sized Ocean array, distinct from an unchecked buffer.
     int layoutState;
     int emptyEmitted; // Empty array headers have module lifetime, including returned zeros.
     const char *zeroOperand; // Cached LLVM constant for a concrete aggregate's default value.
@@ -71,12 +81,6 @@ typedef struct MethodInstance {
     unsigned id;
     struct MethodInstance *next;
 } MethodInstance;
-typedef struct InlineReturn {
-    struct stmt_func *function;
-    Value storage;
-    unsigned end;
-    struct InlineReturn *parent;
-} InlineReturn;
 typedef struct JumpRegion {
     struct JumpRegion *parent;
 } JumpRegion;
@@ -147,7 +151,6 @@ typedef struct {
     Value boxRegion;
     int anyUsed;
     JumpContext *jumps;
-    InlineReturn *inlineReturn;
     TypeBinding *typeBindings;
     MethodInstance *methods, *lastMethod, *method;
     unsigned nMethods;
@@ -167,6 +170,10 @@ typedef struct {
     int dataCopyUsed;
     int stringComparisonUsed;
     int returnTransportUsed;
+    int newUsed; // calloc provides byte-zeroed heap storage, including padding.
+    DynamicArrayTemporary *dynamicArrayTemps; // Compile-time list of entry-block temporary slots.
+    DynamicArrayTemporary *functionTemps;
+    int readingIndex;
     int copyTransport; // 1: heap clone; 2: stack clone and free; 3: free owned storage.
     int nullChecksUsed;
     BufferKind *buffers;
@@ -350,7 +357,7 @@ static void popTraceFrame(Backend *b, Value previous) {
 }
 static Kind arrayKind(Backend *b, Kind element, size_t count) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->ir && !v->shape && v->element == element && v->count == count)
+        if (!v->definition && v->ir && !v->shape && !v->fixedArray && v->element == element && v->count == count)
             return v->kind;
     BufferKind *v = checked(sizeof(*v));
     v->kind = (Kind)(BUFFER + b->nBuffers++);
@@ -361,6 +368,19 @@ static Kind arrayKind(Backend *b, Kind element, size_t count) {
     snprintf(v->ir, n, "[%zu x %s]", count, irType(b, element));
     v->next = b->buffers;
     b->buffers = v;
+    return v->kind;
+}
+static Kind fixedArrayKind(Backend *b, Kind element, size_t count) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (!v->definition && !v->shape && v->fixedArray && v->element == element && v->count == count)
+            return v->kind;
+    Kind raw = arrayKind(b, element, count);
+    BufferKind *v = checked(sizeof(*v));
+    *v = *bufferKind(b, raw);
+    v->kind = (Kind)(BUFFER + b->nBuffers++);
+    v->ir = strdup(v->ir);
+    v->fixedArray = 1;
+    v->next = b->buffers; b->buffers = v;
     return v->kind;
 }
 static Kind structKind(Backend *b, int shape, Kind element, Kind *members, size_t count) {
@@ -392,7 +412,7 @@ static Kind structKind(Backend *b, int shape, Kind element, Kind *members, size_
 }
 static Kind pointerBufferKind(Backend *b, Kind element) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->ir && v->shape == 3 && v->element == element)
+        if (!v->definition && v->ir && v->shape == 3 && !v->fixedArray && v->element == element)
             return v->kind;
     BufferKind *v = checked(sizeof(*v));
     v->kind = (Kind)(BUFFER + b->nBuffers++);
@@ -404,9 +424,19 @@ static Kind pointerBufferKind(Backend *b, Kind element) {
     b->buffers = v;
     return v->kind;
 }
+static Kind runtimeArrayKind(Backend *b, Kind element) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (v->shape == 3 && v->fixedArray && v->element == element) return v->kind;
+    Kind raw = pointerBufferKind(b, element);
+    BufferKind *v = checked(sizeof(*v));
+    *v = *bufferKind(b, raw); v->ir = strdup(v->ir);
+    v->kind = (Kind)(BUFFER + b->nBuffers++); v->fixedArray = 1;
+    v->next = b->buffers; b->buffers = v;
+    return v->kind;
+}
 static Kind arrayValueKind(Backend *b, Kind element) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->ir && v->shape == 4 && !v->count && !v->requirement && v->element == element)
+        if (!v->definition && v->ir && v->shape == 4 && !v->dynamicArray && !v->count && !v->requirement && v->element == element)
             return v->kind;
     BufferKind *v = checked(sizeof(*v));
     v->kind = (Kind)(BUFFER + b->nBuffers++);
@@ -419,6 +449,27 @@ static Kind arrayValueKind(Backend *b, Kind element) {
     snprintf(v->layout, n, "{ i64, [0 x %s] }", irType(b, element));
     v->next = b->buffers;
     b->buffers = v;
+    return v->kind;
+}
+static Kind dynamicArrayKind(Backend *b, Kind element) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (v->dynamicArray && !v->immutableString && !v->definition && v->element == element) return v->kind;
+    Kind base = arrayValueKind(b, element);
+    BufferKind *v = checked(sizeof(*v)); *v = *bufferKind(b, base);
+    v->kind = (Kind)(BUFFER + b->nBuffers++); v->dynamicArray = 1;
+    v->ir = strdup(v->ir); v->layout = strdup("{ i64, i64, ptr }");
+    v->next = b->buffers; b->buffers = v;
+    return v->kind;
+}
+static Kind stringKind(Backend *b) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (v->immutableString && !v->definition) return v->kind;
+    Kind base = dynamicArrayKind(b, I8);
+    BufferKind *v = checked(sizeof(*v)); *v = *bufferKind(b, base);
+    v->kind = (Kind)(BUFFER + b->nBuffers++); v->immutableString = 1;
+    v->ir = strdup(v->ir); v->layout = strdup(v->layout);
+    v->zeroOperand = NULL; v->emptyEmitted = 0;
+    v->next = b->buffers; b->buffers = v;
     return v->kind;
 }
 // Variadic packs may contain different types; ordinary any[] arrays may not.
@@ -502,6 +553,16 @@ static Kind pointerKind(Backend *b, Kind element) {
     return v->kind;
 }
 static int validateLayout(Backend *, BufferKind *);
+static Kind recordFieldKind(Backend *b, typeTokens span) {
+    typeTokens element, dimension;
+    if (sizedArrayTypeParts(span, &element, &dimension)) {
+        Kind item = recordFieldKind(b, element);
+        if (dimension.nTokens == 1 && dimension.tokens[0].type == LITERAL_INT)
+            return fixedArrayKind(b, item, dimension.tokens[0].numValue.integer);
+        return arrayValueKind(b, item);
+    }
+    return type(b, span);
+}
 static Kind recordKind(Backend *b, struct stmt_struct *record, Kind *arguments, size_t count) {
     for (BufferKind *v = b->buffers; v; v = v->next)
         if (!v->definition && v->shape == 5 && v->record == record && v->nArguments == count &&
@@ -541,7 +602,7 @@ static Kind recordKind(Backend *b, struct stmt_struct *record, Kind *arguments, 
             bufferDimensionKind(dimension) == 2) {
             fail(b, "runtime-sized inline struct fields are unsupported; use an unsized buffer or array reference");
             v->members[i] = BAD;
-        } else v->members[i] = type(b, record->fieldTypes[i]);
+        } else v->members[i] = recordFieldKind(b, record->fieldTypes[i]);
     }
     b->recordDepth--;
     b->typeBindings = previous;
@@ -690,6 +751,14 @@ static Kind constraintKind(Backend *b, typeTokens span) {
         element = (typeTokens){span.nTokens - 1, span.tokens + 1};
         shape = 6;
     } else if (arrayElementType(span, &element)) shape = 4;
+    else if (sizedArrayTypeParts(span, &element, &dimension)) {
+        if (dimension.nTokens == 1 && dimension.tokens[0].type == LITERAL_INT) {
+            Kind item = constraintKind(b, element);
+            return concreteConstraint(b, item) ? type(b, span) :
+                constraintShape(b, 15, item, dimension.tokens[0].numValue.integer);
+        }
+        return type(b, span);
+    }
     else if (bufferTypeParts(span, &element, &dimension)) {
         shape = bufferDimensionKind(dimension) == 1 ? 0 : 3;
         if (!shape) count = (size_t)dimension.tokens[0].numValue.integer;
@@ -740,7 +809,7 @@ static int matchesConstraint(Backend *b, Kind pattern, Kind actual) {
         return matchesConstraint(b, bound, element);
     }
     if (p->shape == 9)
-        return (a->shape == 0 || a->shape == 3) &&
+        return !a->fixedArray && (a->shape == 0 || a->shape == 3) &&
                matchesConstraint(b, p->element, a->element);
     if (p->record) {
         if (p->record != a->record) return 0;
@@ -750,7 +819,9 @@ static int matchesConstraint(Backend *b, Kind pattern, Kind actual) {
             if (!matchesConstraint(b, p->arguments[i], a->arguments[i])) return 0;
         return 1;
     }
-    return p->shape == a->shape && p->count == a->count &&
+    if (p->shape == 15) return a->fixedArray && !a->shape && p->count == a->count &&
+        matchesConstraint(b, p->element, a->element);
+    return p->shape == a->shape && p->fixedArray == a->fixedArray && p->count == a->count &&
            matchesConstraint(b, p->element, a->element);
 }
 static int universalConstraint(Backend *b, Kind kind) {
@@ -788,7 +859,14 @@ static Kind type(Backend *b, typeTokens t) {
         Kind element = type(b, arrayElement);
         if (t.tokens[0].type == MIXED || element == SCALAR_ANY)
             return constrainedArrayKind(b, constraintKind(b, arrayElement), t.tokens[0].type == MIXED);
-        return arrayValueKind(b, element);
+        return dynamicArrayKind(b, element);
+    }
+    typeTokens sizedElement, sizedDimension;
+    if (sizedArrayTypeParts(t, &sizedElement, &sizedDimension)) {
+        if (sizedDimension.nTokens == 1 && sizedDimension.tokens[0].type == LITERAL_INT &&
+            sizedDimension.tokens[0].numValue.integer >= 0)
+            return fixedArrayKind(b, type(b, sizedElement), sizedDimension.tokens[0].numValue.integer);
+        return runtimeArrayKind(b, type(b, sizedElement));
     }
     if (t.nTokens == 3 && t.tokens[0].type == INTERFACE &&
         t.tokens[1].type == LEFT_CURLY_BRACE && t.tokens[2].type == RIGHT_CURLY_BRACE) return SCALAR_ANY;
@@ -866,7 +944,7 @@ static Kind type(Backend *b, typeTokens t) {
     if (!strcmp(s, "bool"))
         return BOOL;
     if (!strcmp(s, "string"))
-        return arrayValueKind(b, I8);
+        return stringKind(b);
     fail(b, "unsupported type (supported: int, i64, i32, i16, i8, float, f64, f32, bool, string)");
     return BAD;
 }
@@ -881,7 +959,8 @@ static int identicalKinds(Backend *b, Kind left, Kind right) {
             if (!identicalKinds(b, a->arguments[i], c->arguments[i])) return 0;
         return 1;
     }
-    return a->shape == c->shape && a->count == c->count && a->requirement == c->requirement &&
+    return a->shape == c->shape && a->fixedArray == c->fixedArray && a->dynamicArray == c->dynamicArray && a->immutableString == c->immutableString &&
+           a->count == c->count && a->requirement == c->requirement &&
            identicalKinds(b, a->element, c->element);
 }
 static int matchesInterface(Backend *b, struct stmt_interface *contract, Kind actual) {
@@ -965,6 +1044,9 @@ static Kind resultType(Backend *b, struct stmt_func *f) {
 }
 static Kind parameterKind(Backend *b, struct stmt_func *f, size_t i) {
     Kind k = type(b, f->paramTypeNames[i]);
+    typeTokens element, dimension;
+    if ((!f->isVariadic || i + 1 < f->nParams) && bufferTypeParts(f->paramTypeNames[i], &element, &dimension))
+        return pointerBufferKind(b, type(b, element));
     return f->isVariadic && !f->isExtern && i + 1 == f->nParams
                ? k == SCALAR_ANY ? constrainedArrayKind(b, constraintKind(b, f->paramTypeNames[i]), 1)
                                  : arrayValueKind(b, k) : k;
@@ -1145,10 +1227,26 @@ static Value find(Backend *b, const char *name) {
     return value(b, BAD, "null");
 }
 /* Keep all allocas in the entry block, including locals declared inside loops. */
+static Value emptyValue(Backend *, Kind);
+static int containsDynamicArrays(Backend *b, Kind kind) {
+    BufferKind *t = bufferKind(b, kind);
+    if (!t) return 0;
+    if (t->dynamicArray) return 1;
+    if (t->shape == 4) return 1;
+    if (!t->shape) return containsDynamicArrays(b, t->element);
+    if (t->shape == 2 || t->shape == 5)
+        for (size_t i = 0; i < t->count; i++) if (containsDynamicArrays(b, t->members[i])) return 1;
+    return 0;
+}
 static Value slot(Backend *b, Kind k) {
     Value v = temp(b, k);
     v.owner = b->scope;
     fprintf(b->slots, "  %s = alloca %s\n", v.operand, irType(b, k));
+    BufferKind *t = bufferKind(b, k);
+    if (containsDynamicArrays(b, k)) {
+        Value zero = emptyValue(b, k);
+        fprintf(b->slots, "  store %s %s, ptr %s\n", irType(b, k), zero.operand, v.operand);
+    }
     return v;
 }
 static void bind(Backend *b, const char *name, Value address) {
@@ -1178,6 +1276,7 @@ static Value unboxValue(Backend *, Value, Kind);
 static Value coerce(Backend *, Value, Kind);
 static void checkElementRequirement(Backend *, Value, Kind);
 static void checkArrayRequirement(Backend *, Value, Kind);
+static Value collectionCopy(Backend *, Value, Kind);
 static Value convert(Backend *b, Value v, Kind k) {
     if (v.kind == NULL_VALUE) return coerce(b, v, k);
     if (representationKind(b, v.kind) == representationKind(b, k)) return value(b, k, "%s", v.operand);
@@ -1193,6 +1292,8 @@ static Value convert(Backend *b, Value v, Kind k) {
     BufferKind *source = bufferKind(b, v.kind), *target = bufferKind(b, k);
     int sourcePointer = v.kind == RAW_POINTER || (source && (source->shape == 3 || source->shape == 6));
     int targetPointer = k == RAW_POINTER || (target && (target->shape == 3 || target->shape == 6));
+    if (source && target && source->dynamicArray && target->dynamicArray && source->element == target->element)
+        return collectionCopy(b, v, k);
     if (sourcePointer && targetPointer)
         return value(b, k, "%s", v.operand); // LLVM opaque pointers need no bitcast.
     Value r = temp(b, k);
@@ -1223,6 +1324,13 @@ static Value convert(Backend *b, Value v, Kind k) {
             irType(b, k));
     return r;
 }
+static void jump(Backend *, unsigned);
+static void trackDynamicArrays(Backend *, Value);
+static Value allocateCollection(Backend *, Kind, Value);
+static Value arrayLength(Backend *, Value);
+static Value elementAddress(Backend *, Value, Value);
+static Value arrayData(Backend *, Value);
+static Value collectionCopy(Backend *, Value, Kind);
 static Value coerce(Backend *b, Value v, Kind expected);
 static Value boxArray(Backend *, Value);
 static int ownsArrays(Backend *, Kind);
@@ -1245,6 +1353,10 @@ static void rawStore(Backend *b, Value address, Value v) {
 }
 static Value emptyValue(Backend *, Kind);
 static Value load(Backend *, Value);
+static void dropDynamicArrayPayload(Backend *, Value);
+static void escapeDynamicArrays(Backend *, Value);
+static void trackDynamicArrays(Backend *, Value);
+static void dropNestedDynamicArrays(Backend *, Value, unsigned);
 static void store(Backend *b, Value address, Value v) {
     BufferKind *targetArray = bufferKind(b, address.kind), *sourceArray = bufferKind(b, v.kind);
     if (targetArray && sourceArray && targetArray->shape == 4 && sourceArray->shape == 4 &&
@@ -1256,6 +1368,35 @@ static void store(Backend *b, Value address, Value v) {
         b->homogeneousUsed = 1;
         fprintf(b->body, "  call void @__ocean.array.check_write(ptr %s, { ptr, i64 } %s)\n",
                 address.homogeneousArray, v.operand);
+    }
+    if (targetArray && targetArray->dynamicArray && v.kind == address.kind) {
+        Value replacement = copyValue(b, v, 0);
+        escapeDynamicArrays(b, replacement);
+        dropDynamicArrayPayload(b, load(b, address));
+        rawStore(b, address, replacement);
+        return;
+    }
+    if (targetArray && targetArray->shape == 4 && !targetArray->dynamicArray && address.throughPointer && v.kind == address.kind) {
+        // A string/reference value stored through *T may change size. Its new
+        // backing must outlive this frame, including when T lives on the heap.
+        int previous = b->copyTransport; b->copyTransport = 1;
+        Value replacement = copyValue(b, v, 0);
+        b->copyTransport = previous;
+        escapeDynamicArrays(b, replacement);
+        dropNestedDynamicArrays(b, load(b, address), 0);
+        rawStore(b, address, replacement);
+        return;
+    }
+    if (containsDynamicArrays(b, address.kind) && v.kind == address.kind && targetArray &&
+        (!targetArray->shape || targetArray->shape == 2 || targetArray->shape == 5)) {
+        int previous = b->copyTransport;
+        if (address.throughPointer || address.owner == b->globalScope) b->copyTransport = 1;
+        Value replacement = copyValue(b, v, 0);
+        b->copyTransport = previous;
+        escapeDynamicArrays(b, replacement);
+        dropNestedDynamicArrays(b, load(b, address), 0);
+        rawStore(b, address, replacement);
+        return;
     }
     if (ownsArrays(b, address.kind) && v.kind == address.kind) {
         if (address.throughPointer) {
@@ -1275,12 +1416,14 @@ static void store(Backend *b, Value address, Value v) {
             b->copyTransport = previous;
         } else v = copyValue(b, v, 0);
     }
+    escapeDynamicArrays(b, v);
     rawStore(b, address, v);
 }
 static Value load(Backend *b, Value address) {
     Value v = temp(b, address.kind);
     v.owner = address.owner;
     v.throughPointer = address.throughPointer;
+    v.length = address.length;
     fprintf(b->body, "  %s = load %s, ptr %s\n", v.operand, irType(b, v.kind), address.operand);
     return v;
 }
@@ -1408,6 +1551,9 @@ static Value coerce(Backend *b, Value v, Kind expected) {
         fail(b, "distinct type requires an explicit cast"); return v;
     }
     BufferKind *target = bufferKind(b, expected), *source = bufferKind(b, v.kind);
+    if (target && source && target->shape == 4 && source->shape == 4 &&
+        target->element == source->element && (target->dynamicArray != source->dynamicArray || target->immutableString != source->immutableString))
+        return collectionCopy(b, v, expected);
     if (target && source && target->shape == 4 && source->shape == 4 && target->element == SCALAR_ANY) {
         if (source->element != SCALAR_ANY) v = boxArray(b, v);
         if (!target->count) {
@@ -1459,7 +1605,9 @@ static Value bufferLiteralSlot(Backend *b, Kind kind) {
     free(name);
     int previous = b->copyTransport;
     b->copyTransport = 1;
-    rawStore(b, address, copyValue(b, emptyValue(b, kind), 0));
+    Value initial = copyValue(b, emptyValue(b, kind), 0);
+    escapeDynamicArrays(b, initial);
+    rawStore(b, address, initial);
     b->copyTransport = previous;
     return address;
 }
@@ -1498,7 +1646,18 @@ static Value storageSize(Backend *b, Kind k) {
 }
 static Value arrayData(Backend *b, Value array) {
     BufferKind *t = bufferKind(b, array.kind);
+    if (!t->shape) {
+        Value storage = slot(b, array.kind); rawStore(b, storage, array);
+        return value(b, pointerBufferKind(b, t->element), "%s", storage.operand);
+    }
+    if (t->shape == 3) return array;
     Value pointer = temp(b, pointerBufferKind(b, t->element));
+    if (t->dynamicArray) {
+        Value field = temp(b, RAW_POINTER);
+        fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 2\n", field.operand, array.operand);
+        fprintf(b->body, "  %s = load ptr, ptr %s\n", pointer.operand, field.operand);
+        return pointer;
+    }
     fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 1\n", pointer.operand, t->layout,
             array.operand);
     return pointer;
@@ -1513,21 +1672,67 @@ static Value allocateArrayStorage(Backend *b, Kind element, Value count) {
     fprintf(b->body, "  %s = ptrtoint ptr %s to i64\n", headerSize.operand, dataOffset.operand);
     Value total = temp(b, INT), result = temp(b, kind);
     fprintf(b->body, "  %s = add i64 %s, %s\n", total.operand, headerSize.operand, bytes.operand);
-    fprintf(b->body, "  %s = alloca i8, i64 %s, align 8\n", result.operand, total.operand);
+    Value allocationSize = temp(b, INT), base = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = add i64 %s, 8\n", allocationSize.operand, total.operand);
+    fprintf(b->body, "  %s = alloca i8, i64 %s, align 8\n", base.operand, allocationSize.operand);
+    rawStore(b, base, value(b, RAW_POINTER, "null"));
+    fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 8\n", result.operand, base.operand);
     store(b, value(b, INT, "%s", result.operand), bytes);
     result.owner = b->scope;
     return result;
 }
 static Value allocateArray(Backend *b, Kind element, Value count) {
     Value result = allocateArrayStorage(b, element, count);
-    if (ownsArrays(b, element)) initializeArray(b, result, count);
+    initializeArray(b, result, count);
+    trackDynamicArrays(b, result);
+    return result;
+}
+static Value allocateCollection(Backend *b, Kind kind, Value count) {
+    BufferKind *t = bufferKind(b, kind);
+    if (!t->dynamicArray) {
+        Value result = allocateArray(b, t->element, count); result.kind = kind; return result;
+    }
+    count = coerce(b, count, INT);
+    Value bytes = temp(b, INT), stride = storageSize(b, t->element);
+    fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, count.operand, stride.operand);
+    Value result = temp(b, kind), data = temp(b, RAW_POINTER);
+    b->returnTransportUsed = 1;
+    Value base = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 32)\n", base.operand);
+    rawStore(b, base, value(b, RAW_POINTER, "inttoptr (i64 1 to ptr)"));
+    fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 8\n", result.operand, base.operand);
+    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", data.operand, bytes.operand);
+    rawStore(b, value(b, INT, "%s", result.operand), count);
+    Value cap = temp(b, INT), field = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 1\n", cap.operand, result.operand);
+    rawStore(b, cap, count);
+    fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 2\n", field.operand, result.operand);
+    rawStore(b, field, data);
+    result.owner = b->scope;
+    initializeArray(b, result, count);
+    trackDynamicArrays(b, result);
+    return result;
+}
+static Value collectionCopy(Backend *b, Value source, Kind target) {
+    Value count = arrayLength(b, source), result = allocateCollection(b, target, count);
+    Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+    unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+    jump(b, condition); label(b, condition);
+    Value i = load(b, cursor), more = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+    branch(b, more, body, end); label(b, body);
+    store(b, elementAddress(b, result, i), load(b, elementAddress(b, source, i)));
+    Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+    rawStore(b, cursor, next); jump(b, condition); label(b, end);
     return result;
 }
 // Select the result array before evaluating operands, including nested arrays.
 static Kind arrayAdditionKind(Backend *b, Kind left, Kind right) {
     BufferKind *a = bufferKind(b, left), *c = bufferKind(b, right);
+    if (a && c && !a->shape && !c->shape && a->fixedArray && c->fixedArray && a->element == c->element)
+        return fixedArrayKind(b, a->element, a->count + c->count);
     int la = a && a->shape == 4, ra = c && c->shape == 4;
-    if (la && ra && (left == right || a->element == SCALAR_ANY || c->element == SCALAR_ANY))
+    if (la && ra && (left == right || a->element == c->element || a->element == SCALAR_ANY || c->element == SCALAR_ANY))
         return a->count ? left : c->count ? right : c->element == SCALAR_ANY ? right : left;
     if (la && (a->element == right || a->element == SCALAR_ANY ||
                (integral(b, a->element) && integral(b, right)) ||
@@ -1544,8 +1749,11 @@ static Kind expressionKind(Backend *b, expr *e) {
     if (!e || !e->underlying)
         return BAD;
     switch (e->type) {
+    case EXPR_TYPE_MAKE:
     case EXPR_TYPE_ZERO:
         return type(b, ((struct expr_zero *)e->underlying)->type);
+    case EXPR_TYPE_NEW:
+        return pointerKind(b, type(b, ((struct expr_zero *)e->underlying)->type));
     case EXPR_TYPE_IDENTIFIER: {
         char *name = ((struct expr_identifier *)e->underlying)->lexeme.lexeme;
         if (!strcmp(name, "true") || !strcmp(name, "false"))
@@ -1555,20 +1763,27 @@ static Kind expressionKind(Backend *b, expr *e) {
     case EXPR_TYPE_LITERAL: {
         enum literalType t = ((struct expr_literal *)e->underlying)->type;
         if (t == LITERAL_TYPE_NULL) return NULL_VALUE;
-        return t == LITERAL_TYPE_STRING ? arrayValueKind(b, I8) : t == LITERAL_TYPE_FLOAT ? FLOAT : INT;
+        return t == LITERAL_TYPE_STRING ? stringKind(b) : t == LITERAL_TYPE_FLOAT ? FLOAT : INT;
     }
     case EXPR_TYPE_COMPOSITE: {
         struct expr_composite *v = e->underlying;
         if (v->literalType.nTokens)
             return type(b, v->literalType);
         return v->inferredArray && v->nEntries
-                   ? arrayValueKind(b, expressionKind(b, &v->values[0]))
+                   ? dynamicArrayKind(b, expressionKind(b, &v->values[0]))
                    : BAD;
     }
     case EXPR_TYPE_ARRAY_NEW: {
-        typeTokens element = ((struct expr_array_new *)e->underlying)->elementType;
+        struct expr_array_new *allocation = e->underlying;
+        typeTokens element = allocation->elementType;
         Kind k = type(b, element);
-        return k == SCALAR_ANY ? constrainedArrayKind(b, constraintKind(b, element), 0) : arrayValueKind(b, k);
+        if (allocation->buffer) {
+            if (allocation->count.type == EXPR_TYPE_LITERAL &&
+                ((struct expr_literal *)allocation->count.underlying)->type == LITERAL_TYPE_INT)
+                return arrayKind(b, k, *(long *)((struct expr_literal *)allocation->count.underlying)->value);
+            return pointerBufferKind(b, k);
+        }
+        return k == SCALAR_ANY ? constrainedArrayKind(b, constraintKind(b, element), 0) : dynamicArrayKind(b, k);
     }
     case EXPR_TYPE_INDEX: {
         BufferKind *t =
@@ -1584,6 +1799,8 @@ static Kind expressionKind(Backend *b, expr *e) {
             size_t i = recordField(t, ((struct expr_identifier *)v->field.underlying)->lexeme.lexeme);
             return i < t->count ? t->members[i] : BAD;
         }
+        if (t && t->dynamicArray && (!strcmp(((struct expr_identifier *)v->field.underlying)->lexeme.lexeme, "length") ||
+                              !strcmp(((struct expr_identifier *)v->field.underlying)->lexeme.lexeme, "capacity"))) return INT;
         if (t && t->shape == 4)
             return !strcmp(((struct expr_identifier *)v->field.underlying)->lexeme.lexeme, "size")
                        ? INT
@@ -1600,6 +1817,10 @@ static Kind expressionKind(Backend *b, expr *e) {
         size_t count;
         struct expr_dot *dot = methodCallee(&v->func, &typeArguments, &count);
         if (dot) {
+            BufferKind *parent = bufferKind(b, expressionKind(b, &dot->parent));
+            const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
+            if (parent && parent->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop"))) return parent->element;
+            if (parent && parent->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add"))) return VOID;
             return methodResult(b, methodInstance(b, expressionKind(b, &dot->parent),
                 ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme, typeArguments, count));
         }
@@ -1700,7 +1921,177 @@ static int ownsArrays(Backend *b, Kind kind) {
                 return 1;
     return 0;
 }
+static DynamicArrayTemporary *dynamicArrayTempMark(Backend *b) { return b->dynamicArrayTemps; }
+static void cleanDynamicArrayTemps(Backend *b, DynamicArrayTemporary *mark) {
+    for (DynamicArrayTemporary *entry = b->dynamicArrayTemps; entry != mark; entry = entry->next) {
+        Value saved = load(b, entry->slot), present = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, saved.operand);
+        unsigned drop = ++b->label, end = ++b->label;
+        branch(b, present, drop, end); label(b, drop);
+        rawStore(b, entry->slot, value(b, RAW_POINTER, "null"));
+        saved.kind = entry->kind;
+        dropNestedDynamicArrays(b, saved, 0);
+        jump(b, end); label(b, end);
+    }
+}
+// The prefix holds a temporary stack-slot address and a heap-provenance bit.
+// Moving a value clears that slot directly; no runtime registry is needed.
+static void detachDynamicArrayTemporary(Backend *b, Value item) {
+    Value zero = emptyValue(b, item.kind), allocated = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ne ptr %s, %s\n", allocated.operand, item.operand, zero.operand);
+    unsigned inspect = ++b->label, clear = ++b->label, end = ++b->label;
+    branch(b, allocated, inspect, end); label(b, inspect);
+    Value prefix = temp(b, RAW_POINTER), owner = temp(b, RAW_POINTER), tracked = temp(b, BOOL);
+    fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", prefix.operand, item.operand);
+    fprintf(b->body, "  %s = load ptr, ptr %s\n", owner.operand, prefix.operand);
+    Value bits = temp(b, INT), addressBits = temp(b, INT), ownerSlot = temp(b, RAW_POINTER);
+    Value heapBit = temp(b, INT), provenance = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = ptrtoint ptr %s to i64\n", bits.operand, owner.operand);
+    fprintf(b->body, "  %s = and i64 %s, -2\n", addressBits.operand, bits.operand);
+    fprintf(b->body, "  %s = inttoptr i64 %s to ptr\n", ownerSlot.operand, addressBits.operand);
+    fprintf(b->body, "  %s = icmp ne i64 %s, 0\n", tracked.operand, addressBits.operand);
+    branch(b, tracked, clear, end); label(b, clear);
+    rawStore(b, value(b, RAW_POINTER, "%s", ownerSlot.operand), value(b, RAW_POINTER, "null"));
+    fprintf(b->body, "  %s = and i64 %s, 1\n", heapBit.operand, bits.operand);
+    fprintf(b->body, "  %s = inttoptr i64 %s to ptr\n", provenance.operand, heapBit.operand);
+    rawStore(b, prefix, provenance);
+    jump(b, end); label(b, end);
+}
+static void escapeDynamicArrays(Backend *b, Value item) {
+    BufferKind *t = bufferKind(b, item.kind);
+    if (!t) return;
+    if (t->dynamicArray) {
+        detachDynamicArrayTemporary(b, item);
+        return;
+    }
+    if (t->shape == 4 && containsDynamicArrays(b, t->element)) {
+        detachDynamicArrayTemporary(b, item);
+        Value count = arrayLength(b, item), cursor = slot(b, INT);
+        rawStore(b, cursor, value(b, INT, "0"));
+        unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+        jump(b, condition); label(b, condition);
+        Value i = load(b, cursor), more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+        branch(b, more, body, end); label(b, body);
+        escapeDynamicArrays(b, load(b, elementAddress(b, item, i)));
+        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, condition); label(b, end);
+        return;
+    }
+    if ((!t->shape || t->shape == 2 || t->shape == 5) && ownsArrays(b, item.kind))
+        for (size_t i = 0; i < t->count; i++) escapeDynamicArrays(b, extract(b, item, i));
+}
+static void trackDynamicArrays(Backend *b, Value item) {
+    BufferKind *t = bufferKind(b, item.kind);
+    if (!t) return;
+    if (t->dynamicArray || (t->shape == 4 && containsDynamicArrays(b, t->element))) {
+        detachDynamicArrayTemporary(b, item);
+        DynamicArrayTemporary *entry = checked(sizeof(*entry));
+        entry->kind = item.kind; entry->slot = slot(b, RAW_POINTER);
+        fprintf(b->slots, "  store ptr null, ptr %s\n", entry->slot.operand);
+        entry->next = b->dynamicArrayTemps; b->dynamicArrayTemps = entry;
+        Value zero = emptyValue(b, item.kind), allocated = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp ne ptr %s, %s\n", allocated.operand, item.operand, zero.operand);
+        unsigned attach = ++b->label, end = ++b->label;
+        branch(b, allocated, attach, end); label(b, attach);
+        Value prefix = temp(b, RAW_POINTER);
+        fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", prefix.operand, item.operand);
+        rawStore(b, entry->slot, value(b, RAW_POINTER, "%s", item.operand));
+        Value old = load(b, prefix), heapBits = temp(b, INT), slotBits = temp(b, INT);
+        Value taggedBits = temp(b, INT), tagged = temp(b, RAW_POINTER);
+        fprintf(b->body, "  %s = ptrtoint ptr %s to i64\n", heapBits.operand, old.operand);
+        fprintf(b->body, "  %s = ptrtoint ptr %s to i64\n", slotBits.operand, entry->slot.operand);
+        fprintf(b->body, "  %s = or i64 %s, %s\n", taggedBits.operand, slotBits.operand, heapBits.operand);
+        fprintf(b->body, "  %s = inttoptr i64 %s to ptr\n", tagged.operand, taggedBits.operand);
+        rawStore(b, prefix, tagged);
+        jump(b, end); label(b, end);
+        return;
+    }
+    if ((!t->shape || t->shape == 2 || t->shape == 5) && ownsArrays(b, item.kind))
+        for (size_t i = 0; i < t->count; i++) trackDynamicArrays(b, extract(b, item, i));
+}
+static void releaseScopeValues(Backend *b) {
+    for (Scope *scope = b->scope; scope && scope != b->globalScope; scope = scope->parent)
+        for (Binding *binding = scope->bindings; binding; binding = binding->next)
+            if (binding->autoRelease) {
+                dropNestedDynamicArrays(b, load(b, binding->address), 0);
+                // Inlined calls can reuse this entry-block slot on the next
+                // loop iteration. Never leave a freed header in that slot.
+                rawStore(b, binding->address, emptyValue(b, binding->address.kind));
+            }
+}
+static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
+    if (depth >= 32) { fail(b, "nested dynamic array ownership is too deep"); return; }
+    BufferKind *t = bufferKind(b, item.kind);
+    if (!t) return;
+    if (t->dynamicArray) { dropDynamicArrayPayload(b, item); return; }
+    if (t->shape == 4) {
+        Value zero = emptyValue(b, item.kind), allocated = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp ne ptr %s, %s\n", allocated.operand, item.operand, zero.operand);
+        unsigned inspect = ++b->label, heap = ++b->label, stack = ++b->label, end = ++b->label;
+        branch(b, allocated, inspect, end); label(b, inspect);
+        Value prefix = temp(b, RAW_POINTER), tag = temp(b, RAW_POINTER), bits = temp(b, INT), flag = temp(b, INT), onHeap = temp(b, BOOL);
+        fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", prefix.operand, item.operand);
+        fprintf(b->body, "  %s = load ptr, ptr %s\n", tag.operand, prefix.operand);
+        fprintf(b->body, "  %s = ptrtoint ptr %s to i64\n", bits.operand, tag.operand);
+        fprintf(b->body, "  %s = and i64 %s, 1\n", flag.operand, bits.operand);
+        fprintf(b->body, "  %s = icmp ne i64 %s, 0\n", onHeap.operand, flag.operand);
+        branch(b, onHeap, heap, stack); label(b, heap);
+        int previous = b->copyTransport; b->copyTransport = 3;
+        copyValue(b, item, depth + 1); b->copyTransport = previous;
+        jump(b, end); label(b, stack);
+        if (ownsArrays(b, t->element)) {
+            Value count = arrayLength(b, item), cursor = slot(b, INT);
+            rawStore(b, cursor, value(b, INT, "0"));
+            unsigned condition = ++b->label, body = ++b->label, done = ++b->label;
+            jump(b, condition); label(b, condition);
+            Value i = load(b, cursor), more = temp(b, BOOL);
+            fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+            branch(b, more, body, done); label(b, body);
+            dropNestedDynamicArrays(b, load(b, elementAddress(b, item, i)), depth + 1);
+            Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+            rawStore(b, cursor, next); jump(b, condition); label(b, done);
+        }
+        jump(b, end); label(b, end);
+        return;
+    }
+    if (!t->shape || t->shape == 2 || t->shape == 5)
+        for (size_t i = 0; i < t->count; i++) dropNestedDynamicArrays(b, extract(b, item, i), depth + 1);
+}
+static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
+    b->returnTransportUsed = 1;
+    Value zero = emptyValue(b, dynamicArray.kind), allocated = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ne ptr %s, %s\n", allocated.operand, dynamicArray.operand, zero.operand);
+    unsigned drop = ++b->label, end = ++b->label;
+    branch(b, allocated, drop, end); label(b, drop);
+    escapeDynamicArrays(b, dynamicArray);
+    BufferKind *type = bufferKind(b, dynamicArray.kind);
+    if (ownsArrays(b, type->element)) {
+        Value count = arrayLength(b, dynamicArray), cursor = slot(b, INT);
+        rawStore(b, cursor, value(b, INT, "0"));
+        unsigned condition = ++b->label, body = ++b->label, done = ++b->label;
+        jump(b, condition); label(b, condition);
+        Value i = load(b, cursor), more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+        branch(b, more, body, done); label(b, body);
+        dropNestedDynamicArrays(b, load(b, elementAddress(b, dynamicArray, i)), 0);
+        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, condition); label(b, done);
+    }
+    Value data = arrayData(b, dynamicArray);
+    fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", data.operand);
+    Value base = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", base.operand, dynamicArray.operand);
+    fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", base.operand);
+    jump(b, end); label(b, end);
+}
 static Value arrayBytes(Backend *b, Value array) {
+    BufferKind *t = bufferKind(b, array.kind);
+    if (t->dynamicArray) {
+        Value count = load(b, value(b, INT, "%s", array.operand)), stride = storageSize(b, t->element), bytes = temp(b, INT);
+        fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, count.operand, stride.operand);
+        return bytes;
+    }
     return load(b, value(b, INT, "%s", array.operand));
 }
 static Value arrayHeaderSize(Backend *b, Kind kind) {
@@ -1739,17 +2130,32 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
         return result;
     }
     BufferKind *t = bufferKind(b, source.kind);
+    if (t->dynamicArray) {
+        int transport = b->copyTransport;
+        Value result = source;
+        if (transport != 3) {
+            b->copyTransport = transport == 2 ? 0 : transport;
+            result = collectionCopy(b, source, source.kind);
+            b->copyTransport = transport;
+        }
+        if (transport == 2 || transport == 3) {
+            dropDynamicArrayPayload(b, source);
+        }
+        return result;
+    }
     if (t->shape == 4) {
         Value bytes = arrayBytes(b, source), header = arrayHeaderSize(b, source.kind);
         Value total = temp(b, INT), result = temp(b, source.kind);
         result.owner = b->scope;
         fprintf(b->body, "  %s = add i64 %s, %s\n", total.operand, bytes.operand, header.operand);
+        Value base = temp(b, RAW_POINTER), allocationSize = temp(b, INT);
+        fprintf(b->body, "  %s = add i64 %s, 8\n", allocationSize.operand, total.operand);
         if (b->copyTransport == 3) result = source;
         else if (b->copyTransport == 1) {
             b->returnTransportUsed = 1;
-            fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", result.operand, total.operand);
+            fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", base.operand, allocationSize.operand);
             Value present = temp(b, BOOL);
-            fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, result.operand);
+            fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, base.operand);
             unsigned good = ++b->label, bad = ++b->label;
             branch(b, present, good, bad);
             label(b, bad);
@@ -1758,7 +2164,11 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
             b->terminated = 1;
             label(b, good);
         } else
-            fprintf(b->body, "  %s = alloca i8, i64 %s, align 8\n", result.operand, total.operand);
+            fprintf(b->body, "  %s = alloca i8, i64 %s, align 8\n", base.operand, allocationSize.operand);
+        if (b->copyTransport != 3) {
+            rawStore(b, base, value(b, RAW_POINTER, b->copyTransport == 1 ? "inttoptr (i64 1 to ptr)" : "null"));
+            fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 8\n", result.operand, base.operand);
+        }
         if (b->copyTransport != 3)
             fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
                     result.operand, source.operand, total.operand);
@@ -1776,7 +2186,10 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
             label(b, body);
             Value item = load(b, elementAddress(b, source, i));
             Value copied = copyValue(b, item, depth + 1);
-            if (b->copyTransport != 3) rawStore(b, elementAddress(b, result, i), copied);
+            if (b->copyTransport != 3) {
+                escapeDynamicArrays(b, copied);
+                rawStore(b, elementAddress(b, result, i), copied);
+            }
             Value next = temp(b, INT);
             fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
             rawStore(b, cursor, next);
@@ -1785,8 +2198,14 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
         }
         if (b->copyTransport == 2 || b->copyTransport == 3) {
             b->returnTransportUsed = 1;
-            fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", source.operand);
+            // The element loop already released transferred child values.
+            // Detach only this header, without revisiting freed descendants.
+            detachDynamicArrayTemporary(b, source);
+            Value base = temp(b, RAW_POINTER);
+            fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", base.operand, source.operand);
+            fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", base.operand);
         }
+        if (b->copyTransport != 3) trackDynamicArrays(b, result);
         return result;
     }
     Value result = source;
@@ -1809,7 +2228,7 @@ static void initializeArray(Backend *b, Value array, Value count) {
     fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
     branch(b, more, body, end);
     label(b, body);
-    store(b, elementAddress(b, array, i), emptyValue(b, t->element));
+    rawStore(b, elementAddress(b, array, i), emptyValue(b, t->element));
     Value next = temp(b, INT);
     fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
     rawStore(b, cursor, next);
@@ -1832,6 +2251,7 @@ static void copyInto(Backend *b, Value destination, Value source, unsigned depth
         return;
     }
     BufferKind *t = bufferKind(b, destination.kind);
+    if (t->dynamicArray) { store(b, destination, source); return; }
     if (t->shape == 4) {
         Value target = load(b, destination), oldBytes = arrayBytes(b, target),
               bytes = arrayBytes(b, source);
@@ -1884,6 +2304,56 @@ static void copyInto(Backend *b, Value destination, Value source, unsigned depth
     }
 }
 static void copyArrayLiteral(Backend *, Value, struct expr_composite *, token);
+static Value parameterArrayValue(Backend *b, typeTokens span, Kind kind, expr *initializer) {
+    typeTokens element, dimension;
+    if (!sizedArrayTypeParts(span, &element, &dimension))
+        return initializer ? expectedValue(b, initializer, kind) : emptyValue(b, kind);
+    BufferKind *t = bufferKind(b, kind);
+    struct expr_composite *literal = initializer && initializer->type == EXPR_TYPE_COMPOSITE ? initializer->underlying : NULL;
+    if (initializer && !literal) return expectedValue(b, initializer, kind);
+    if (!t->shape) {
+        Value result = emptyValue(b, kind);
+        for (size_t i = 0; i < t->count; i++) {
+            expr *item = literal && i < literal->nEntries ? &literal->values[i] : NULL;
+            result = insert(b, result, parameterArrayValue(b, element, t->element, item), i);
+        }
+        return result;
+    }
+    expr *size = parseBufferDimension(dimension);
+    if (!size) { fail(b, "invalid parameterized array length"); return value(b, BAD, "0"); }
+    Value count = coerce(b, expression(b, size), INT); free(size);
+    Value result = allocateCollection(b, kind, count);
+    if (literal) {
+        Value fits = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp uge i64 %s, %zu\n", fits.operand, count.operand, literal->nEntries);
+        unsigned good = ++b->label, bad = ++b->label;
+        branch(b, fits, good, bad); label(b, bad);
+        fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+        b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
+    }
+    typeTokens nestedElement, nestedDimension;
+    if (sizedArrayTypeParts(element, &nestedElement, &nestedDimension)) {
+        Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+        unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+        jump(b, condition); label(b, condition);
+        Value i = load(b, cursor), more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+        branch(b, more, body, end); label(b, body);
+        Value child = parameterArrayValue(b, element, t->element, NULL);
+        escapeDynamicArrays(b, child);
+        rawStore(b, elementAddress(b, result, i), child);
+        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, condition); label(b, end);
+    }
+    for (size_t i = 0; literal && i < literal->nEntries; i++) {
+        Value child = parameterArrayValue(b, element, t->element, &literal->values[i]);
+        escapeDynamicArrays(b, child);
+        Value address = elementAddress(b, result, value(b, INT, "%zu", i));
+        dropNestedDynamicArrays(b, load(b, address), 0);
+        rawStore(b, address, child);
+    }
+    return result;
+}
 static Value constructComposite(Backend *b, expr *e, Kind kind) {
     struct expr_composite *v = e->underlying;
     BufferKind *t = bufferKind(b, kind);
@@ -1892,7 +2362,7 @@ static Value constructComposite(Backend *b, expr *e, Kind kind) {
         return value(b, BAD, "0");
     }
     if (t->shape == 4) {
-        Value array = allocateArray(b, t->element, value(b, INT, "%zu", v->nEntries));
+        Value array = allocateCollection(b, kind, value(b, INT, "%zu", v->nEntries));
         array.kind = kind;
         copyArrayLiteral(b, array, v, v->location);
         return array;
@@ -1905,6 +2375,24 @@ static Value constructComposite(Backend *b, expr *e, Kind kind) {
     }
     if (t->shape == 5) {
         Value aggregate = emptyValue(b, kind);
+        if (t->record->nVarParams) {
+            Scope parameters = {.parent = b->scope}; b->scope = &parameters;
+            expr **initializers = checked(sizeof(expr *) * t->count);
+            for (size_t i = 0; i < v->nEntries; i++) {
+                size_t field = v->keys[i].type ? recordField(t, ((struct expr_identifier *)v->keys[i].underlying)->lexeme.lexeme) : i;
+                if (field < t->count) initializers[field] = &v->values[i];
+            }
+            for (size_t i = 0; i < t->count; i++) {
+                Value item = parameterArrayValue(b, t->record->fieldTypes[i], t->members[i], initializers[i]);
+                aggregate = insert(b, aggregate, item, i);
+                if (i < t->record->nVarParams) {
+                    Value binding = slot(b, item.kind); rawStore(b, binding, item);
+                    bind(b, t->record->fieldNames[i].lexeme, binding);
+                }
+            }
+            free(initializers); b->scope = parameters.parent; clearScope(&parameters);
+            return aggregate;
+        }
         for (size_t i = 0; i < v->nEntries; i++) {
             size_t field = v->keys[i].type
                 ? recordField(t, ((struct expr_identifier *)v->keys[i].underlying)->lexeme.lexeme) : i;
@@ -1940,7 +2428,7 @@ static Value expectedValue(Backend *b, expr *e, Kind expected) {
         struct expr_composite *literal = e->underlying;
         Kind actual = literal->literalType.nTokens ? type(b, literal->literalType)
                       : literal->inferredArray && literal->nEntries
-                          ? arrayValueKind(b, expressionKind(b, &literal->values[0]))
+                          ? dynamicArrayKind(b, expressionKind(b, &literal->values[0]))
                           : expected;
         Value result = constructComposite(b, e, actual);
         return expected == BAD ? result : coerce(b, result, expected);
@@ -1959,7 +2447,7 @@ static Value expectedValue(Backend *b, expr *e, Kind expected) {
     Value result = expression(b, e);
     BufferKind *targetArray = bufferKind(b, expected), *sourceArray = bufferKind(b, result.kind);
     if (targetArray && sourceArray && targetArray->shape == 4 && sourceArray->shape == 4 &&
-        targetArray->element == SCALAR_ANY && expected != result.kind)
+        (targetArray->element == SCALAR_ANY || targetArray->element == sourceArray->element) && expected != result.kind)
         result = coerce(b, result, expected);
     return expected != BAD && (result.kind == NULL_VALUE || implicitVoidPointer(b, result.kind, expected))
                ? coerce(b, result, expected) : result;
@@ -1980,14 +2468,48 @@ static Value conditionalValue(Backend *b, expr *e, Kind expected) {
     if (kind != NULL_VALUE) store(b, dest, c);
     jump(b, end);
     label(b, end);
-    return kind == NULL_VALUE ? value(b, NULL_VALUE, "@__ocean.null") : load(b, dest);
+    if (kind == NULL_VALUE) return value(b, NULL_VALUE, "@__ocean.null");
+    Value result = load(b, dest);
+    rawStore(b, dest, emptyValue(b, kind));
+    trackDynamicArrays(b, result);
+    return result;
 }
 typedef struct {
     Value *items;
     size_t count;
 } ValueList;
+static Value materialize(Backend *, expr *);
+static ValueList tryIndexValues(Backend *b, struct expr_index *v) {
+    Value base = materialize(b, &v->parent);
+    BufferKind *t = bufferKind(b, base.kind);
+    Value parent = t->shape ? load(b, base) : base;
+    if (t->dynamicArray) parent = copyValue(b, parent, 0);
+    Value index = coerce(b, expression(b, &v->index), INT);
+    Value length = !t->shape ? value(b, INT, "%zu", t->count) :
+        parent.length ? value(b, INT, "%s", parent.length) : arrayLength(b, parent);
+    Value ok = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ult i64 %s, %s\n", ok.operand, index.operand, length.operand);
+    Value result = slot(b, t->element);
+    rawStore(b, result, emptyValue(b, t->element));
+    unsigned yes = ++b->label, end = ++b->label;
+    branch(b, ok, yes, end); label(b, yes);
+    Value data = t->shape == 4 ? arrayData(b, parent) : parent;
+    Value item = temp(b, t->element);
+    fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", item.operand,
+            irType(b, t->element), data.operand, index.operand);
+    store(b, result, load(b, item));
+    jump(b, end); label(b, end);
+    Value *items = checked(2 * sizeof(*items));
+    items[0] = load(b, result); items[1] = ok;
+    rawStore(b, result, emptyValue(b, t->element));
+    trackDynamicArrays(b, items[0]);
+    return (ValueList){items, 2};
+}
 static ValueList evaluateValues(Backend *b, expr *items, size_t count, Kind *expected,
                                 size_t nExpected, int snapshot) {
+    if (count == 1 && items[0].type == EXPR_TYPE_INDEX &&
+        ((struct expr_index *)items[0].underlying)->tryIndex)
+        return tryIndexValues(b, items[0].underlying);
     ValueList result = {.items = checked(sizeof(Value) * (count + 1)), .count = count};
     for (size_t i = 0; i < count; i++) {
         Value v = expectedValue(b, &items[i], i < nExpected ? expected[i] : BAD);
@@ -2011,10 +2533,9 @@ static ValueList evaluateValues(Backend *b, expr *items, size_t count, Kind *exp
 static void checkArrayIndex(Backend *b, Value array, Value index, token location) {
     b->boundsUsed = 1;
     BufferKind *t = bufferKind(b, array.kind);
-    Value bytes = load(b, value(b, INT, "%s", array.operand)), stride = storageSize(b, t->element);
-    Value length = temp(b, INT), nonnegative = temp(b, BOOL), below = temp(b, BOOL),
+    Value length = arrayLength(b, array);
+    Value nonnegative = temp(b, BOOL), below = temp(b, BOOL),
           valid = temp(b, BOOL);
-    fprintf(b->body, "  %s = sdiv i64 %s, %s\n", length.operand, bytes.operand, stride.operand);
     fprintf(b->body, "  %s = icmp sge i64 %s, 0\n", nonnegative.operand, index.operand);
     fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", below.operand, index.operand, length.operand);
     fprintf(b->body, "  %s = and i1 %s, %s\n", valid.operand, nonnegative.operand, below.operand);
@@ -2036,6 +2557,9 @@ static void checkArrayIndex(Backend *b, Value array, Value index, token location
 }
 static Value arrayLength(Backend *b, Value array) {
     BufferKind *t = bufferKind(b, array.kind);
+    if (!t->shape) return value(b, INT, "%zu", t->count);
+    if (array.length) return value(b, INT, "%s", array.length);
+    if (t->dynamicArray) return load(b, value(b, INT, "%s", array.operand));
     Value bytes = load(b, value(b, INT, "%s", array.operand)), stride = storageSize(b, t->element),
           length = temp(b, INT);
     fprintf(b->body, "  %s = sdiv i64 %s, %s\n", length.operand, bytes.operand, stride.operand);
@@ -2126,11 +2650,15 @@ static Value emptyValue(Backend *b, Kind kind) {
     BufferKind *t = bufferKind(b, kind);
     if (t && t->zeroOperand)
         return (Value){.kind = kind, .operand = t->zeroOperand};
+    if (t && t->shape == 4 && t->definition) {
+        Value zero = emptyValue(b, t->underlying); zero.kind = kind; return zero;
+    }
     if (t && t->shape == 4) {
         // Empty reference values have a valid constant header, rather than a
         // null pointer. This needs no allocation or construction at runtime.
         if (!t->emptyEmitted) {
-            fprintf(b->out, "@.zero.array.%u = private constant i64 0, align 8\n", (unsigned)kind);
+            if (t->dynamicArray) fprintf(b->out, "@.zero.array.%u = private constant { i64, i64, ptr } zeroinitializer, align 8\n", (unsigned)kind);
+            else fprintf(b->out, "@.zero.array.%u = private constant i64 0, align 8\n", (unsigned)kind);
             t->emptyEmitted = 1;
         }
         Value result = value(b, kind, "@.zero.array.%u", (unsigned)kind);
@@ -2173,7 +2701,7 @@ static Value dataLiteralItem(Backend *b, Kind expected, expr *item, token locati
         if (t->shape == 5)
             return constructComposite(b, item, expected);
         if (t->shape == 4) {
-            Value array = allocateArray(b, t->element, value(b, INT, "%zu", literal->nEntries));
+            Value array = allocateCollection(b, expected, value(b, INT, "%zu", literal->nEntries));
             array.kind = expected;
             copyArrayLiteral(b, array, literal, location);
             return array;
@@ -2304,8 +2832,23 @@ static Value materialize(Backend *b, expr *e) {
     }
     if (addressable(e) && !arrayMember) return address(b, e);
     Value aggregate = expression(b, e), storage = bufferLiteralSlot(b, aggregate.kind);
-    store(b, storage, aggregate);
+    // Scratch slots borrow a fresh expression temporary. Their previous
+    // contents may already have been released at the preceding statement.
+    rawStore(b, storage, copyValue(b, aggregate, 0));
     return storage;
+}
+static int pureIndex(expr *e) {
+    if (!e || !e->underlying) return 1;
+    if (e->type == EXPR_TYPE_IDENTIFIER || e->type == EXPR_TYPE_LITERAL) return 1;
+    if (e->type == EXPR_TYPE_BINARY) {
+        struct expr_binary *v = e->underlying;
+        return v->operation < EXPR_ADD_EQUALS && pureIndex(&v->left) && pureIndex(&v->right);
+    }
+    if (e->type == EXPR_TYPE_UNARY) {
+        struct expr_unary *v = e->underlying;
+        return v->operation < UNARY_POSTFIX_INCREMENT && pureIndex(&v->child);
+    }
+    return 0;
 }
 static Value address(Backend *b, expr *e) {
     if (e->type == EXPR_TYPE_IDENTIFIER)
@@ -2361,7 +2904,10 @@ static Value address(Backend *b, expr *e) {
             return value(b, BAD, "null");
         }
         Value pointer = t->shape ? load(b, base) : value(b, BAD, "");
+        if (t->dynamicArray && b->readingIndex && !pureIndex(&v->index)) pointer = copyValue(b, pointer, 0);
+        int previousRead = b->readingIndex; b->readingIndex = 0;
         Value index = expression(b, &v->index);
+        b->readingIndex = previousRead;
         if (!integral(b, index.kind)) {
             fail(b, "buffer index must be an integer");
             return value(b, BAD, "null");
@@ -2372,6 +2918,13 @@ static Value address(Backend *b, expr *e) {
         result.throughPointer = base.throughPointer;
         // Raw buffers stay unchecked; arrays use their current byte-size header.
         if (t->shape == 3 || t->shape == 4) {
+            if (t->shape == 3 && t->fixedArray) {
+                if (!pointer.length) { fail(b, "array length metadata is missing"); return value(b, BAD, "null"); }
+                Value header = slot(b, INT), bytes = temp(b, INT), stride = storageSize(b, t->element);
+                fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, pointer.length, stride.operand);
+                rawStore(b, header, bytes);
+                checkArrayIndex(b, value(b, arrayValueKind(b, t->element), "%s", header.operand), index, v->location);
+            }
             if (t->shape == 4) {
                 checkArrayIndex(b, pointer, index, v->location);
                 if (t->element == SCALAR_ANY && !t->count) result.homogeneousArray = pointer.operand;
@@ -2381,6 +2934,12 @@ static Value address(Backend *b, expr *e) {
             fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", result.operand,
                     irType(b, t->element), pointer.operand, index.operand);
         } else {
+            if (t->fixedArray) {
+                Value header = slot(b, INT), bytes = temp(b, INT), stride = storageSize(b, t->element);
+                fprintf(b->body, "  %s = mul i64 %zu, %s\n", bytes.operand, t->count, stride.operand);
+                rawStore(b, header, bytes);
+                checkArrayIndex(b, value(b, arrayValueKind(b, t->element), "%s", header.operand), index, v->location);
+            }
             fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 0, i64 %s\n", result.operand,
                     t->ir, base.operand, index.operand);
         }
@@ -2389,8 +2948,112 @@ static Value address(Backend *b, expr *e) {
     fail(b, "expression has no writable storage");
     return value(b, BAD, "null");
 }
+static Value removeDynamicArray(Backend *b, struct expr_dot *dot, struct expr_call *call) {
+    Value binding = address(b, &dot->parent), source = load(b, binding);
+    // An index expression can mutate the receiver, so preserve its original value.
+    int snapshot = call->nParams && !pureIndex(&call->params[0]);
+    if (snapshot) source = copyValue(b, source, 0);
+    Value length = arrayLength(b, source), index;
+    if (call->nParams) index = coerce(b, expression(b, &call->params[0]), INT);
+    else {
+        index = temp(b, INT);
+        fprintf(b->body, "  %s = sub i64 %s, 1\n", index.operand, length.operand);
+    }
+    checkArrayIndex(b, source, index, dot->parent.location);
+    Value removed = copyValue(b, load(b, elementAddress(b, source, index)), 0);
+    Value newLength = temp(b, INT);
+    fprintf(b->body, "  %s = sub i64 %s, 1\n", newLength.operand, length.operand);
+    Value result = allocateCollection(b, source.kind, newLength), cursor = slot(b, INT);
+    rawStore(b, cursor, value(b, INT, "0"));
+    unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+    jump(b, condition); label(b, condition);
+    Value i = load(b, cursor), more = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ult i64 %s, %s\n", more.operand, i.operand, newLength.operand);
+    branch(b, more, body, end); label(b, body);
+    Value after = temp(b, BOOL), shifted = temp(b, INT), from = temp(b, INT);
+    fprintf(b->body, "  %s = icmp uge i64 %s, %s\n", after.operand, i.operand, index.operand);
+    fprintf(b->body, "  %s = add i64 %s, 1\n", shifted.operand, i.operand);
+    fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 %s\n", from.operand, after.operand, shifted.operand, i.operand);
+    store(b, elementAddress(b, result, i), load(b, elementAddress(b, source, from)));
+    rawStore(b, cursor, shifted); jump(b, condition); label(b, end);
+    if (snapshot) dropDynamicArrayPayload(b, source);
+    escapeDynamicArrays(b, result);
+    dropDynamicArrayPayload(b, load(b, binding)); rawStore(b, binding, result);
+    return removed;
+}
+static Value mutateDynamicArray(Backend *b, struct expr_dot *dot, struct expr_call *call) {
+    const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
+    Value binding = address(b, &dot->parent), source = load(b, binding);
+    int snapshot = 0;
+    for (size_t i = 0; i < call->nParams; i++) if (!pureIndex(&call->params[i])) snapshot = 1;
+    if (snapshot) source = copyValue(b, source, 0);
+    BufferKind *t = bufferKind(b, source.kind);
+    Value oldLength = arrayLength(b, source);
+    size_t first = !strcmp(name, "add") ? 1 : 0;
+    Value index = first ? coerce(b, expression(b, &call->params[0]), INT) :
+                  !strcmp(name, "prepend") ? value(b, INT, "0") : oldLength;
+    // An insertion at length is valid; negative positions fail the unsigned check.
+    Value valid = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ule i64 %s, %s\n", valid.operand, index.operand, oldLength.operand);
+    unsigned good = ++b->label, bad = ++b->label;
+    branch(b, valid, good, bad); label(b, bad);
+    fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+    b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
+    size_t explicitCount = call->nParams - first - (call->spread ? 1 : 0);
+    Value *items = checked(sizeof(Value) * (explicitCount + 1));
+    for (size_t i = 0; i < explicitCount; i++) items[i] = expectedValue(b, &call->params[first + i], t->element);
+    Value tail = value(b, BAD, ""), tailLength = value(b, INT, "0");
+    if (call->spread) { tail = expression(b, &call->params[call->nParams - 1]); tailLength = arrayLength(b, tail); }
+    Value added = temp(b, INT), length = temp(b, INT);
+    fprintf(b->body, "  %s = add i64 %zu, %s\n", added.operand, explicitCount, tailLength.operand);
+    fprintf(b->body, "  %s = add i64 %s, %s\n", length.operand, oldLength.operand, added.operand);
+    Value result = allocateCollection(b, source.kind, length), cursor = slot(b, INT);
+    rawStore(b, cursor, value(b, INT, "0"));
+    unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+    jump(b, condition); label(b, condition);
+    Value i = load(b, cursor), more = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, oldLength.operand);
+    branch(b, more, body, end); label(b, body);
+    Value after = temp(b, BOOL), shifted = temp(b, INT), destination = temp(b, INT);
+    fprintf(b->body, "  %s = icmp sge i64 %s, %s\n", after.operand, i.operand, index.operand);
+    fprintf(b->body, "  %s = add i64 %s, %s\n", shifted.operand, i.operand, added.operand);
+    fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 %s\n", destination.operand, after.operand, shifted.operand, i.operand);
+    store(b, elementAddress(b, result, destination), load(b, elementAddress(b, source, i)));
+    Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+    rawStore(b, cursor, next); jump(b, condition); label(b, end);
+    for (size_t j = 0; j < explicitCount; j++) {
+        Value at = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, %zu\n", at.operand, index.operand, j);
+        store(b, elementAddress(b, result, at), items[j]);
+    }
+    if (call->spread) {
+        rawStore(b, cursor, value(b, INT, "0"));
+        condition = ++b->label; body = ++b->label; end = ++b->label;
+        jump(b, condition); label(b, condition);
+        i = load(b, cursor); more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, tailLength.operand);
+        branch(b, more, body, end); label(b, body);
+        Value offset = temp(b, INT), at = temp(b, INT);
+        fprintf(b->body, "  %s = add i64 %s, %zu\n", offset.operand, index.operand, explicitCount);
+        fprintf(b->body, "  %s = add i64 %s, %s\n", at.operand, offset.operand, i.operand);
+        store(b, elementAddress(b, result, at), load(b, elementAddress(b, tail, i)));
+        next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, condition); label(b, end);
+    }
+    free(items);
+    if (snapshot) dropDynamicArrayPayload(b, source);
+    escapeDynamicArrays(b, result);
+    dropDynamicArrayPayload(b, load(b, binding)); rawStore(b, binding, result);
+    return value(b, VOID, "");
+}
 static Value addArrayValues(Backend *b, Value left, Value right, Kind resultKind) {
     BufferKind *resultType = bufferKind(b, resultKind);
+    if (!resultType->shape && resultType->fixedArray) {
+        Value result = emptyValue(b, resultKind);
+        BufferKind *a = bufferKind(b, left.kind), *c = bufferKind(b, right.kind);
+        for (size_t i = 0; i < a->count; i++) result = insert(b, result, extract(b, left, i), i);
+        for (size_t i = 0; i < c->count; i++) result = insert(b, result, extract(b, right, i), a->count + i);
+        return result;
+    }
     Value pieces[] = {left, right};
     int arrays[2];
     Value lengths[2];
@@ -2401,7 +3064,7 @@ static Value addArrayValues(Backend *b, Value left, Value right, Kind resultKind
     }
     Value length = temp(b, INT);
     fprintf(b->body, "  %s = add i64 %s, %s\n", length.operand, lengths[0].operand, lengths[1].operand);
-    Value result = allocateArray(b, resultType->element, length);
+    Value result = allocateCollection(b, resultKind, length);
     result.kind = resultKind;
     for (size_t part = 0; part < 2; part++) {
         Value offset = part ? lengths[0] : value(b, INT, "0");
@@ -2466,8 +3129,9 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
                 op == EXPR_EQUALITY ? "eq" : "ne", a.operand, c.operand);
         return result;
     }
-    if ((op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) && a.kind == c.kind &&
-        array && array->shape == 4 && array->element == I8) {
+    BufferKind *rightArray = bufferKind(b, c.kind);
+    if ((op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) &&
+        array && array->shape == 4 && array->element == I8 && rightArray && rightArray->shape == 4 && rightArray->element == I8) {
         Value leftLength = arrayBytes(b, a), rightLength = arrayBytes(b, c);
         Value sameLength = temp(b, BOOL), result = slot(b, BOOL);
         rawStore(b, result, value(b, BOOL, "false"));
@@ -2576,8 +3240,7 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
             c.operand);
     return r;
 }
-static Value inlineArrayCall(Backend *, struct stmt_func *, MethodInstance *, Value *, size_t,
-                             Value, Kind, token);
+
 static Value expressionImpl(Backend *, expr *);
 static Value expression(Backend *b, expr *e) {
     token previous = b->location;
@@ -2592,13 +3255,38 @@ static Value expressionImpl(Backend *b, expr *e) {
         return value(b, BAD, "0");
     }
     switch (e->type) {
+    case EXPR_TYPE_MAKE:
     case EXPR_TYPE_ZERO: {
         Kind k = type(b, ((struct expr_zero *)e->underlying)->type);
         if (k == VOID || k == BAD) {
             fail(b, "zero requires a supported storage type");
             return value(b, BAD, "0");
         }
-        return emptyValue(b, k);
+        return e->type == EXPR_TYPE_MAKE ? allocateCollection(b, k, value(b, INT, "0")) : emptyValue(b, k);
+    }
+    case EXPR_TYPE_NEW: {
+        Kind element = type(b, ((struct expr_zero *)e->underlying)->type);
+        if (element == VOID || element == BAD) {
+            fail(b, "new requires a supported storage type");
+            return value(b, BAD, "0");
+        }
+        Value result = temp(b, pointerKind(b, element)), size = storageSize(b, element);
+        // Even a zero-sized type gets a distinct, usable allocation. calloc
+        // clears padding too; emptyValue supplies language zero values such as
+        // the valid empty headers used by strings and dynamic arrays.
+        Value nonempty = temp(b, BOOL), bytes = temp(b, INT);
+        fprintf(b->body, "  %s = icmp ne i64 %s, 0\n", nonempty.operand, size.operand);
+        fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 1\n", bytes.operand, nonempty.operand, size.operand);
+        b->newUsed = 1;
+        fprintf(b->body, "  %s = call ptr @\"\\01calloc\"(i64 1, i64 %s)\n", result.operand, bytes.operand);
+        Value present = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, result.operand);
+        unsigned good = ++b->label, bad = ++b->label;
+        branch(b, present, good, bad); label(b, bad);
+        fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+        b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
+        rawStore(b, value(b, element, "%s", result.operand), emptyValue(b, element));
+        return result;
     }
     case EXPR_TYPE_LITERAL: {
         struct expr_literal *v = e->underlying;
@@ -2613,7 +3301,7 @@ static Value expressionImpl(Backend *b, expr *e) {
             return value(b, FLOAT, "0x%016llX", f.bits);
         }
         if (v->type == LITERAL_TYPE_STRING) {
-            Value result = allocateArray(b, I8, value(b, INT, "%zu", v->stringLength));
+            Value result = allocateCollection(b, stringKind(b), value(b, INT, "%zu", v->stringLength));
             Value data = arrayData(b, result);
             unsigned id = ++b->strings;
             fprintf(b->out, "@.bytes%u = private unnamed_addr constant [%zu x i8] c\"", id, v->stringLength);
@@ -2637,12 +3325,25 @@ static Value expressionImpl(Backend *b, expr *e) {
         return expectedValue(b, e, expressionKind(b, e));
     case EXPR_TYPE_ARRAY_NEW: {
         struct expr_array_new *v = e->underlying;
-        Value result = allocateArray(b, type(b, v->elementType), expression(b, &v->count));
+        if (v->buffer) {
+            Kind kind = expressionKind(b, e);
+            BufferKind *t = bufferKind(b, kind);
+            if (!t->shape) return emptyValue(b, kind);
+            Value count = expression(b, &v->count), result = temp(b, kind);
+            fprintf(b->body, "  %s = alloca %s, i64 %s\n", result.operand,
+                    irType(b, t->element), count.operand);
+            result.length = count.operand;
+            return result;
+        }
+        Value result = allocateCollection(b, expressionKind(b, e), expression(b, &v->count));
         result.kind = expressionKind(b, e);
         return result;
     }
-    case EXPR_TYPE_INDEX:
-        return load(b, address(b, e));
+    case EXPR_TYPE_INDEX: {
+        int previous = b->readingIndex; b->readingIndex = 1;
+        Value result = load(b, address(b, e)); b->readingIndex = previous;
+        return result;
+    }
     case EXPR_TYPE_DOT: {
         struct expr_dot *v = e->underlying;
         BufferKind *parentType = bufferKind(b, expressionKind(b, &v->parent));
@@ -2652,9 +3353,16 @@ static Value expressionImpl(Backend *b, expr *e) {
         BufferKind *t = bufferKind(b, parent.kind);
         if (t && t->shape == 4) {
             char *field = ((struct expr_identifier *)v->field.underlying)->lexeme.lexeme;
+            if (t->dynamicArray && !strcmp(field, "length")) return arrayLength(b, parent);
+            if (t->dynamicArray && !strcmp(field, "capacity")) {
+                Value cap = temp(b, INT);
+                fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 1\n", cap.operand, parent.operand);
+                return load(b, cap);
+            }
             if (!strcmp(field, "size"))
-                return load(b, value(b, INT, "%s", parent.operand));
+                return arrayBytes(b, parent);
             if (!strcmp(field, "data")) {
+                if (t->immutableString) parent = collectionCopy(b, parent, dynamicArrayKind(b, I8));
                 if (b->initializingGlobals && parent.owner != b->globalScope) {
                     Value storage = bufferLiteralSlot(b, parent.kind);
                     store(b, storage, parent);
@@ -2672,8 +3380,31 @@ static Value expressionImpl(Backend *b, expr *e) {
     }
     case EXPR_TYPE_TYPECAST: {
         struct expr_typecast *v = e->underlying;
-        Value a = expression(b, &v->child);
-        return convert(b, a, type(b, v->type));
+        Kind target = type(b, v->type);
+        BufferKind *wanted = bufferKind(b, target);
+        Kind source = expressionKind(b, &v->child);
+        BufferKind *from = bufferKind(b, source);
+        Value a;
+        if (from && !from->shape && wanted && (wanted->shape == 3 || !wanted->shape))
+            a = value(b, pointerBufferKind(b, from->element), "%s", materialize(b, &v->child).operand);
+        else a = expression(b, &v->child);
+        typeTokens element, dimension;
+        if (wanted && (bufferTypeParts(v->type, &element, &dimension) ||
+                       sizedArrayTypeParts(v->type, &element, &dimension))) {
+            if (!wanted->shape && bufferKind(b, a.kind) && bufferKind(b, a.kind)->shape == 3)
+                return load(b, value(b, target, "%s", a.operand));
+            if (wanted->shape == 3) {
+                Value result = value(b, target, "%s", a.operand);
+                if (dimension.nTokens) {
+                    expr *size = parseBufferDimension(dimension);
+                    if (!size) { fail(b, "invalid collection length"); return value(b, BAD, "0"); }
+                    result.length = coerce(b, expression(b, size), INT).operand;
+                    free(size);
+                }
+                return result;
+            }
+        }
+        return convert(b, a, target);
     }
     case EXPR_TYPE_CALL: {
         struct expr_call *v = e->underlying;
@@ -2687,6 +3418,11 @@ static Value expressionImpl(Backend *b, expr *e) {
         if (dot) {
             name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
             Kind actual = expressionKind(b, &dot->parent);
+            BufferKind *dynamicArray = bufferKind(b, actual);
+            if (dynamicArray && dynamicArray->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop")))
+                return removeDynamicArray(b, dot, v);
+            if (dynamicArray && dynamicArray->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add")))
+                return mutateDynamicArray(b, dot, v);
             method = methodInstance(b, actual, name, typeArguments, count);
             if (!method) return value(b, BAD, "0");
             f = method->function;
@@ -2728,6 +3464,19 @@ static Value expressionImpl(Backend *b, expr *e) {
             fail(b, "only direct function and method calls are supported");
             return value(b, BAD, "0");
         }
+        if (!f && !strcmp(name, "free")) {
+            Value item = expression(b, &v->params[0]);
+            BufferKind *t = bufferKind(b, item.kind);
+            b->returnTransportUsed = 1;
+            if (t && t->dynamicArray) {
+                dropDynamicArrayPayload(b, item);
+                if (addressable(&v->params[0])) rawStore(b, address(b, &v->params[0]), emptyValue(b, item.kind));
+            } else {
+                if (t && t->shape == 6) dropNestedDynamicArrays(b, load(b, value(b, t->element, "%s", item.operand)), 0);
+                fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", item.operand);
+            }
+            return value(b, VOID, "");
+        }
         if (!f && !strcmp(name, "len")) {
             if (v->nParams != 1 || v->spread) {
                 fail(b, "len requires exactly one array argument");
@@ -2735,15 +3484,13 @@ static Value expressionImpl(Backend *b, expr *e) {
             }
             Value array = expression(b, &v->params[0]);
             BufferKind *t = bufferKind(b, array.kind);
+            if (t && !t->shape) return value(b, INT, "%zu", t->count);
+            if (array.length) return value(b, INT, "%s", array.length);
             if (!t || t->shape != 4) {
-                fail(b, "len requires an array");
+                fail(b, "len requires a collection with known length");
                 return value(b, BAD, "0");
             }
-            Value bytes = load(b, value(b, INT, "%s", array.operand)),
-                  stride = storageSize(b, t->element), result = temp(b, INT);
-            fprintf(b->body, "  %s = sdiv i64 %s, %s\n", result.operand, bytes.operand,
-                    stride.operand);
-            return result;
+            return arrayLength(b, array);
         }
         if (!f) {
             fail(b, "unknown function");
@@ -2754,7 +3501,8 @@ static Value expressionImpl(Backend *b, expr *e) {
         TypeBinding *previousBindings = b->typeBindings;
         if (method) b->typeBindings = method->nBindings ? method->bindings : NULL;
         Kind *parameterKinds = checked(sizeof(Kind) * (f->nParams + 1));
-        for (size_t i = 0; i < f->nParams; i++) parameterKinds[i] = type(b, f->paramTypeNames[i]);
+        for (size_t i = 0; i < f->nParams; i++)
+            parameterKinds[i] = f->isVariadic && i + 1 == f->nParams ? type(b, f->paramTypeNames[i]) : parameterKind(b, f, i);
         Kind variadicArrayKind = f->isVariadic && !f->isExtern && f->nParams
                                      ? parameterKind(b, f, f->nParams - 1) : BAD;
         Kind resultKind = resultType(b, f);
@@ -2876,11 +3624,25 @@ static Value expressionImpl(Backend *b, expr *e) {
                             destination.operand, irType(b, element), data.operand, explicitCount);
                     fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, tailLength.operand,
                             stride.operand);
-                    fprintf(
-                        b->body,
-                        "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
-                        destination.operand, source.operand, bytes.operand);
-                    b->dataCopyUsed = 1;
+                    if (containsDynamicArrays(b, element)) {
+                        Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+                        unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+                        jump(b, condition); label(b, condition);
+                        Value i = load(b, cursor), more = temp(b, BOOL);
+                        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, tailLength.operand);
+                        branch(b, more, body, end); label(b, body);
+                        Value from = temp(b, element), to = temp(b, element);
+                        fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", from.operand, irType(b, element), source.operand, i.operand);
+                        fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", to.operand, irType(b, element), destination.operand, i.operand);
+                        rawStore(b, to, emptyValue(b, element));
+                        store(b, to, load(b, from));
+                        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+                        rawStore(b, cursor, next); jump(b, condition); label(b, end);
+                    } else {
+                        fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
+                                destination.operand, source.operand, bytes.operand);
+                        b->dataCopyUsed = 1;
+                    }
                 }
                 if (element == SCALAR_ANY) pack.kind = mixedArrayKind(b);
                 args[fixed] = coerce(b, pack, variadicArrayKind);
@@ -2898,16 +3660,6 @@ static Value expressionImpl(Backend *b, expr *e) {
             }
         }
         free(evaluated.items);
-        int recursiveReturn = b->function == f;
-        unsigned returnDepth = 0;
-        for (InlineReturn *r = b->inlineReturn; r; r = r->parent)
-            if (r->function == f || ++returnDepth >= 64) recursiveReturn = 1;
-        if (!f->isExtern && ownsArrays(b, resultKind) && !recursiveReturn) {
-            Value result = inlineArrayCall(b, f, method, args, nArgs, receiver, resultKind, v->location);
-            free(args);
-            free(parameterKinds);
-            return result;
-        }
         Value traceParent = value(b, RAW_POINTER, "null");
         if (!f->isExtern)
             traceParent = pushTraceFrame(b, f, v->location);
@@ -2985,7 +3737,7 @@ static Value expressionImpl(Backend *b, expr *e) {
             if (v->operation != EXPR_ASSIGNMENT)
                 old = load(b, addr);
             BufferKind *target = bufferKind(b, addr.kind);
-            int arrayAdd = v->operation == EXPR_ADD_EQUALS && target && target->shape == 4;
+            int arrayAdd = v->operation == EXPR_ADD_EQUALS && target && (target->shape == 4 || target->fixedArray);
             if (arrayAdd) old = copyValue(b, old, 0);
             Value r = arrayAdd ? expression(b, &v->right) : expectedValue(b, &v->right, addr.kind);
             if (v->operation != EXPR_ASSIGNMENT) {
@@ -2995,7 +3747,11 @@ static Value expressionImpl(Backend *b, expr *e) {
                     EXPR_BITWISE_AND, EXPR_BITWISE_OR};
                 r = binary(b, ops[v->operation - EXPR_ADD_EQUALS], old, r);
             }
-            store(b, addr, r);
+            if (v->operation == EXPR_ADD_EQUALS && target && target->fixedArray && !target->shape && r.kind != addr.kind &&
+                v->left.type == EXPR_TYPE_IDENTIFIER) {
+                Value replacement = slot(b, r.kind); store(b, replacement, r);
+                bind(b, ((struct expr_identifier *)v->left.underlying)->lexeme.lexeme, replacement);
+            } else store(b, addr, r);
             return r;
         }
         Value a = expression(b, &v->left);
@@ -3027,6 +3783,7 @@ static Value expressionImpl(Backend *b, expr *e) {
         if (v->operation == UNARY_ADDRESS_OF) {
             Value storage = v->child.type == EXPR_TYPE_COMPOSITE
                                 ? materialize(b, &v->child) : address(b, &v->child);
+            if (v->child.type == EXPR_TYPE_COMPOSITE) escapeDynamicArrays(b, load(b, storage));
             return value(b, pointerKind(b, storage.kind), "%s", storage.operand);
         }
         if (v->operation == UNARY_DEREFERENCE)
@@ -3160,6 +3917,11 @@ static void saveStack(Backend *b, Scope *scope, int needed) {
     fprintf(b->body, "  %s = call ptr @llvm.stacksave.p0()\n", scope->savedStack.operand);
 }
 static void restoreStack(Backend *b, Scope *scope) {
+    for (Binding *binding = scope->bindings; binding; binding = binding->next)
+        if (binding->autoRelease) {
+            dropNestedDynamicArrays(b, load(b, binding->address), 0);
+            rawStore(b, binding->address, emptyValue(b, binding->address.kind));
+        }
     if (scope->savedBoxes.operand && !scope->retainAllocations)
         fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr %s)\n", boxRegion(b).operand, scope->savedBoxes.operand);
     if (scope->hasStack && !scope->retainAllocations)
@@ -3293,7 +4055,10 @@ static void statementImpl(Backend *, stmt *);
 static void statement(Backend *b, stmt *s) {
     token previous = b->location;
     if (s && s->location.line > 0) b->location = s->location;
+    DynamicArrayTemporary *mark = b->dynamicArrayTemps;
+    if (!b->terminated && statementAllocatesStack(s)) mark = dynamicArrayTempMark(b);
     statementImpl(b, s);
+    if (!b->terminated) cleanDynamicArrayTemps(b, mark);
     b->location = previous;
 }
 static void statementImpl(Backend *b, stmt *s) {
@@ -3331,7 +4096,8 @@ static void statementImpl(Backend *b, stmt *s) {
     case STMT_VAR: {
         struct stmt_var *v = s->value;
         typeTokens element, dimension;
-        if (bufferTypeParts(v->type, &element, &dimension) && bufferDimensionKind(dimension) == 2) {
+        int runtimeArray = sizedArrayTypeParts(v->type, &element, &dimension);
+        if ((runtimeArray || bufferTypeParts(v->type, &element, &dimension)) && bufferDimensionKind(dimension) == 2) {
             expr *size = parseBufferDimension(dimension);
             if (!size) {
                 fail(b, "invalid runtime buffer size");
@@ -3344,7 +4110,7 @@ static void statementImpl(Backend *b, stmt *s) {
                 break;
             }
             count = convert(b, count, INT);
-            Kind elementKind = type(b, element), pointerKind = pointerBufferKind(b, elementKind);
+            Kind elementKind = type(b, element), pointerKind = runtimeArray ? runtimeArrayKind(b, elementKind) : pointerBufferKind(b, elementKind);
             for (size_t i = 0; i < v->nVars; i++) {
                 if (v->vars[i].type == UNDERSCORE)
                     continue;
@@ -3352,8 +4118,36 @@ static void statementImpl(Backend *b, stmt *s) {
                 fprintf(b->body, "  %s = alloca %s, i64 %s\n", storage.operand,
                         irType(b, elementKind), count.operand);
                 Value binding = slot(b, pointerKind);
+                binding.length = count.operand;
                 bind(b, v->vars[i].lexeme, binding);
                 store(b, binding, storage);
+                Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+                unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+                jump(b, condition); label(b, condition);
+                Value index = load(b, cursor), more = temp(b, BOOL);
+                fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, index.operand, count.operand);
+                branch(b, more, body, end); label(b, body);
+                Value item = temp(b, elementKind);
+                fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", item.operand, irType(b, elementKind), storage.operand, index.operand);
+                rawStore(b, item, emptyValue(b, elementKind));
+                Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, index.operand);
+                rawStore(b, cursor, next); jump(b, condition); label(b, end);
+                if (v->nInitValues) {
+                    if (v->initValues[i].type != EXPR_TYPE_COMPOSITE) fail(b, "runtime collection initializer requires a literal");
+                    else {
+                        struct expr_composite *literal = v->initValues[i].underlying;
+                        Value fits = temp(b, BOOL);
+                        fprintf(b->body, "  %s = icmp uge i64 %s, %zu\n", fits.operand, count.operand, literal->nEntries);
+                        unsigned good = ++b->label, bad = ++b->label;
+                        branch(b, fits, good, bad); label(b, bad);
+                        fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n"); b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
+                        for (size_t j = 0; j < literal->nEntries; j++) {
+                            item = temp(b, elementKind);
+                            fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %zu\n", item.operand, irType(b, elementKind), storage.operand, j);
+                            store(b, item, expectedValue(b, &literal->values[j], elementKind));
+                        }
+                    }
+                }
             }
             break;
         }
@@ -3377,7 +4171,9 @@ static void statementImpl(Backend *b, stmt *s) {
                 continue;
             }
             Value addr = slot(b, k);
+            if (v->nInitValues && i < values.count) addr.length = initial[i].length;
             bind(b, v->vars[i].lexeme, addr);
+            b->scope->bindings->autoRelease = containsDynamicArrays(b, k);
             Value init = v->nInitValues ? initial[i] : emptyValue(b, k);
             store(b, addr, init);
         }
@@ -3436,16 +4232,14 @@ static void statementImpl(Backend *b, stmt *s) {
             r = convert(b, r, k);
         if (r.kind != k)
             fail(b, "return value type mismatch");
-        if (b->inlineReturn) {
-            store(b, b->inlineReturn->storage, r);
-            jump(b, b->inlineReturn->end);
-            break;
-        }
         if (ownsArrays(b, k)) {
             b->copyTransport = 1;
             r = copyValue(b, r, 0);
             b->copyTransport = 0;
         }
+        escapeDynamicArrays(b, r);
+        releaseScopeValues(b);
+        cleanDynamicArrayTemps(b, b->functionTemps);
         fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
         if (k == VOID)
             fprintf(b->body, "  ret void\n");
@@ -3460,7 +4254,9 @@ static void statementImpl(Backend *b, stmt *s) {
         b->scope = &scope;
         saveStack(b, &scope, statementAllocatesStack(s));
         statement(b, v->preStmt);
+        DynamicArrayTemporary *conditionTemps = dynamicArrayTempMark(b);
         Value cond = expression(b, v->condition);
+        cleanDynamicArrayTemps(b, conditionTemps);
         unsigned yes = ++b->label, no = ++b->label, end = ++b->label;
         branch(b, cond, yes, no);
         label(b, yes);
@@ -3485,7 +4281,7 @@ static void statementImpl(Backend *b, stmt *s) {
     case STMT_FOR: {
         struct stmt_for *v = s->value;
         BufferKind *rangeType = v->range ? bufferKind(b, expressionKind(b, v->range)) : NULL;
-        if (v->range && (!rangeType || rangeType->shape != 4)) {
+        if (v->range && (!rangeType || (rangeType->shape != 4 && !rangeType->fixedArray))) {
             fail(b, "range requires an array");
             break;
         }
@@ -3521,7 +4317,9 @@ static void statementImpl(Backend *b, stmt *s) {
             fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, length.operand);
             branch(b, more, body, end);
         } else if (v->condition) {
+            DynamicArrayTemporary *conditionTemps = dynamicArrayTempMark(b);
             Value c = expression(b, v->condition);
+            cleanDynamicArrayTemps(b, conditionTemps);
             branch(b, c, body, end);
         } else
             jump(b, body);
@@ -3541,6 +4339,7 @@ static void statementImpl(Backend *b, stmt *s) {
             checkArrayIndex(b, range, i, v->range->location);
             store(b, item, load(b, elementAddress(b, range, i)));
             bind(b, v->bindings[1].lexeme, item);
+            b->scope->bindings->autoRelease = 1;
         }
         statement(b, v->body);
         if (!b->terminated)
@@ -3554,8 +4353,11 @@ static void statementImpl(Backend *b, stmt *s) {
             fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
             store(b, index, next);
         }
-        if (v->update)
+        if (v->update) {
+            DynamicArrayTemporary *updateTemps = dynamicArrayTempMark(b);
             expression(b, v->update);
+            cleanDynamicArrayTemps(b, updateTemps);
+        }
         jump(b, condition);
         label(b, end);
         b->breakScope = oldBreakScope;
@@ -3706,68 +4508,6 @@ static void statementImpl(Backend *b, stmt *s) {
         fail(b, "unsupported statement");
         break;
     }
-}
-// Runtime-sized return storage is kept on the caller's stack by lowering the
-// body in that frame. Calls execute once; no speculative sizing pass is used.
-static Value inlineArrayCall(Backend *b, struct stmt_func *f, MethodInstance *method,
-                             Value *arguments, size_t count, Value receiver, Kind resultKind,
-                             token location) {
-    InlineReturn result = {f, slot(b, resultKind), ++b->label, b->inlineReturn};
-    Value traceParent = pushTraceFrame(b, f, location);
-    Scope parameters = {.parent = b->globalScope};
-    Scope *previousScope = b->scope, *previousLoop = b->loopScope, *previousBreakScope = b->breakScope;
-    struct stmt_func *previousFunction = b->function;
-    MethodInstance *previousMethod = b->method;
-    TypeBinding *previousBindings = b->typeBindings;
-    unsigned previousBreak = b->breakLabel, previousContinue = b->continueLabel;
-    b->scope = &parameters;
-    b->function = f;
-    b->method = method;
-    b->typeBindings = method ? method->bindings : NULL;
-    b->inlineReturn = &result;
-    b->loopScope = b->breakScope = NULL;
-    b->breakLabel = b->continueLabel = 0;
-    if (method && f->receiverType.nTokens) {
-        Value storage = slot(b, method->receiver);
-        bind(b, f->receiverName.lexeme, storage);
-        store(b, storage, receiver);
-    }
-    for (size_t i = 0; i < count; i++) {
-        Value storage = slot(b, parameterKind(b, f, i));
-        bind(b, f->paramNames[i].lexeme, storage);
-        store(b, storage, arguments[i]);
-    }
-    for (size_t i = 0; i < f->nResults; i++)
-        if (f->resultNames[i].type != EOF_TOKEN) {
-            Kind kind = type(b, f->resultTypes[i]);
-            Value storage = slot(b, kind);
-            bind(b, f->resultNames[i].lexeme, storage);
-            store(b, storage, emptyValue(b, kind));
-        }
-    JumpContext jumps = {0};
-    JumpContext *previousJumps = b->jumps;
-    prepareJumps(b, &jumps, &f->body);
-    b->jumps = &jumps;
-    block(b, &f->body);
-    b->jumps = previousJumps;
-    clearJumps(&jumps);
-    if (!b->terminated) {
-        store(b, result.storage, emptyValue(b, resultKind));
-        jump(b, result.end);
-    }
-    label(b, result.end);
-    clearScope(&parameters);
-    b->scope = previousScope;
-    b->function = previousFunction;
-    b->method = previousMethod;
-    b->typeBindings = previousBindings;
-    b->inlineReturn = result.parent;
-    b->loopScope = previousLoop;
-    b->breakScope = previousBreakScope;
-    b->breakLabel = previousBreak;
-    b->continueLabel = previousContinue;
-    popTraceFrame(b, traceParent);
-    return load(b, result.storage);
 }
 static void signature(Backend *b, struct stmt_func *f, FILE *out) {
     Kind result = resultType(b, f);
@@ -3935,9 +4675,12 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
     Scope scope = {.parent = b->globalScope};
     b->scope = &scope;
     b->function = f;
+    b->terminated = 0;
+    b->functionTemps = dynamicArrayTempMark(b);
     if (b->method && f->receiverType.nTokens) {
         Value addr = slot(b, b->method->receiver);
         bind(b, f->receiverName.lexeme, addr);
+        b->scope->bindings->autoRelease = 1;
         store(b, addr, value(b, b->method->receiver, "%%receiver"));
     }
     b->terminated = 0;
@@ -3947,6 +4690,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         Kind k = parameterKind(b, f, j);
         Value addr = slot(b, k);
         bind(b, f->paramNames[j].lexeme, addr);
+        b->scope->bindings->autoRelease = 1;
         store(b, addr, value(b, k, "%%arg%zu", j));
     }
     for (size_t j = 0; j < f->nResults; j++)
@@ -3954,6 +4698,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
             Kind k = type(b, f->resultTypes[j]);
             Value addr = slot(b, k);
             bind(b, f->resultNames[j].lexeme, addr);
+            b->scope->bindings->autoRelease = 1;
             Value initial = emptyValue(b, k);
             store(b, addr, initial);
         }
@@ -3965,12 +4710,20 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
     b->jumps = previousJumps;
     clearJumps(&jumps);
     if (!b->terminated) {
+        releaseScopeValues(b);
+        cleanDynamicArrayTemps(b, b->functionTemps);
         fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
         if (resultType(b, f) == VOID)
             fprintf(b->body, "  ret void\n");
         else {
             Kind kind = resultType(b, f);
             Value zero = emptyValue(b, kind);
+            if (ownsArrays(b, kind)) {
+                int previous = b->copyTransport; b->copyTransport = 1;
+                zero = copyValue(b, zero, 0);
+                b->copyTransport = previous;
+                escapeDynamicArrays(b, zero);
+            }
             fprintf(b->body, "  ret %s %s\n", irType(b, kind), zero.operand);
         }
     }
@@ -4073,6 +4826,7 @@ static void emitGlobals(Backend *b, FILE *output) {
         b->initializingGlobals = !destroy;
         Scope initializerScope = {.parent = b->globalScope};
         b->scope = &initializerScope;
+        DynamicArrayTemporary *globalTemps = dynamicArrayTempMark(b);
         // Default all globals before running any user initializer.
         for (Binding *binding = b->globalScope->bindings; binding; binding = binding->next) {
             Value address = binding->address;
@@ -4082,7 +4836,9 @@ static void emitGlobals(Backend *b, FILE *output) {
             } else {
                 b->copyTransport = 1;
                 Value initial = emptyValue(b, address.kind);
-                rawStore(b, address, copyValue(b, initial, 0));
+                Value owned = copyValue(b, initial, 0);
+                escapeDynamicArrays(b, owned);
+                rawStore(b, address, owned);
             }
             b->copyTransport = 0;
         }
@@ -4100,6 +4856,7 @@ static void emitGlobals(Backend *b, FILE *output) {
                 if (v->vars[j].type != UNDERSCORE) store(b, find(b, v->vars[j].lexeme), values.items[j]);
             free(expected); free(values.items);
           }
+        cleanDynamicArrayTemps(b, globalTemps);
         fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
         fprintf(b->body, "  ret void\n");
         const char *name = destroy ? "destroy_globals" : "initialize_globals";
@@ -4148,6 +4905,7 @@ static void emitAnyType(Backend *b, Kind kind) {
             unsigned big = ++b->label, small = ++b->label, done = ++b->label;
             branch(b, indirect, big, small); label(b, big);
             Value copied = copyValue(b, source, 0), pointer;
+            escapeDynamicArrays(b, copied);
             if (t->shape == 4) pointer = copied;
             else {
                 pointer = temp(b, RAW_POINTER);
@@ -4248,6 +5006,7 @@ static void emitArrayView(Backend *b) {
         int previous = b->copyTransport;
         b->copyTransport = 1;
         Value heap = copyValue(b, view, 0);
+        escapeDynamicArrays(b, heap);
         b->copyTransport = previous;
         if (b->boxRegion.operand)
             fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", b->boxRegion.operand);
@@ -4554,6 +5313,7 @@ int emitLLVM(parseResult *program, FILE *output) {
         fprintf(output, "declare i32 @\"\\01memcmp\"(ptr, ptr, i64)\n");
     if (b.dataCopyUsed)
         fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n");
+    if (b.newUsed) fprintf(output, "declare ptr @\"\\01calloc\"(i64, i64)\n");
     if (b.returnTransportUsed) {
         // Distinct IR names share the libc symbols without conflicting with user declarations.
         fprintf(output, "declare ptr @\"\\01malloc\"(i64)\n"
@@ -4565,6 +5325,10 @@ int emitLLVM(parseResult *program, FILE *output) {
     if (fflush(output) || ferror(output))
         fail(&b, "could not write LLVM IR");
     clearScope(&globals);
+    while (b.dynamicArrayTemps) {
+        DynamicArrayTemporary *next = b.dynamicArrayTemps->next;
+        free(b.dynamicArrayTemps); b.dynamicArrayTemps = next;
+    }
     while (b.diagnostics) {
         BackendDiagnostic *next = b.diagnostics->next;
         free(b.diagnostics); b.diagnostics = next;

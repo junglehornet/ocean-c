@@ -49,7 +49,7 @@ struct Matrix<T any> (u64 width, height) {
 	// or, underlying can be declared normally and then on another line you can write:
 	// index underlying;
 	// notice that arrays are written type[length]
-	// slices are similarly written as type[]
+	// dynamic arrays are similarly written as type[]
 
 	* (MatrixScalar<T> other) {
 		for (u64 row = 0; row < self[].length; row++) {

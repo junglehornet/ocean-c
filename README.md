@@ -193,31 +193,56 @@ func main() int {
 }
 ```
 
-`string` is exactly `i8[]`: an immutable byte-size header followed by mutable
-inline signed bytes. `len(text)` and `text.size` both give the byte count.
-String literals contain their decoded bytes with no appended zero byte; embedded
-zero bytes are ordinary data. Indexing uses the same bounds checks as arrays,
-while `text.data` exposes an unchecked `buffer<i8>[]` view.
+`string` is an immutable, heap-backed dynamic array of `i8`. Its header contains a
+length, a capacity, and a data pointer; capacity always equals length.
+`len(text)`, `text.length`, `text.capacity`, and `text.size` report its byte count.
+String literals contain their decoded bytes without an implicit terminator.
+Indexing reads a signed byte and checks bounds. Element assignment, mutable
+element addresses, `append`, `prepend`, and `add` are rejected for strings.
 
 ```ocean
 extern int write(i32 fd, buffer<i8>[] data, int count);
 
 func main() {
-    text: string = "Hello" + ", Ocean!";
-    bytes: i8[] = text;             // Independent array value
-    text += "\n";                    // Fresh concatenated array
+    text := "Hello";
+    first := text[0];
+    text = "Hello, Ocean!";          // Replace the value, allocating new storage.
+    text += "\n";                    // Concatenate and replace; never grow in place.
+    bytes: i8[] = text;             // An independent, mutable dynamic array of bytes.
+    bytes[0] = 'h';                 // Does not change text.
     extern.write(1, text.data, len(text));
+    free(bytes);
+    free(text);
 }
 ```
 
-`+` concatenates strings (including values declared as `i8[]`) into fresh stack
-storage, copying both operands without changing them. `+=` assigns that new
-array value to the variable. String literals and concatenations use stack
-storage, and assignment copies their contents into the destination's scope.
-Returned strings use caller-owned stack storage as described below. Raw `.data` views
-remain valid only while their owning value is alive. Empty strings have size zero. C APIs that require a terminator need one
-explicitly, for example `"text\0".data`; length-based APIs such as `write`
-accept `.data` and `len(text)` directly.
+Reassignment evaluates and copies the replacement before freeing the previous
+header, payload, and owned nested values. This also applies through `*string`
+and `*T[]`, including pointers returned by `new`. Self-assignment and `+=` are
+safe. Passing or returning dynamic arrays/strings by value copies their backing memory.
+Parameters, ordinary locals, named results, and owned nested values release their
+storage when their stack scope ends, including on early returns and loop exits.
+Expression temporaries are cleaned up as well. Explicit `free(value)` can release
+a value early; subsequent scope cleanup does not free it again.
+
+Pointer variables are non-owning: scope exit and pointer returns never free their
+heap allocations or pointees. This includes pointers to dynamic arrays/strings returned
+by `new`. Explicit `free(pointer)` releases the pointed-to value's owned
+dynamic array/string storage and the allocation itself, without following pointer
+fields. Failing to free a heap pointer can therefore leak memory.
+
+Dynamic array/string cleanup is emitted directly into LLVM control flow. Temporary
+ownership uses compiler-known stack slots and a private allocation prefix;
+there is no runtime dynamic array allocation registry, reference counting, or garbage
+collector. Returning a value copies it before the callee's cleanup executes.
+
+Strings and mutable dynamic arrays of bytes can be assigned or explicitly converted to one
+another by copying. Changes to a mutable dynamic array of bytes cannot affect its source
+string. `text.data` is available in function arguments as an isolated temporary
+buffer, so even an external function that writes into that buffer cannot modify
+the original string. Such a buffer is valid only during the enclosing call;
+create a named `i8[]` copy for persistent or mutable data access. C APIs that
+require a terminator still need one explicitly, for example `"text\0".data`.
 
 Fixed-size buffers accept positional initializers, with omitted elements
 zero-initialized. Assignment, arguments, and returns copy a fixed-size array
@@ -901,3 +926,81 @@ methods through an interface value still requires narrowing to a concrete type.
 Variadic `...any` packs have type `mixed any[]`, so calls such as
 `Println("count", 3)` remain valid. `...Value` packs likewise allow different
 types that satisfy `Value`.
+
+## Collections
+
+`types.txt` describes the collection model. The compiler supports sized arrays,
+raw buffers, heap-backed dynamic arrays, and immutable strings:
+
+```Ocean
+package main;
+
+struct Matrix(height, width int) {
+    data int[height][width];
+}
+
+func inspect(data buffer<int>, count int) int {
+    sized := data->buffer<int>[count];
+    array := data->int[count];
+    value, ok := array[count]; // Out of bounds returns zero and false.
+    return len(sized);
+}
+
+func main() {
+    raw := buffer<int>[5];
+    fixed: int[3] = {1, 2, 3};
+    combined := fixed + int[2]{4, 5};
+    combined += int[1]{6};
+
+    items := make(int[]);
+    items.append(2, 3);
+    items.prepend(1);
+    items.add(1, 8, 9);
+    items.append(items...);
+    free(items);
+    items = {}; // Re-create a freed dynamic array before using it again.
+
+    pointer := new(int[]);
+    *pointer = {1, 2};
+    free(*pointer);
+    free(pointer);
+
+    matrix := Matrix{2, 3}; // Value parameters initialize the field prefix.
+    matrix.data[0][0] = 7;
+}
+```
+
+An array's fixed length participates in type checking, and ordinary indexing
+checks its bounds. Two-binding indexing returns an element and a success flag.
+Buffers remain unchecked; their lexical length is available to `len`, but is
+erased when passed to a function. A sized buffer cast restores lexical length
+metadata. Dynamic arrays own a heap payload and expose length and capacity; replacing,
+extending, or freeing a dynamic array releases its previous allocation. Dynamic array value
+copies are independent, including nested dynamic arrays. Strings use the same heap
+dynamic array representation, with read-only bytes and capacity fixed to length.
+
+Dynamic arrays support `append(...values)`, `prepend(...values)`, and
+`add(index, ...values)`. `remove(index)` removes and returns the indexed element,
+shifting later elements left; `pop()` removes and returns the last element.
+Both decrease length by one and report a bounds error for an invalid index or
+an empty array. Removed strings and nested arrays retain independent owned
+storage. These mutation methods are unavailable on strings.
+
+`new(T)` accepts any supported storage type, allocates zeroed heap memory
+(including padding), initializes the language value to `zero(T)`, and returns
+`*T`. For example, `new(int)` returns a pointer to zero and `new(string)` returns
+a pointer to an empty string. Scalars, structs, fixed arrays, dynamic arrays, pointers,
+named types, and concrete generic types use the same allocation path. Even
+zero-sized types receive distinct allocations. Allocation failure traps;
+`new(void)` is rejected because `void` has no storage. Release the allocation
+with `free(pointer)` when it is no longer needed.
+
+For compatibility, `T[count]` without a literal body in an expression still
+constructs a dynamic array; use `value: T[count]` or `T[count]{...}` to construct an array.
+Legacy struct value parameters written with the type first are also accepted.
+
+Parameterized struct array fields currently use indirect internal storage.
+Their lengths, initialization, indexing, and value copies work, but their exact
+inline memory layout is not yet the layout specified in `types.txt`. The dynamic array
+header also uses the compiler's indirect value ABI. Do not rely on either layout
+for C interoperability; pass a collection's `.data` buffer explicitly.

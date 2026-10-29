@@ -704,6 +704,7 @@ static void rewriteExpr(Rewrite *r, Local *scope, expr *e) {
         rewriteType(r, scope, &v->elementType); rewriteExpr(r, scope, &v->count); break;
     }
     case EXPR_TYPE_TYPE_NAME:
+    case EXPR_TYPE_MAKE: case EXPR_TYPE_NEW:
     case EXPR_TYPE_ZERO: rewriteType(r, scope, &((struct expr_zero *)e->underlying)->type); break;
     case EXPR_TYPE_FUNCTION: rewriteFunction(r, scope, e->underlying, 0); break;
     default: break;

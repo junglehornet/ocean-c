@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix="ocean bounds ") as directory:
             "return", "s[3]", ["main"])
     failure('func main() int { s := "a" + "b"; return s[-1]; }', -1, 2,
             "return", "s[-1]", ["main"])
-    failure('func main() { s := "abc"; s.data = {1, 2, 3, 4}; }', 4, 3,
+    failure('func main() { s: i8[] = {97, 98, 99}; s.data = {1, 2, 3, 4}; }', 4, 3,
             "s.data", "data", ["main"], message="Array data literal too large: literal length 4 exceeds array length 3")
 
     failure("func read(xs ...int) int { return xs[0]; }\nfunc main() int { return read(); }", 0, 0,

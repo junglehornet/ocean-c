@@ -157,7 +157,7 @@ int main(void) {
     analyze("func main() { a: int[] = float[3]; }", 0);
     analyze("func main() { a := int[false]; }", 0);
     analyze("func main() { len(3); }", 0);
-    analyze("func main() { b: buffer<int>[3]; len(b); }", 0);
+    analyze("func main() { b: buffer<int>[3]; len(b); }", 1);
     analyze("func main() { a := int[2]; b: buffer<int>[2]; a.data = b; }", 1);
     analyze("func main() { a := int[2]; n := len(a, a); }", 0);
     analyze("func main() { a: int[][] = int[][2]; a[0] = int[3]; n := len(a[0]); }", 1);
@@ -233,7 +233,7 @@ int main(void) {
     analyze("struct P { x int; } struct Box<T any>(T parameter) { value T; } func use(b Box<Box<P>>) { b.parameter.value.x = 4; }", 0);
     analyze("struct Box<T any>(T parameter) { +(x int) { self.parameter.x = x; } }", 0);
     analyze("struct Box<T any>(T parameter) { data T; } func main() { b: Box<int> = {1, 2}; b.data = 3; }", 1);
-    analyze("func use(a i8[]) {} func main() { s: string = i8[]{65}; a: i8[] = \"abc\"; use(s); s = a + s; s += a; s.data = {66}; s[0] = 67; n := len(s); }", 1);
+    analyze("func use(a i8[]) {} func main() { s: string = i8[]{65}; a: i8[] = \"abc\"; use(s); s = a + s; s += a; n := len(s); }", 1);
     analyze("func main() { s := \"abc\"; s.size = 0; }", 0);
     analyze("func main() { s: string = int[]{1}; }", 0);
     analyze("func main() { s := \"abc\" + 1; }", 1);

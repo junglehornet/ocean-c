@@ -181,7 +181,7 @@ int main(void) {
     invalid("struct Bad(,int x) {}"); invalid("struct Bad(int x,,) {}");
     invalid("struct Bad(int x {}"); invalid("struct Bad(int x);");
     invalid("struct Bad(int x)[T any] {}");
-    invalid("struct Bad(index x) {}");
+    valid("struct Named(index x) {}", 1);
     r = parse("struct Bad(int width, width) {} struct Good(int length) { data int[length]; }");
     assert(r.hasError && r.nStatements == 1 && r.statements[0].type == STMT_STRUCT &&
            ((struct stmt_struct*)r.statements[0].value)->nVarParams == 1);
@@ -407,7 +407,7 @@ int main(void) {
     valid("type Nested Box[map[string][]int, struct { x int; }, func()];", 1);
     valid("type Array [2 * (pkg.Width + 1)]int;", 1);
     valid("type Matrix int[height + 1][width << 2];", 1);
-    valid("type Slice []int; type Suffix int[];", 2);
+    valid("type DynamicArray []int; type Suffix int[];", 2);
     valid("type Callback func();", 1);
     invalid("type Bad struct { garbage; };");
     invalid("type Bad struct { y int x int; };");
@@ -473,7 +473,7 @@ int main(void) {
     e = expression("array[i]->int;"); assert(e.type == EXPR_TYPE_TYPECAST);
     e = expression("a - b > c;"); bin(bin(e, EXPR_GREATER_THAN)->left, EXPR_SUBTRACT);
     invalid("ptr->string*;"); invalid("ptr->pkg.Type;");
-    invalid("ptr->[]int;"); invalid("ptr->Box[int];");
+    invalid("ptr->[]int;"); assert(expression("ptr->Box[int];").type == EXPR_TYPE_TYPECAST);
     invalid("funcPtr->string()*;"); invalid("funcPtr->(int, float)(int)*;");
     invalid("number->;"); invalid("number->();"); invalid("number->(int;");
     invalid("number->(int garbage);"); invalid("number->index;");

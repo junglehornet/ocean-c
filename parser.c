@@ -215,9 +215,23 @@ static expr atomicImpl(parserState *state) {
         }
         case UNDERSCORE:
         case ANY:
-        case IDENTIFIER:
-            if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "zero") &&
+        case IDENTIFIER: {
+            parserState constructorTrial = *state;
+            constructorTrial.quietErrors = 1;
+            char constructorSyntax = 0;
+            if (tok.type == IDENTIFIER && (!strcmp(tok.lexeme, "make") || !strcmp(tok.lexeme, "new")) &&
                 peek(state).type == LEFT_PAREN) {
+                advance(&constructorTrial); advance(&constructorTrial);
+                constructorSyntax = parseSignatureType(&constructorTrial, 0) &&
+                    currentToken(&constructorTrial).type == RIGHT_PAREN;
+            }
+            if (tok.type == IDENTIFIER && (!strcmp(tok.lexeme, "zero") || (constructorSyntax &&
+                 ((!strcmp(tok.lexeme, "make") && constructorTrial.tokenIndex >= 2 &&
+                   constructorTrial.tokens[constructorTrial.tokenIndex - 1].type == RIGHT_BRACKET) ||
+                  !strcmp(tok.lexeme, "new")))) &&
+                peek(state).type == LEFT_PAREN) {
+                enum exprType constructor = !strcmp(tok.lexeme, "make") ? EXPR_TYPE_MAKE :
+                    !strcmp(tok.lexeme, "new") ? EXPR_TYPE_NEW : EXPR_TYPE_ZERO;
                 advance(state);
                 tok = advance(state);
                 if (tok.type == RIGHT_PAREN) {
@@ -230,7 +244,7 @@ static expr atomicImpl(parserState *state) {
                 expect(RIGHT_PAREN, "Expected closing parenthesis after zero type", expr);
                 struct expr_zero zero = {.type = copySignatureSpan(state, start, state->tokenIndex)};
                 advance(state);
-                CONSTRUCT_EXPR_RES(EXPR_TYPE_ZERO, zero, result);
+                CONSTRUCT_EXPR_RES(constructor, zero, result);
                 return result;
             }
             struct expr_identifier ident = {0};
@@ -242,6 +256,7 @@ static expr atomicImpl(parserState *state) {
             *(struct expr_identifier*) ident_expr.underlying = ident;
             tok = advance(state);
             return ident_expr;
+        }
         case LITERAL_INT:
             struct expr_literal lit_int = {0};
             lit_int.type = LITERAL_TYPE_INT;
@@ -1639,7 +1654,8 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
         if (tok.type != IDENTIFIER && tok.type != ANY)
             return signatureError(state, "Expected cast type; multi-token types require parentheses");
         if (!checkTypeName(state, tok)) return 0;
-        if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "buffer") && peek(state).type == LESS_THAN) {
+        if (tok.type == IDENTIFIER && ((!strcmp(tok.lexeme, "buffer") && peek(state).type == LESS_THAN) ||
+            peek(state).type == LEFT_BRACKET)) {
             if (!parseSignatureType(state, state->syntaxDepth + 1)) return 0;
         } else advance(state);
     }
@@ -2156,7 +2172,15 @@ static stmt parseStruct(parserState *state) {
     if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
     SET_TOK;
     if (tok.type == LEFT_PAREN) {
-        if (!parseSignatureFields(state, &valueParams, 0, 0)) goto invalid;
+        token first = peek(state);
+        const char *oldTypes[] = {"int", "uint", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "float", "f32", "f64", "bool", "string", "buffer", "byte", "rune"};
+        char typeFirst = first.type != IDENTIFIER || (first.lexeme[0] >= 'A' && first.lexeme[0] <= 'Z') ||
+            (state->tokenIndex + 2 < state->tokensLen && state->tokens[state->tokenIndex + 2].type == DOT);
+        for (size_t i = 0; i < sizeof(oldTypes) / sizeof(*oldTypes); i++)
+            if (!strcmp(first.lexeme, oldTypes[i])) typeFirst = 1;
+        if (!(typeFirst ? parseSignatureFields(state, &valueParams, 0, 0) :
+                          parseNameFirstParameters(state, &valueParams, 0))) goto invalid;
+        if (valueParams.variadic) { signatureError(state, "Struct value parameters cannot be variadic"); goto invalid; }
         for (size_t i = 0; i < valueParams.count; i++) {
             if (valueParams.names[i].type != IDENTIFIER) {
                 signatureError(state, "Struct value parameters require names");

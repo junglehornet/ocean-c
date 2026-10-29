@@ -95,9 +95,12 @@ func main() int {
         if short in size_names or short in {"typeSize", "bytes"}:
             # Constant expressions retain target layout, rather than guessing padding.
             assert "ret i64 ptrtoint (ptr getelementptr (" in body, (name, body)
-            # A by-value receiver may copy its owned arrays before the constant return.
-            forbidden = r'= ptrtoint\b' if short == "bytes" else r'= (getelementptr|ptrtoint|load|call)\b'
-            assert not re.search(forbidden, body), (name, body)
+            # Receiver value copies and inline ownership cleanup may use GEP,
+            # loads, calls, and ptrtoint for private allocation metadata. The
+            # sizeof result itself must still be the constant return above.
+            if short != "bytes":
+                forbidden = r'= (getelementptr|ptrtoint|load|call)\b'
+                assert not re.search(forbidden, body), (name, body)
         if short in {"defaultOf", "typeSize", "bytes"}:
             specializations += 1
     assert specializations == 5, bodies.keys()

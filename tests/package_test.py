@@ -143,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
     invoke("run", ".", status=10)
 
     write(root / "helper.oc", 'package main; struct S { text string; } '
-          'p: *S = &S{text: "safe"}; text: buffer<i8>[] = "hello\\0".data; '
+          'p: *S = &S{text: "safe"}; text: i8[] = "hello\\0"; '
           'func helper() { a := int[10000]; a.data = {8}; }')
     write(root / "main.oc", 'package main; func main() int { helper(); '
           'if (p.text != "safe" || text[0] != 104 || text[5] != 0) return 1; return 0; }')
@@ -308,6 +308,17 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
     write(root / 'main.oc', 'package main; extern i32 getchar(); '
           'func main() int { return extern.getchar(); }')
     invoke('run', '.', status=65, input='A')
+    # A runtime trap must be visible even when the program prints nothing.
+    write(root / 'main.oc', 'package main; struct Stack<T> { underlying T[]; top int; } '
+          'func (s *Stack<T>) grow() { s.underlying = T[1]; } '
+          'func main() { s: Stack<int> = {}; s.grow(); p: *int = null; *p = 1; }')
+    result = invoke('run', '.', status=128 + signal.SIGILL,
+                    contains=f'program terminated by signal {signal.SIGILL}')
+    assert result.stdout == '', result
+    assert signal.strsignal(signal.SIGILL) in result.stderr, result
+    # Diagnostics from the child continue to pass through stderr.
+    write(root / 'main.oc', 'package main; func main() { panic "visible panic"; }')
+    invoke('run', '.', status=1, contains='Panic: visible panic')
     write(root / 'main.oc', 'package main; func main() { for (;;) {} }')
     child = subprocess.Popen([compiler, 'run', '.'], cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + 10

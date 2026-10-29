@@ -294,7 +294,8 @@ struct Buffer(u64 capacity) {
 }
 ```
 
-Struct value parameters retain type-before-name declarations (`int size`). Grouped names share a type;
+Struct value parameters accept name-before-type declarations (`size int`, `height, width int`).
+Legacy type-before-name declarations (`int size`) remain accepted. Grouped names share a type;
 trailing commas and empty lists are accepted. Each parameter must have a name.
 Duplicate names, collisions with type parameters, blank/unnamed parameters,
 variadics, and default values are rejected. `index` remains a valid value name.
@@ -510,14 +511,11 @@ and invalid keys are rejected. Native literal tests also verify single evaluatio
 array expansion, storage widths, zero values, and stack restoration.
 
 
-Strings are aliases for `i8[]`, with no implicit terminator. Backend regressions
-cover signed byte storage and casts, byte counts, embedded zeros, aliasing,
-empty strings, concatenation and `+=`, independent concatenation storage,
-mutable `.data`, nested default strings, string expansion, and loop stack
-restoration. String cases also execute saved LLVM IR with `-O2`. Bounds
-regressions verify source snippets and call traces for string indexing and
-oversized data literals. C integration uses explicit raw buffers and lengths;
-C string format tests append their own zero byte.
+Strings are immutable heap-backed `i8` dynamic arrays with capacity equal to length.
+Regression tests cover signed bytes, embedded zeros, empty strings, read-only
+indexing, concatenation, reassignment, independent mutable byte copies, and C
+calls using temporary data buffers. Element writes and in-place growth are
+rejected. Literal storage has no implicit zero terminator.
 
 
 Native struct regressions execute compiler output and optimized saved LLVM IR.
@@ -714,3 +712,47 @@ operations, aggregate layout and value copies, forward/local/imported types,
 recursive pointers, alias chains and generic struct aliases, methods and method
 sets, generic constraints, native varargs, boxed identity, cycle diagnostics, and
 rejection of implicit interchange. Valid programs run at `-O0` and `-O2`.
+
+
+`collection_types_test.py` exercises the syntax and behavior in `types.txt` at
+`-O0` and `-O2`: array length identity, inline fixed-array sizes, array addition,
+checked and two-binding indexing, buffer construction and erased parameter
+lengths, sized buffer/array casts, dynamic array mutation, independent nested copies,
+`make`, `new`, `free`, recreation after free, immutable strings, and dependent
+struct array fields. Parameterized array fields currently use indirect storage;
+this suite tests their language behavior rather than asserting an inline ABI.
+Earlier references to the old `T[]` inline payload layout describe the legacy
+implementation; dynamic arrays now use length/capacity/data headers and heap payloads.
+
+
+`new_allocation_test.py` checks `new(T)` at `-O0` and `-O2` for scalar widths,
+floating-point types, booleans, strings, pointers, nested structs, fixed arrays,
+buffers, dynamic arrays, zero-sized types, named types, aliases, and generic allocation.
+It verifies independent allocations, writable pointers, heap lifetime across
+function returns, string growth through pointers, zeroed aggregate padding, and
+rejection of `new(void)`.
+
+
+`string_dynamic_array_ownership_test.py` checks read-only strings, capacity/length
+invariants, safe conversions between strings and dynamic arrays of bytes, and memory ownership at `-O0` and `-O2`.
+A native allocator wrapper counts live `malloc`/`calloc` allocations and checks
+every `free`, including invalid frees of static or stack storage. Repeated
+assignment, self-assignment, concatenation, `*string` aliases, function returns,
+variadic forwarding, nested dynamic arrays, struct fields, loop conditions/updates, and
+C buffer calls must keep allocation counts bounded and reach zero after freeing
+the final values.
+
+
+Function/scope ownership regressions in `string_dynamic_array_ownership_test.py` also
+verify automatic cleanup of ordinary local values, independent by-value
+arguments from both stack values and heap pointees, recursive/early/aggregate
+returns, and nested values on loop exits. Pointer variables, aliases, fields,
+and returned pointers must leave the pointee alive for the caller. The generated
+IR must contain no dynamic array tracking/cleanup registry or destructor callbacks;
+cleanup is emitted as inline branches and frees. Allocator-wrapped native runs
+at `-O0` and `-O2` verify bounded allocation counts and no invalid/double frees.
+
+Dynamic array removal tests cover `remove(index)` and `pop()` return values,
+order and length changes, bounds failures, invalid arguments, immutable string
+rejection, and independent ownership of removed strings, records, and nested
+arrays at `-O0` and `-O2`, including discarded results and heap receivers.

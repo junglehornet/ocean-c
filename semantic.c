@@ -21,6 +21,8 @@ struct Type {
     struct stmt_interface *interface;
     struct Context *context;
     int mixed;
+    int dynamicArray;
+    int immutableString;
     Type **arguments;
     size_t nArguments;
     size_t count;
@@ -36,6 +38,8 @@ typedef struct Symbol {
     Type *type;
     int isType;
     int immutable;
+    int freed;
+    struct stmt_func *ownerFunction;
     struct Symbol *next;
 } Symbol;
 typedef struct Scope {
@@ -48,6 +52,7 @@ typedef struct Allocation {
 } Allocation;
 typedef struct Context {
     size_t errors;
+    int externalArguments;
     unsigned typeIndirection;
     parseResult *program;
     Scope *scope;
@@ -58,7 +63,7 @@ typedef struct Context {
 static Type nullValue = {.name = "null"};
 static Type unknown = {.name = "?"}, integer = {.name = "int"}, floating = {.name = "float"},
             signedByte = {.name = "i8"},
-            string = {.name = "dynamic-array", .element = &signedByte},
+            string = {.name = "dynamic-array", .element = &signedByte, .dynamicArray = 1, .immutableString = 1},
             boolean = {.name = "bool"}, any = {.name = "any"}, nothing = {.name = "void"};
 static void *allocate(Context *c, size_t n) {
     void *p = calloc(1, n);
@@ -107,7 +112,7 @@ static Symbol *declare(Context *c, token name, Type *type, int isType) {
             return NULL;
         }
     Symbol *v = allocate(c, sizeof(*v));
-    *v = (Symbol){.name = name, .type = type, .isType = isType, .next = c->scope->symbols};
+    *v = (Symbol){.name = name, .type = type, .isType = isType, .ownerFunction = c->function, .next = c->scope->symbols};
     c->scope->symbols = v;
     return v;
 }
@@ -178,12 +183,15 @@ static int compatibleTypes(Type *a, Type *b) {
     if ((!strcmp(a->name, "buffer") && a->bufferFamily) ||
         (!strcmp(b->name, "buffer") && b->bufferFamily == 1))
         return matchesTypeConstraint(a, b);
+    if (!strcmp(a->name, "pointer") && !strcmp(b->name, "pointer") && a->element && b->element &&
+        representation(a->element)->immutableString != representation(b->element)->immutableString) return 0;
     if (a->element || b->element)
         return a->element && b->element && !strcmp(a->name, b->name) &&
                ((a->element == &signedByte || b->element == &signedByte)
                     ? a->element == b->element : compatibleTypes(a->element, b->element)) &&
                (!strcmp(a->name, "buffer")
-                    ? (a->bufferSize != 1 || (b->bufferSize == 1 && a->count == b->count))
+                    ? (a->bufferSize == 0 || (a->bufferSize == b->bufferSize &&
+                       (a->bufferSize != 1 || a->count == b->count)))
                     : a->count == b->count);
     if (a->function || b->function)
         return a->function == b->function;
@@ -262,6 +270,7 @@ static Type *typeOf(Context *c, typeTokens span) {
     if (arrayElementType(span, &arrayElement)) {
         Type *v = allocate(c, sizeof(*v));
         v->name = "dynamic-array";
+        v->dynamicArray = 1;
         v->mixed = span.tokens[0].type == MIXED;
         v->element = typeOf(c, arrayElement);
         if (v->mixed && canonical(v->element) != &any && !v->element->interface)
@@ -269,6 +278,23 @@ static Type *typeOf(Context *c, typeTokens span) {
         if (v->element == &nothing) error(c, t, "void is not an array element storage type");
         if (!strcmp(v->element->name, "buffer") && v->element->bufferSize == 2)
             error(c, t, "array elements must have a fixed storage size");
+        return v;
+    }
+    typeTokens sizedElement, sizedDimension;
+    if (sizedArrayTypeParts(span, &sizedElement, &sizedDimension)) {
+        Type *v = allocate(c, sizeof(*v));
+        v->name = "fixed-array";
+        v->element = typeOf(c, sizedElement);
+        if (v->element == &nothing) error(c, t, "void is not an array element storage type");
+        v->dimension = sizedDimension;
+        v->bufferSize = bufferDimensionKind(sizedDimension);
+        if (v->bufferSize < 0 && !(sizedDimension.nTokens == 1 && sizedDimension.tokens[0].type == LITERAL_INT &&
+                                  sizedDimension.tokens[0].numValue.integer == 0))
+            error(c, t, "array length must be nonnegative");
+        if (sizedDimension.nTokens == 1 && sizedDimension.tokens[0].type == LITERAL_INT) {
+            v->bufferSize = 1;
+            v->count = (size_t)sizedDimension.tokens[0].numValue.integer;
+        }
         return v;
     }
     if (t.type == MIXED) {
@@ -510,6 +536,12 @@ static void formatType(FILE *out, Type *t, unsigned depth) {
         if (t->mixed) fputs("mixed ", out);
         formatType(out, t->element, depth + 1);
         fputs("[]", out);
+    } else if (!strcmp(t->name, "fixed-array")) {
+        formatType(out, t->element, depth + 1);
+        fputc('[', out);
+        if (t->bufferSize == 1) fprintf(out, "%zu", t->count);
+        else for (size_t i = 0; i < t->dimension.nTokens; i++) fputs(t->dimension.tokens[i].lexeme, out);
+        fputc(']', out);
     } else if (!strcmp(t->name, "buffer")) {
         if (t->bufferFamily == 1) { fputs("buffer", out); return; }
         fputs("buffer<", out);
@@ -568,14 +600,15 @@ static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
         }
         Type *array = allocate(c, sizeof(*array));
         array->name = "dynamic-array";
+        array->dynamicArray = 1;
         array->element = expectedExpression(c, &unknown, &v->values[0], at);
         if (array->element == &nullValue)
             error(c, at, "null array elements require an explicit pointer element type");
         v->inferredArray = 1;
         target = array;
     }
-    if (!strcmp(target->name, "buffer") || !strcmp(target->name, "dynamic-array")) {
-        if (!strcmp(target->name, "buffer") && target->bufferSize == 1 &&
+    if (!strcmp(target->name, "buffer") || !strcmp(target->name, "dynamic-array") || !strcmp(target->name, "fixed-array")) {
+        if ((!strcmp(target->name, "buffer") || !strcmp(target->name, "fixed-array")) && target->bufferSize == 1 &&
             v->nEntries > target->count)
             error(c, at, "too many elements in buffer initializer");
         Type *shared = NULL;
@@ -649,7 +682,7 @@ static void checkArrayDataLiteral(Context *c, Type *element, struct expr_composi
     }
 }
 static void checkBufferDimension(Context *c, Type *t, token at) {
-    if (strcmp(t->name, "buffer") || t->bufferSize != 2)
+    if ((strcmp(t->name, "buffer") && strcmp(t->name, "fixed-array")) || t->bufferSize != 2)
         return;
     expr *size = parseBufferDimension(t->dimension);
     if (!size) {
@@ -670,6 +703,16 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
         Type *t = assignmentContext && i < nExpected
                       ? expectedExpression(c, expected[i], &values[i], at)
                       : expression(c, &values[i]);
+        if (assignmentContext && count == 1 && nExpected == 2 && values[i].type == EXPR_TYPE_INDEX) {
+            struct expr_index *index = values[i].underlying;
+            Type *parent = expression(c, &index->parent);
+            if (!strcmp(parent->name, "dynamic-array") || !strcmp(parent->name, "fixed-array")) {
+                index->tryIndex = 1;
+                Type **items = allocate(c, 2 * sizeof(*items));
+                items[0] = t; items[1] = &boolean;
+                return (TypeList){items, 2};
+            }
+        }
         if (!strcmp(t->name, "tuple")) {
             if (count == 1)
                 return (TypeList){t->arguments, t->nArguments};
@@ -876,6 +919,11 @@ static void function(Context *c, struct stmt_func *f) {
     }
     for (size_t i = 0; i < f->nParams; i++) {
         Type *t = typeOf(c, f->paramTypeNames[i]);
+        if (!f->isVariadic && !strcmp(t->name, "buffer") && t->element) {
+            Type *parameter = allocate(c, sizeof(*parameter)); *parameter = *t;
+            parameter->bufferSize = 0; parameter->count = 0; parameter->dimension = (typeTokens){0};
+            t = parameter;
+        }
         if (f->isVariadic && !f->isExtern && i + 1 == f->nParams) {
             Type *list = allocate(c, sizeof(*list));
             list->name = "dynamic-array";
@@ -1126,7 +1174,7 @@ static int typeExpression(Context *c, expr *e, typeTokens *out) {
         typeTokens base;
         if (!typeExpression(c, &v->parent, &base))
             return 0;
-        char sizedBuffer = isBufferType(base) && v->index.type == EXPR_TYPE_LITERAL &&
+        char sizedBuffer = v->index.type == EXPR_TYPE_LITERAL &&
                            ((struct expr_literal *)v->index.underlying)->type == LITERAL_TYPE_INT;
         if (v->index.type && !sizedBuffer) {
             free(base.tokens);
@@ -1156,6 +1204,10 @@ static Type *recordReceiver(Type *t) {
 /* Immutability protects bindings/value fields, while indexed reference contents stay writable. */
 static token immutableTarget(Context *c, expr *e) {
     token none = {.type = EOF_TOKEN};
+    if (e->type == EXPR_TYPE_INDEX) {
+        struct expr_index *v = e->underlying;
+        if (representation(expression(c, &v->parent))->immutableString) return e->location;
+    }
     if (e->type == EXPR_TYPE_IDENTIFIER) {
         token name = ((struct expr_identifier *)e->underlying)->lexeme;
         Symbol *symbol = lookup(c, name.lexeme);
@@ -1166,7 +1218,8 @@ static token immutableTarget(Context *c, expr *e) {
         Type *rawParent = expression(c, &v->parent);
         Type *parent = recordReceiver(rawParent);
         token field = ((struct expr_identifier *)v->field.underlying)->lexeme;
-        if (!strcmp(parent->name, "dynamic-array") && !strcmp(field.lexeme, "size"))
+        if (!strcmp(parent->name, "dynamic-array") &&
+            (!strcmp(field.lexeme, "size") || !strcmp(field.lexeme, "length") || !strcmp(field.lexeme, "capacity")))
             return field;
         if (parent->record) {
             for (size_t i = 0; i < parent->record->nVarParams; i++)
@@ -1188,6 +1241,9 @@ static token immutableTarget(Context *c, expr *e) {
     return none;
 }
 static void mutationError(Context *c, expr *target, token at, const char *fallback) {
+    if (target->type == EXPR_TYPE_INDEX && representation(expression(c, &((struct expr_index *)target->underlying)->parent))->immutableString) {
+        error(c, at, "strings are immutable; reassign the string instead"); return;
+    }
     token immutable = immutableTarget(c, target);
     if (immutable.type != EOF_TOKEN)
         error(c, immutable, "cannot modify immutable struct parameter or field");
@@ -1244,6 +1300,17 @@ static Type *expression(Context *c, expr *e) {
     if (!e || !e->underlying)
         return &unknown;
     switch (e->type) {
+    case EXPR_TYPE_MAKE: case EXPR_TYPE_NEW: {
+        Type *t = typeOf(c, ((struct expr_zero *)e->underlying)->type);
+        if (e->type == EXPR_TYPE_MAKE) {
+            if (!t->dynamicArray) error(c, at, "make requires a dynamic array type T[]");
+            return t;
+        }
+        if (t == &nothing) error(c, at, "new requires a storage type");
+        Type *pointer = allocate(c, sizeof(*pointer));
+        pointer->name = "pointer"; pointer->element = t;
+        return pointer;
+    }
     case EXPR_TYPE_ZERO: {
         struct expr_zero *v = e->underlying;
         Type *t = typeOf(c, v->type);
@@ -1275,6 +1342,7 @@ static Type *expression(Context *c, expr *e) {
             error(c, t, fileExtern(c, t) ? "extern functions must be called with extern.name(...)" : "unresolved name");
             return &unknown;
         }
+        if (s->freed) error(c, t, "dynamic array has been freed; re-create it before use");
         return s->type;
     }
     case EXPR_TYPE_LITERAL: {
@@ -1386,7 +1454,24 @@ static Type *expression(Context *c, expr *e) {
         struct expr_array_new *v = e->underlying;
         Type *t = allocate(c, sizeof(*t));
         t->name = "dynamic-array";
+        t->dynamicArray = 1;
         t->element = typeOf(c, v->elementType);
+        if (v->buffer || (!strcmp(t->element->name, "buffer") && t->element->bufferSize == 0)) {
+            if (!v->buffer) {
+                t = t->element;
+                v->elementType = (typeTokens){v->elementType.nTokens - 3, v->elementType.tokens + 2};
+                v->buffer = 1;
+            } else {
+                t->name = "buffer";
+            }
+            t->bufferFamily = 0;
+            t->bufferSize = 2;
+            if (v->count.type == EXPR_TYPE_LITERAL &&
+                ((struct expr_literal *)v->count.underlying)->type == LITERAL_TYPE_INT) {
+                t->bufferSize = 1;
+                t->count = *(long *)((struct expr_literal *)v->count.underlying)->value;
+            }
+        }
         if (t->element->interface && (t->element->interface->nMethods || t->element->interface->nConstraints) &&
             !(v->count.type == EXPR_TYPE_LITERAL &&
               ((struct expr_literal *)v->count.underlying)->type == LITERAL_TYPE_INT &&
@@ -1409,6 +1494,51 @@ static Type *expression(Context *c, expr *e) {
     }
     case EXPR_TYPE_CALL: {
         struct expr_call *v = e->underlying;
+        if (v->func.type == EXPR_TYPE_DOT) {
+            struct expr_dot *dot = v->func.underlying;
+            Type *parent = expression(c, &dot->parent);
+            const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
+            if (parent->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop"))) {
+                if (parent->immutableString) error(c, at, "strings are immutable; reassign the string instead");
+                if (!writable(c, &dot->parent)) error(c, at, "dynamic array mutation requires a writable dynamic array");
+                size_t count = !strcmp(name, "remove") ? 1 : 0;
+                if (v->nParams != count || v->spread)
+                    error(c, at, "remove requires exactly one index; pop requires no arguments");
+                for (size_t i = 0; i < v->nParams; i++)
+                    check(c, &integer, expression(c, &v->params[i]), at);
+                return parent->element;
+            }
+            if (parent->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add"))) {
+                if (parent->immutableString) error(c, at, "strings are immutable; reassign the string instead");
+                if (!writable(c, &dot->parent)) error(c, at, "dynamic array mutation requires a writable dynamic array");
+                size_t first = !strcmp(name, "add") ? 1 : 0;
+                if (v->nParams < first) error(c, at, "dynamic array add requires an index");
+                for (size_t i = 0; i < v->nParams; i++) {
+                    Type *actual = expression(c, &v->params[i]);
+                    if (first && i == 0) check(c, &integer, actual, at);
+                    else if (v->spread && i + 1 == v->nParams) {
+                        if (strcmp(actual->name, "dynamic-array") && strcmp(actual->name, "fixed-array"))
+                            error(c, at, "expanded dynamic array argument must be a collection");
+                        else check(c, parent->element, actual->element, at);
+                    } else check(c, parent->element, actual, at);
+                }
+                return &nothing;
+            }
+        }
+        if (v->func.type == EXPR_TYPE_IDENTIFIER &&
+            !strcmp(((struct expr_identifier *)v->func.underlying)->lexeme.lexeme, "free") && !lookup(c, "free")) {
+            if (v->nParams != 1 || v->spread) error(c, at, "free requires exactly one dynamic array or pointer");
+            for (size_t i = 0; i < v->nParams; i++) {
+                Type *arg = expression(c, &v->params[i]);
+                if (!arg->dynamicArray && strcmp(arg->name, "pointer")) error(c, at, "free requires a dynamic array or pointer");
+                if (arg->dynamicArray && v->params[i].type == EXPR_TYPE_IDENTIFIER) {
+                    Symbol *binding = lookup(c, ((struct expr_identifier *)v->params[i].underlying)->lexeme.lexeme);
+                    if (binding && binding->ownerFunction == c->function && c->function) binding->freed = 1;
+                }
+            }
+            return &nothing;
+        }
+
         if (v->func.type == EXPR_TYPE_IDENTIFIER &&
             !((struct expr_identifier *)v->func.underlying)->externReference &&
             !strcmp(((struct expr_identifier *)v->func.underlying)->lexeme.lexeme, "len") &&
@@ -1417,8 +1547,9 @@ static Type *expression(Context *c, expr *e) {
                 error(c, at, "len requires exactly one array argument");
             for (size_t i = 0; i < v->nParams; i++) {
                 Type *arg = expression(c, &v->params[i]);
-                if (strcmp(arg->name, "dynamic-array"))
-                    error(c, at, "len requires an array");
+                if (strcmp(arg->name, "dynamic-array") && strcmp(arg->name, "fixed-array") &&
+                    (strcmp(arg->name, "buffer") || !arg->bufferSize))
+                    error(c, at, "len requires an array, dynamic array, string, or buffer with known length");
             }
             return &integer;
         }
@@ -1454,7 +1585,9 @@ static Type *expression(Context *c, expr *e) {
             if (v->spread && i + 1 == v->nParams)
                 expected[i] = &unknown;
         }
+        if (f) c->externalArguments++;
         TypeList args = valueTypes(c, v->params, v->nParams, expected, v->nParams, at, 0);
+        if (f) c->externalArguments--;
         if (v->spread) {
             if (args.count != v->nParams) {
                 error(c, at, "expanded argument must be an array, not multiple return values");
@@ -1506,6 +1639,7 @@ static Type *expression(Context *c, expr *e) {
             if (!strcmp(field.lexeme, "data")) {
                 Type *array = expression(c, &target->parent);
                 if (!strcmp(array->name, "dynamic-array")) {
+                    if (array->immutableString) error(c, at, "strings are immutable; reassign the string instead");
                     if (v->right.type == EXPR_TYPE_COMPOSITE) {
                         struct expr_composite *literal = v->right.underlying;
                         if (literal->type.type) {
@@ -1554,11 +1688,29 @@ static Type *expression(Context *c, expr *e) {
                 check(c, targets[i], values.items[i], commaItem(&v->left, i)->location);
             return &nothing;
         }
-        Type *a = expression(c, &v->left);
+        Symbol *recreated = v->operation == EXPR_ASSIGNMENT && v->left.type == EXPR_TYPE_IDENTIFIER
+            ? lookup(c, ((struct expr_identifier *)v->left.underlying)->lexeme.lexeme) : NULL;
+        Type *a = recreated && recreated->freed ? recreated->type : expression(c, &v->left);
         Type *b = v->operation == EXPR_ASSIGNMENT ? expectedExpression(c, a, &v->right, at)
                                                   : expression(c, &v->right);
+        if (recreated) recreated->freed = 0;
         if (v->operation == EXPR_COMMA)
             return b;
+        if ((v->operation == EXPR_ADD || v->operation == EXPR_ADD_EQUALS) &&
+            !strcmp(a->name, "fixed-array") && !strcmp(b->name, "fixed-array")) {
+            check(c, a->element, b->element, at);
+            if (a->bufferSize != 1 || b->bufferSize != 1) {
+                error(c, at, "array concatenation requires fixed lengths"); return &unknown;
+            }
+            Type *result = allocate(c, sizeof(*result)); *result = *a;
+            result->count = a->count + b->count;
+            if (v->operation == EXPR_ADD_EQUALS) {
+                if (v->left.type != EXPR_TYPE_IDENTIFIER || !writable(c, &v->left))
+                    error(c, at, "array += requires a writable variable");
+                else lookup(c, ((struct expr_identifier *)v->left.underlying)->lexeme.lexeme)->type = result;
+            }
+            return result;
+        }
         if ((v->operation == EXPR_ADD || v->operation == EXPR_ADD_EQUALS) &&
             (!strcmp(a->name, "dynamic-array") || !strcmp(b->name, "dynamic-array"))) {
             int leftArray = !strcmp(a->name, "dynamic-array");
@@ -1677,8 +1829,12 @@ static Type *expression(Context *c, expr *e) {
     case EXPR_TYPE_TYPECAST: {
         struct expr_typecast *v = e->underlying;
         Type *a = expression(c, &v->child), *b = typeOf(c, v->type);
-        int aPointer = !strcmp(a->name, "pointer") || (!strcmp(a->name, "buffer") && !a->bufferSize);
-        int bPointer = !strcmp(b->name, "pointer") || (!strcmp(b->name, "buffer") && !b->bufferSize);
+        if (!strcmp(a->name, "pointer") && !strcmp(b->name, "pointer") && a->element && b->element &&
+            representation(a->element)->immutableString != representation(b->element)->immutableString)
+            error(c, at, "cannot cast between pointers to immutable strings and mutable values");
+        int aPointer = !strcmp(a->name, "pointer") || !strcmp(a->name, "buffer");
+        int bPointer = !strcmp(b->name, "pointer") || !strcmp(b->name, "buffer") || !strcmp(b->name, "fixed-array");
+        checkBufferDimension(c, b, at);
         int aInteger = representation(a) == &integer || representation(a) == &signedByte;
         int bInteger = representation(b) == &integer || representation(b) == &signedByte;
         int aNumeric = aInteger || representation(a) == &floating || representation(a) == &boolean;
@@ -1700,6 +1856,8 @@ static Type *expression(Context *c, expr *e) {
         if (t == &nullValue)
             error(c, at, "null needs a typed pointer before member access");
         token field = ((struct expr_identifier *)v->field.underlying)->lexeme;
+        if (t->dynamicArray && (!strcmp(field.lexeme, "length") || !strcmp(field.lexeme, "capacity"))) return &integer;
+
         if (definedType(t)) {
             struct stmt_func *method = findMethod(c, t, field.lexeme);
             if (method) {
@@ -1715,6 +1873,8 @@ static Type *expression(Context *c, expr *e) {
             if (!strcmp(field.lexeme, "size"))
                 return &integer;
             if (!strcmp(field.lexeme, "data")) {
+                if (t->immutableString && !c->externalArguments)
+                    error(c, field, "string data is read-only; copy to i8[] for mutable access");
                 Type *buffer = allocate(c, sizeof(*buffer));
                 buffer->name = "buffer";
                 buffer->element = t->element;
@@ -1840,6 +2000,7 @@ static void statement(Context *c, stmt *s) {
         if (declared == &nothing) error(c, at, "void is not a variable storage type");
         if (declared && declared->record && declared->record->nVarParams && !v->nInitValues)
             error(c, v->vars[0], "struct with parameters requires an initializer");
+        if (declared && !strcmp(declared->name, "fixed-array")) checkBufferDimension(c, declared, v->vars[0]);
         if (declared && !strcmp(declared->name, "buffer")) {
             checkBufferDimension(c, declared, v->vars[0]);
             if (declared->bufferSize == 0 && !v->nInitValues)

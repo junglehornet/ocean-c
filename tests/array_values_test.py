@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
                      "func main() int { n := 3; a := int[n]; a.data = {1, 2, 3}; "
                      "if (change(a) != 99 || a[0] != 1) return 1; return 0; }")
     callee = re.search(r'define i64 @"ocean.__pkg0_change"\(ptr %arg0\) \{(.*?)\n}', module, re.S).group(1)
-    assert "alloca i8, i64" in callee and "@llvm.memmove.p0.p0.i64" in callee, callee
+    assert 'malloc' in callee and 'getelementptr { i64, i64, ptr }' in callee, callee
     assert "ptr %arg0" in callee, callee
 
     program("func main() int { a := {1, 2, 3}; b := a; b[1] = 8; "
@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
                       "func main() { a := {0}; replace(&a); }")
     built = run([compiler, "build", str(source), "-o", str(executable)])
     assert built.returncode == 0, built.stdout + built.stderr
-    assert run([str(executable)]).returncode != 0, "pointer replacement grew beyond stack storage"
+    assert run([str(executable)]).returncode == 0, "dynamic array replacement through a pointer must allow growth"
 
     program("func recur(n int) int[] { if (n == 0) return int[]{1}; a := recur(n - 1); "
             "a[0]++; return a; } func main() int { a := recur(30); return a[0]; }", 31)

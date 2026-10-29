@@ -153,9 +153,15 @@ static int packageMain(int argc, char **argv) {
                 int childStatus;
                 while (waitpid(child, &childStatus, 0) < 0) {
                     if (errno == EINTR) continue;
+                    perror("ocean run: waitpid");
                     childStatus = -1; break;
                 }
                 runningChild = 0;
+                if (childStatus != -1 && WIFSIGNALED(childStatus)) {
+                    int signalNumber = WTERMSIG(childStatus);
+                    fprintf(stderr, "ocean run: program terminated by signal %d (%s)\n",
+                            signalNumber, strsignal(signalNumber));
+                }
                 status = childStatus == -1 ? 1 : WIFEXITED(childStatus) ? WEXITSTATUS(childStatus)
                                                                   : 128 + WTERMSIG(childStatus);
             }
