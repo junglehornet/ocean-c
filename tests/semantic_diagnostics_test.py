@@ -39,6 +39,10 @@ with tempfile.TemporaryDirectory(prefix="ocean semantic diagnostics ") as direct
              "func (n *Node<T>) length() int {\n"
              "\tif (n.value == null && n.next == null) return 0;\n"
              "\treturn 1;\n}\n", "T", "null", "n.value ==", "==")
+    mismatch("struct Stack<T> { underlying T[]; top int; }\n"
+             "func newStack<T>() Stack<T> {\n"
+             "\ts: Stack<T> = {0->any, 0};\n\treturn s;\n}\n"
+             "func main() {}", "any[]", "any", "s: Stack<T>", "->any")
     mismatch("func main() {\n\tx := 1;\n\tx = false;\n}", "int", "bool", "x =", "=")
     mismatch("func main() {\n\tx: int = false;\n}", "int", "bool", "x:", "x")
     mismatch("func main() {\n\tx := 1 + true;\n}", "int", "bool", "x :=", "+")

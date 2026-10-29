@@ -149,6 +149,11 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
 }
 static int compatibleTypes(Type *a, Type *b) {
     a = canonical(a);
+    // A boxed value does not establish the array shape or element type.
+    // Require explicit narrowing before assigning it to an array destination.
+    // Abstract generic parameters are checked when specialized, not boxed values.
+    if (!strcmp(a->name, "dynamic-array") && b == &any)
+        return 0;
     b = canonical(b);
     if (a == &nullValue || b == &nullValue) {
         Type *other = a == &nullValue ? b : a;
@@ -202,10 +207,10 @@ static int voidPointer(Type *t) {
     return !strcmp(t->name, "pointer") && t->element && canonical(t->element) == &nothing;
 }
 static int compatible(Type *expected, Type *actual) {
-    actual = canonical(actual);
-    if (!definedType(expected) && !definedType(actual) && voidPointer(expected) &&
-        (!strcmp(actual->name, "pointer") ||
-         (!strcmp(actual->name, "buffer") && actual->bufferSize == 0)))
+    Type *actualBase = canonical(actual);
+    if (!definedType(expected) && !definedType(actualBase) && voidPointer(expected) &&
+        (!strcmp(actualBase->name, "pointer") ||
+         (!strcmp(actualBase->name, "buffer") && actualBase->bufferSize == 0)))
         return 1;
     return compatibleTypes(expected, actual);
 }

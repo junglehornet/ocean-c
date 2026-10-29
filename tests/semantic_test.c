@@ -12,6 +12,14 @@ static parseResult analyze(char *source, int valid) {
     return p;
 }
 int main(void) {
+    analyze("struct Stack<T> { underlying T[]; top int; } func newStack<T>() Stack<T> { s: Stack<T> = {0->any, 0}; return s; } func main() {}", 0);
+    analyze("struct Stack<T> { underlying T[]; top int; } func newStack<T>() Stack<T> { s: Stack<T> = {0->any, 0}; return s; } func main() { s := newStack<int>(); }", 0);
+    analyze("func main() { xs: int[] = 0->any; }", 0);
+    analyze("func take(xs int[]) {} func main() { value: any = 0; take(value); }", 0);
+    analyze("func main() { xs: any[] = 0->any; }", 0);
+    analyze("func main() { xs: mixed any[] = 0->any; }", 0);
+    analyze("struct Stack<T> { underlying T[]; top int; } func newStack<T>() Stack<T> { s: Stack<T> = {zero(T[]), 0}; return s; } func main() { s := newStack<int>(); }", 1);
+    analyze("func main() { boxed := 0->any; xs: int[] = {1, 2}; value: any = xs; narrowed := value.(int[]); }", 1);
     analyze("func use(p *int[]) {} func main() { a := {1, 2}; use(&a); }", 1);
     analyze("func use(p *int[]) {} func main() { x := 1; a := {&x}; use(a); }", 0);
 
