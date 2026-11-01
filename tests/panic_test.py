@@ -94,7 +94,56 @@ with tempfile.TemporaryDirectory(prefix="ocean panic ") as directory:
             "stopped", ["stop", "main"], 'stop();', 'stop(')
     failure('func main() int { return panic "entry"; }', "entry", ["main"], 'return panic', 'return')
 
+    # Statement wrappers preserve declarations, successful values, and control flow.
+    for body in (
+        'forward panic return leaf();',
+        'forward panic { return leaf(); }',
+        'forward panic x := leaf(); return x;',
+        'forward panic if (true) return leaf(); else return 0;',
+        'forward panic { forward panic return leaf(); }',
+    ):
+        failure('func leaf() int { return panic "forwarded"; }\n'
+                f'func middle() int {{ {body} }}\n'
+                'func main() int { return middle(); }\n',
+                "forwarded", ["leaf", "middle", "main"], 'return middle()', 'middle(')
+
+    failure('func leaf() int { return panic "chain"; }\n'
+            'func inner() int { forward panic return leaf(); }\n'
+            'func outer() int { forward panic return inner(); }\n'
+            'func main() int { return outer(); }\n',
+            "chain", ["leaf", "inner", "outer", "main"], 'return outer()', 'outer(')
+    failure('func leaf() int { return panic "stop"; }\n'
+            'func inner() int { return leaf(); }\n'
+            'func outer() int { forward panic return inner(); }\n'
+            'func main() int { return outer(); }\n',
+            "stop", ["leaf", "inner", "outer", "main"], 'return leaf()', 'leaf(')
+    failure('func leaf() int { panic "local"; }\n'
+            'func middle() int { forward panic return leaf(); }\n'
+            'func main() int { return middle(); }\n',
+            "local", ["leaf", "middle", "main"])
+    failure('func middle() { forward panic { panic "hi"; } }\n'
+            'func main() { forward panic middle(); }\n',
+            "hi", ["middle", "main"], 'panic "hi"', 'panic "hi"')
+    failure('func middle() { forward panic { return panic "helo"; } }\n'
+            'func main() { middle(); }\n',
+            "helo", ["middle", "main"], 'middle();', 'middle(')
+
+    failure('func leaf(ok bool) int { if (ok) return 1; return panic "scope"; }\n'
+            'func middle() int { forward panic { leaf(true); } return leaf(false); }\n'
+            'func main() int { return middle(); }\n',
+            "scope", ["leaf", "middle", "main"], 'return leaf(false)', 'leaf(false)')
+    failure('func leaf() int { return panic "root"; }\n'
+            'func main() int { forward panic return leaf(); }\n',
+            "root", ["leaf", "main"], 'return leaf()', 'leaf(')
+    failure('func leaf<T>(x T) T { return panic "generic forward"; }\n'
+            'func middle() int { forward panic return leaf<int>(0); }\n'
+            'func main() int { return middle(); }\n',
+            "generic forward", ["leaf", "middle", "main"], 'return middle()', 'middle(')
+
     for text, error in [
+        ('forward panic {} func main() {}', 'only allowed inside a function'),
+        ('func main() { forward panic }', 'Expected'),
+
         ('func main() { panic 42; }', 'type mismatch'),
         ('func main() int { return panic 42; }', 'type mismatch'),
         ('func main() int { return panic; }', 'expected expression'),
@@ -111,6 +160,19 @@ with tempfile.TemporaryDirectory(prefix="ocean panic ") as directory:
     source.write_text('package main; func fail<T>(message T) { panic message; } func main() { fail<int>(42); }')
     invalid = run([compiler, "build", str(source), "-o", str(executable)])
     assert invalid.returncode > 0 and "string" in (invalid.stdout + invalid.stderr), invalid
+
+    source.write_text('package main; func value() int { return 3; } '
+                      'func main() int { forward panic x := value(); '
+                      'forward panic { x += value(); } '
+                      'forward panic if (x == 6) return x + 1; else return 0; }')
+    emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
+    assert emitted.returncode == 0, emitted.stderr
+    for optimization in ("-O0", "-O2"):
+        built = run([clang, "-Wno-override-module", optimization, "-x", "ir", str(ir),
+                     "-o", str(executable)])
+        assert built.returncode == 0, built.stderr
+        result = run([str(executable)])
+        assert result.returncode == 7 and result.stdout == "" and result.stderr == "", result
 
     source.write_text('package main; func main() int { if (false) panic "unreachable"; return 7; }')
     built = run([compiler, "build", str(source), "-o", str(executable)])

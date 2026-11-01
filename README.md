@@ -931,6 +931,35 @@ is preserved. In `main`, where there is no Ocean caller, it reports the
 `return panic` statement instead. Source excerpts remain embedded in the
 executable and do not depend on the source file existing at runtime.
 
+Use `forward panic <statement>` to forward returned panics from calls in a
+statement to the current function's caller. The statement can be a block:
+
+```oc
+func leaf() int {
+    return panic "invalid input";
+}
+
+func middle() int {
+    forward panic return leaf();
+}
+
+func main() int {
+    return middle(); // Diagnostic points here.
+}
+```
+
+For several calls, write `forward panic { first(); second(); }`. A single
+statement needs its usual semicolon; a block needs no trailing semicolon.
+Successful calls behave normally, and a wrapped declaration remains visible in
+its enclosing scope. Forwarding applies lexically to calls in the statement,
+including conditions and arguments. Consecutive forwarding callers move the
+location outward until a caller does not forward or the outermost call site is
+reached. Nested forwarding blocks in one function do not skip extra frames.
+Only failures originating from `return panic` participate in forwarding.
+Ordinary `panic` statements and other runtime errors retain their locations,
+even inside a forwarding block: `forward panic { panic "hi"; }` reports at
+`panic "hi"`. The message and full call trace are preserved.
+
 `T[]` is homogeneous: every element has the same concrete type, which must
 satisfy `T`. `mixed T[]` permits different concrete types, and each element must
 satisfy the interface `T`. `any` is equivalent to the empty `interface{}`.

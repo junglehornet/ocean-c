@@ -47,6 +47,7 @@ typedef struct stmt {
     enum stmtType type;
     void *value;
     token location; // First token of the statement.
+    char forwardPanic; // Forward returned panics from calls in this statement.
 } stmt;
 
 struct stmt_block {

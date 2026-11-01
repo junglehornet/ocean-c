@@ -2692,6 +2692,18 @@ static stmt parseStatement(parserState *state) {
 
 static stmt parseStatementImpl(parserState *state) {
     DEFINE_TOK;
+    // Contextual keyword: existing identifiers named forward remain valid.
+    if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "forward") && peek(state).type == PANIC) {
+        if (!state->functionDepth) {
+            signatureError(state, "Forward panic is only allowed inside a function");
+            return (stmt){0};
+        }
+        advance(state); // forward
+        advance(state); // panic
+        stmt result = parseStatement(state);
+        result.forwardPanic = 1;
+        return result;
+    }
     switch (tok.type) {
         case TYPE:
             return parseTypeDeclaration(state);
