@@ -33,6 +33,7 @@ struct parseResult {
     size_t nSources;
     sourceFile *sources;
     int isLibrary;
+    struct stmt_func *osSetArgs; // Trusted standard-library startup hook, borrowed from the AST.
 };
 
 static inline const char *programSource(parseResult *program, const char *filename) {

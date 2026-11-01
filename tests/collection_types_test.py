@@ -73,6 +73,34 @@ func main() int {
     z: int[0] = {}; if (len(z) != 0 || sizeof(z) != 8) return 7;
     return 0;
 }''')
+    program('''func take(a int[3]) int { return a[2]; }
+func main() int {
+    a := {1, 2, 3}; b: int[3] = a;
+    nested := {{1, 2}, {3, 4}};
+    dynamic: int[] = {5, 6}; dynamic.append(7);
+    buffer: buffer<int>[2] = {8, 9};
+    if (sizeof(a) != 32 || a.size != 24 || take(a) != 3 || b[1] != 2) return 1;
+    if (sizeof(nested) != 56 || nested[1][0] != 3) return 2;
+    if (len(dynamic) != 3 || buffer[1] != 9) return 3;
+    return 0;
+}''')
+    rejected('func main() { a := {1, 2}; b: int[3] = a; }', 'type mismatch')
+    rejected('func main() { a := {1, 2}; a.append(3); }', 'only has size and data')
+    program('''struct Item { value int; }
+counted := int[...]{1, 2, 3};
+func take(a int[3]) int { return a[2]; }
+func main() int {
+    empty := int[...]{};
+    narrow := i32[...]{4, 5,};
+    items := Item[...]{Item{7}, Item{8}};
+    nested := int[2][...]{{1, 2}, {3, 4}};
+    if (len(empty) != 0 || sizeof(empty) != 8 || take(counted) != 3) return 1;
+    if (sizeof(narrow) != 16 || len(narrow) != 2 || narrow[1] != 5) return 2;
+    if (len(items) != 2 || items[1].value != 8 || nested[1][0] != 3) return 3;
+    return 0;
+}''')
+    rejected('func main() { a := int[...]; }', 'requires a literal body')
+    rejected('func main() { a := int[...]{true}; }', 'type mismatch')
     rejected('func take(a int[3]) {} func main() { a: int[2]; take(a); }', 'type mismatch')
     rejected('func main() { a: int[-1]; }', 'array length must be nonnegative')
     rejected('func read(b buffer<int>) int { return len(b); } func main() {}', 'known length')

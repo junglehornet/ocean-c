@@ -325,7 +325,7 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
                 if (!shadowed)
                     completionItem(out, &comma, s->name, s->type, s->kind);
             }
-            const char *builtins[] = {"int",    "i8",  "i16",  "i32",    "i64", "float",
+            const char *builtins[] = {"uint", "u64", "u32", "u16", "u8", "int",    "i8",  "i16",  "i32",    "i64", "float",
                                       "f32",    "f64", "bool", "string", "any", "array",
                                       "buffer", "len", "new",  "free"};
             for (i = 0; i < sizeof(builtins) / sizeof(*builtins); i++)

@@ -640,8 +640,9 @@ static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
             return &unknown;
         }
         Type *array = allocate(c, sizeof(*array));
-        array->name = "dynamic-array";
-        array->dynamicArray = 1;
+        array->name = "fixed-array";
+        array->bufferSize = 1;
+        array->count = v->nEntries;
         array->element = expectedExpression(c, &unknown, &v->values[0], at);
         if (array->element == &nullValue)
             error(c, at, "null array elements require an explicit pointer element type");
@@ -1099,6 +1100,8 @@ static int identicalTypes(Type *a, Type *b) {
                identicalTypes(a->element, b->element);
     const char *left = a->spelling ? a->spelling : a->name;
     const char *right = b->spelling ? b->spelling : b->name;
+    if (!strcmp(left, "u64")) left = "uint";
+    if (!strcmp(right, "u64")) right = "uint";
     if (!strcmp(left, "i64")) left = "int";
     if (!strcmp(right, "i64")) right = "int";
     if (!strcmp(left, "f64")) left = "float";
@@ -1995,10 +1998,7 @@ static Type *expression(Context *c, expr *e) {
     case EXPR_TYPE_COMPOSITE: {
         struct expr_composite *v = e->underlying;
         if (!v->type.type) {
-            error(c, v->location,
-                  "standalone literal requires an explicit type, such as int[]{...}, "
-                  "buffer<int>{...}, or StructType{...}");
-            return &unknown;
+            return checkComposite(c, &unknown, e, v->location);
         }
         typeTokens prefix;
         Type *target = NULL;

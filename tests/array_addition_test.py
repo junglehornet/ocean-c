@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix="ocean array addition ") as directory:
             "s := join<string>(string[]{\"b\"}, string[]{\"c\"}, \"a\"); "
             "result[1] = 9; if (a[0] != 2 || len(result) != 4 || s[1][0] != 98) return 1; "
             "return len(s) + len(s[0]); }", 5)
-    program("func main() int { x := 3; p := &x; a := {p}; b := null + a + null; "
+    program("type P = *int; func main() int { x := 3; p: P = &x; a: P[] = {p}; b := null + a + null; "
             "if (b[0] != null || b[1] != p || b[2] != null) return 1; return *b[1]; }", 3)
     program("func mutate(p *int[], calls *int) int { (*calls)++; (*p)[0] = 9; return 2; } "
             "func main() int { a := int[]{1}; calls := 0; b := a + mutate(&a, &calls); "

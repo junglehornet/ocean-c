@@ -35,6 +35,27 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
         result = run([str(exe)])
         assert (result.returncode, result.stdout) == (status, stdout), result
 
+    # Unsigned widths, high-bit arithmetic, conversions, aliases, and boxed C ABI.
+    program("extern i32 printf(buffer<i8>[] format, ...); "
+            "func same(x uint) u64 { return x; } "
+            "func main() int { "
+            "if (sizeof(uint) != 8 || sizeof(u64) != 8 || sizeof(u32) != 4 || "
+            "sizeof(u16) != 2 || sizeof(u8) != 1) return 1; "
+            "x := 18446744073709551615 -> uint; y := 2 -> u64; "
+            "if (same(x) <= y || x / y != (9223372036854775807 -> uint) || "
+            "x % y != (1 -> uint) || x >> y != (4611686018427387903 -> uint)) return 2; "
+            "if (x + (1 -> uint) != zero(uint) || !(x > 0) || !(x >= y) || y >= x) return 3; "
+            "a := 255 -> u8; b := 65535 -> u16; c := 4294967295 -> u32; "
+            "if ((a -> int) != 255 || (b -> uint) != (65535 -> uint) || "
+            "(c -> int) != 4294967295 || (a / (2 -> u8) -> int) != 127 || "
+            "(a >> (1 -> u8) -> int) != 127) return 4; "
+            "if ((c -> float) != 4294967295.0 || (4294967295.0 -> u32) != c || "
+            "(x -> float) < 18446744073709550000.0 || (x -> int -> uint) != x) return 5; "
+            "values := u16[]{b}; boxed: any = c; "
+            "if (values[0] != b || (boxed -> u32) != c) return 6; "
+            'extern.printf("%llu %u %u %u\\n".data, x, c, b, a); return 0; }',
+            stdout="18446744073709551615 4294967295 65535 255\n", optimize=True)
+
     program("func main() int { return sizeof(*void); }", 8, optimize=True)
     program("extern *void malloc(int bytes); extern void free(*void memory); "
             "func main() int { p := extern.malloc(sizeof(int)) -> (*int); *p = 42; "
@@ -355,7 +376,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func replace(xs ...int) int { xs = int[1]; xs[0] = 7; return len(xs); } func main() int { a := int[3]; return replace(a...) + len(a); }", 4)
 
     program("func main() int { a: int[] = {1, 2, 3}; return len(a) + a[0] + a[2]; }", 7)
-    program("func main() int { a := {1, 2}; alias := a; a = {3, 4, 5}; return len(a) + len(alias) + a[2] + alias[0]; }", 11)
+    program("func main() int { a := int[]{1, 2}; alias := a; a = {3, 4, 5}; return len(a) + len(alias) + a[2] + alias[0]; }", 11)
     program("func main() int { a: int[] = {}; b := int[]{}; return len(a) + len(b); }", 0)
     program("func main() int { b: buffer<int>[4] = {1, 2}; b = {9}; return b[0] + b[1] + b[2] + b[3]; }", 9)
     program("func main() int { b: buffer<int>[] = {1, 2}; old := b; b = {3, 4}; return old[0] + b[0]; }", 4)
@@ -593,11 +614,11 @@ int inspect(struct Wide *a, struct Narrow *b, int64_t sa, int64_t sb) {
     rejected("func f(xs ...int) int { return xs.length; } func main() {}", "only has size and data")
     rejected("extern i32 printf(string format, ...); func main() { a := int[2]; extern.printf(\"%d\", a.data...); }", "buffer expansion is not supported")
     rejected("func pair(a int[]) (int, int[]) { return 1, a; } func f(n int, xs ...int) {} func main() { a := int[2]; f(pair(a)...); }", "not multiple return values")
-    rejected("func use(a int[]) {} func main() { use({1, 2, 3}); }", "standalone literal requires an explicit type")
-    rejected("func use(b buffer<int>[]) {} func main() { use({1, 2}); }", "standalone literal requires an explicit type")
-    rejected("func use(xs ...int[]) {} func main() { use({1, 2}); }", "standalone literal requires an explicit type")
-    rejected("func f() int[] { return {1, 2}; } func main() {}", "standalone literal requires an explicit type")
-    rejected("func main() int { return len({1, 2}); }", "standalone literal requires an explicit type")
+    rejected("func use(a int[]) {} func main() { use({1, 2, 3}); }", "type mismatch")
+    rejected("func use(b buffer<int>[]) {} func main() { use({1, 2}); }", "type mismatch")
+    rejected("func use(xs ...int[]) {} func main() { use({1, 2}); }", "type mismatch")
+    rejected("func f() int[] { return {1, 2}; } func main() {}", "type mismatch")
+    program("func main() int { return len({1, 2}); }", 2)
     rejected("func main() { x := {}; }", "cannot infer an empty literal")
     rejected("func main() { x: int = {1, 2}; }", "literal requires an array, buffer, or struct")
     rejected("func main() { x := int{1, 2}; }", "literal requires an array, buffer, or struct")

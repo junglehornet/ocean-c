@@ -12,7 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, BUFFER } Kind;
+typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER } Kind;
 typedef struct {
     Kind kind;
     const char *operand; // Backend-owned text; aggregate constants can be arbitrarily long.
@@ -214,14 +214,18 @@ static const char *irType(Backend *b, Kind k) {
         return "{ ptr, i64 }";
     case VOID:
         return "void";
+    case UINT:
     case INT:
         return "i64";
+    case U32:
     case I32:
         return "i32";
+    case U16:
     case I16:
         return "i16";
     case F32:
         return "float";
+    case U8:
     case I8:
         return "i8";
     case FLOAT:
@@ -943,6 +947,10 @@ static Kind type(Backend *b, typeTokens t) {
         return BAD;
     }
     const char *s = t.tokens[0].lexeme;
+    if (!strcmp(s, "uint") || !strcmp(s, "u64")) return UINT;
+    if (!strcmp(s, "u32")) return U32;
+    if (!strcmp(s, "u16")) return U16;
+    if (!strcmp(s, "u8")) return U8;
     if (!strcmp(s, "any")) return SCALAR_ANY;
     if (!strcmp(s, "void")) return VOID;
     if (!strcmp(s, "int") || !strcmp(s, "i64"))
@@ -959,7 +967,7 @@ static Kind type(Backend *b, typeTokens t) {
         return BOOL;
     if (!strcmp(s, "string"))
         return stringKind(b);
-    fail(b, "unsupported type (supported: int, i64, i32, i16, i8, float, f64, f32, bool, string)");
+    fail(b, "unsupported type (supported: int, i64, i32, i16, i8, uint, u64, u32, u16, u8, float, f64, f32, bool, string)");
     return BAD;
 }
 static int identicalKinds(Backend *b, Kind left, Kind right) {
@@ -1275,9 +1283,10 @@ static void clearScope(Scope *s) {
         free(v);
     }
 }
-static int integral(Backend *b, Kind k) { k = representationKind(b, k); return k == INT || k == I32 || k == I16 || k == I8; }
+static int unsignedInteger(Backend *b, Kind k) { k = representationKind(b, k); return k == UINT || k == U32 || k == U16 || k == U8; }
+static int integral(Backend *b, Kind k) { k = representationKind(b, k); return k == INT || k == I32 || k == I16 || k == I8 || unsignedInteger(b, k); }
 static int floating(Backend *b, Kind k) { k = representationKind(b, k); return k == FLOAT || k == F32; }
-static int integerWidth(Backend *b, Kind k) { k = representationKind(b, k); return k == I8 ? 8 : k == I16 ? 16 : k == I32 ? 32 : 64; }
+static int integerWidth(Backend *b, Kind k) { k = representationKind(b, k); return (k == I8 || k == U8) ? 8 : (k == I16 || k == U16) ? 16 : (k == I32 || k == U32) ? 32 : 64; }
 static int implicitVoidPointer(Backend *b, Kind source, Kind target) {
     BufferKind *from = bufferKind(b, source), *to = bufferKind(b, target);
     return to && to->shape == 6 && to->element == VOID &&
@@ -1322,13 +1331,15 @@ static Value convert(Backend *b, Value v, Kind k) {
     }
     if (representationKind(b, v.kind) == BOOL && floating(b, k)) op = "uitofp";
     if (integral(b, v.kind) && floating(b, k))
-        op = "sitofp";
+        op = unsignedInteger(b, v.kind) ? "uitofp" : "sitofp";
     if (floating(b, v.kind) && integral(b, k))
-        op = "fptosi";
+        op = unsignedInteger(b, k) ? "fptoui" : "fptosi";
     if (representationKind(b, v.kind) == BOOL && integral(b, k))
         op = "zext";
-    if (integral(b, v.kind) && integral(b, k))
-        op = integerWidth(b, v.kind) < integerWidth(b, k) ? "sext" : "trunc";
+    if (integral(b, v.kind) && integral(b, k)) {
+        if (integerWidth(b, v.kind) == integerWidth(b, k)) return value(b, k, "%s", v.operand);
+        op = integerWidth(b, v.kind) < integerWidth(b, k) ? (unsignedInteger(b, v.kind) ? "zext" : "sext") : "trunc";
+    }
     if (floating(b, v.kind) && floating(b, k)) op = representationKind(b, k) == FLOAT ? "fpext" : "fptrunc";
     if (!op) {
         fail(b, "unsupported scalar conversion or type mismatch");
@@ -1453,6 +1464,10 @@ static Value bufferLiteralSlot(Backend *, Kind);
 static const char *ffiType(Backend *b, Kind kind) {
     kind = representationKind(b, kind);
     if (kind == VOID) return "@ffi_type_void";
+    if (kind == UINT) return "@ffi_type_uint64";
+    if (kind == U32) return "@ffi_type_uint32";
+    if (kind == U16) return "@ffi_type_uint16";
+    if (kind == U8) return "@ffi_type_uint8";
     if (kind == INT) return "@ffi_type_sint64";
     if (kind == BOOL) return "@ffi_type_uint8";
     if (kind == I16) return "@ffi_type_sint16";
@@ -1494,7 +1509,7 @@ static Value boxScalar(Backend *b, Value v, int promote) {
     (void)promote;
     Kind identity = v.kind;
     // Preserve Ocean identity while keeping small scalars ready for C varargs.
-    if (representationKind(b, v.kind) == BOOL || representationKind(b, v.kind) == I8 || representationKind(b, v.kind) == I16) v = convert(b, v, I32);
+    if (representationKind(b, v.kind) == BOOL || representationKind(b, v.kind) == I8 || representationKind(b, v.kind) == I16 || representationKind(b, v.kind) == U8 || representationKind(b, v.kind) == U16) v = convert(b, v, I32);
     if (representationKind(b, v.kind) == F32) v = convert(b, v, FLOAT);
     if (v.kind == NULL_VALUE) v = value(b, RAW_POINTER, "@__ocean.null");
     BufferKind *t = bufferKind(b, v.kind);
@@ -1519,7 +1534,7 @@ static Value boxScalar(Backend *b, Value v, int promote) {
 // Fixed C parameters retain their declared ABI rather than vararg promotion.
 static Value boxFixedCScalar(Backend *b, Value v) {
     v.kind = representationKind(b, v.kind);
-    if (v.kind != F32 && v.kind != I16 && v.kind != I8 && v.kind != BOOL)
+    if (v.kind != F32 && v.kind != I16 && v.kind != I8 && v.kind != U8 && v.kind != U16 && v.kind != BOOL)
         return boxScalar(b, v, 0);
     b->ffiUsed = 1;
     b->fixedCScalars |= 1u << v.kind;
@@ -1826,6 +1841,7 @@ static Kind expressionKind(Backend *b, expr *e) {
     case EXPR_TYPE_LITERAL: {
         enum literalType t = ((struct expr_literal *)e->underlying)->type;
         if (t == LITERAL_TYPE_NULL) return NULL_VALUE;
+        if (t == LITERAL_TYPE_INT && ((struct expr_literal *)e->underlying)->unsignedLiteral) return UINT;
         return t == LITERAL_TYPE_STRING ? stringKind(b) : t == LITERAL_TYPE_FLOAT ? FLOAT : INT;
     }
     case EXPR_TYPE_COMPOSITE: {
@@ -1833,7 +1849,7 @@ static Kind expressionKind(Backend *b, expr *e) {
         if (v->literalType.nTokens)
             return type(b, v->literalType);
         return v->inferredArray && v->nEntries
-                   ? dynamicArrayKind(b, expressionKind(b, &v->values[0]))
+                   ? fixedArrayKind(b, expressionKind(b, &v->values[0]), v->nEntries)
                    : BAD;
     }
     case EXPR_TYPE_ARRAY_NEW: {
@@ -2507,7 +2523,7 @@ static Value expectedValue(Backend *b, expr *e, Kind expected) {
         struct expr_composite *literal = e->underlying;
         Kind actual = literal->literalType.nTokens ? type(b, literal->literalType)
                       : literal->inferredArray && literal->nEntries
-                          ? dynamicArrayKind(b, expressionKind(b, &literal->values[0]))
+                          ? fixedArrayKind(b, expressionKind(b, &literal->values[0]), literal->nEntries)
                           : expected;
         Value result = constructComposite(b, e, actual);
         return expected == BAD ? result : coerce(b, result, expected);
@@ -3253,8 +3269,9 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         return answer;
     }
     if (integral(b, a.kind) && integral(b, c.kind) && a.kind != c.kind) {
-        a = convert(b, a, INT);
-        c = convert(b, c, INT);
+        Kind common = unsignedInteger(b, a.kind) || unsignedInteger(b, c.kind) ? UINT : INT;
+        a = convert(b, a, common);
+        c = convert(b, c, common);
     }
     if ((floating(b, a.kind) || floating(b, c.kind)) && a.kind != c.kind &&
         (floating(b, a.kind) || integral(b, a.kind)) && (floating(b, c.kind) || integral(b, c.kind))) {
@@ -3276,10 +3293,10 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         instruction = fp ? "fmul" : "mul";
         break;
     case EXPR_DIVIDE:
-        instruction = fp ? "fdiv" : "sdiv";
+        instruction = fp ? "fdiv" : unsignedInteger(b, a.kind) ? "udiv" : "sdiv";
         break;
     case EXPR_MODULO:
-        instruction = "srem";
+        instruction = unsignedInteger(b, a.kind) ? "urem" : "srem";
         break;
     case EXPR_XOR:
         instruction = "xor";
@@ -3295,7 +3312,7 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         instruction = "shl";
         break;
     case EXPR_BITSHIFT_RIGHT:
-        instruction = "ashr";
+        instruction = unsignedInteger(b, a.kind) ? "lshr" : "ashr";
         break;
     case EXPR_EQUALITY:
         instruction = fp ? "fcmp oeq" : "icmp eq";
@@ -3306,19 +3323,19 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         comparison = 1;
         break;
     case EXPR_LESS_THAN:
-        instruction = fp ? "fcmp olt" : "icmp slt";
+        instruction = fp ? "fcmp olt" : unsignedInteger(b, a.kind) ? "icmp ult" : "icmp slt";
         comparison = 1;
         break;
     case EXPR_GREATER_THAN:
-        instruction = fp ? "fcmp ogt" : "icmp sgt";
+        instruction = fp ? "fcmp ogt" : unsignedInteger(b, a.kind) ? "icmp ugt" : "icmp sgt";
         comparison = 1;
         break;
     case EXPR_LESS_EQUALS:
-        instruction = fp ? "fcmp ole" : "icmp sle";
+        instruction = fp ? "fcmp ole" : unsignedInteger(b, a.kind) ? "icmp ule" : "icmp sle";
         comparison = 1;
         break;
     case EXPR_GREATER_EQUALS:
-        instruction = fp ? "fcmp oge" : "icmp sge";
+        instruction = fp ? "fcmp oge" : unsignedInteger(b, a.kind) ? "icmp uge" : "icmp sge";
         comparison = 1;
         break;
     default:
@@ -3394,7 +3411,7 @@ static Value expressionImpl(Backend *b, expr *e) {
         struct expr_literal *v = e->underlying;
         if (v->type == LITERAL_TYPE_NULL) return value(b, NULL_VALUE, "@__ocean.null");
         if (v->type == LITERAL_TYPE_INT) {
-            if (v->unsignedLiteral) fail(b, "unsigned integer literal requires unsigned integer code generation");
+            if (v->unsignedLiteral) return value(b, UINT, "%lu", (unsigned long)*(long *)v->value);
             return value(b, INT, "%ld", *(long *)v->value);
         }
         if (v->type == LITERAL_TYPE_FLOAT) {
@@ -3834,7 +3851,7 @@ static Value expressionImpl(Backend *b, expr *e) {
             for (size_t i = fixed; i < evaluated.count; i++) {
                 args[i] = evaluated.items[i];
                 if (args[i].kind == NULL_VALUE) args[i].kind = RAW_POINTER;
-                if (representationKind(b, args[i].kind) == BOOL || representationKind(b, args[i].kind) == I8 || representationKind(b, args[i].kind) == I16)
+                if (representationKind(b, args[i].kind) == BOOL || representationKind(b, args[i].kind) == I8 || representationKind(b, args[i].kind) == I16 || representationKind(b, args[i].kind) == U8 || representationKind(b, args[i].kind) == U16)
                     args[i] = convert(b, args[i], I32);
                 if (representationKind(b, args[i].kind) == F32) args[i] = convert(b, args[i], FLOAT);
                 BufferKind *extra = bufferKind(b, args[i].kind);
@@ -5084,7 +5101,7 @@ static void emitAnyType(Backend *b, Kind kind) {
     if (!aggregate) {
         b->ffiUsed = 1;
         fprintf(b->out, "%s = private constant { ptr, ptr, ptr } { ptr %s, ptr null, ptr null }\n",
-                metadata.operand, ffiType(b, representationKind(b, kind) == F32 ? FLOAT : representationKind(b, kind) == BOOL || representationKind(b, kind) == I8 || representationKind(b, kind) == I16 ? I32 : kind));
+                metadata.operand, ffiType(b, representationKind(b, kind) == F32 ? FLOAT : representationKind(b, kind) == BOOL || representationKind(b, kind) == I8 || representationKind(b, kind) == I16 || representationKind(b, kind) == U8 || representationKind(b, kind) == U16 ? I32 : kind));
         return;
     }
     b->returnTransportUsed = 1;
@@ -5408,7 +5425,7 @@ static void emitFFIRuntime(Backend *b) {
     for (Kind k = VOID; k < BUFFER; k++)
         if (b->fixedCScalars & (1u << k))
             fprintf(out, "@__ocean.c.fixed.%u = private constant { ptr, ptr, ptr } { ptr %s, ptr null, ptr null }\n", (unsigned)k, ffiType(b, k));
-    const char *names[] = {"void", "uint8", "sint8", "sint16", "float", "sint32", "sint64", "double", "pointer"};
+    const char *names[] = {"void", "uint64", "uint32", "uint16", "uint8", "sint8", "sint16", "float", "sint32", "sint64", "double", "pointer"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
         fprintf(out, "@ffi_type_%s = external global i8\n", names[i]);
     fputs("declare i32 @ffi_prep_cif_var(ptr, i32, i32, i32, ptr, ptr)\n"
@@ -5449,6 +5466,56 @@ static void emitFFIRuntime(Backend *b) {
           "  call void @ffi_call(ptr %cif, ptr %fn, ptr %result, ptr %values)\n"
           "  ret void\n"
           "}\n", out);
+}
+
+/* Copy each argv string, including its terminator, into the stream os expects. */
+static void emitOSArgs(FILE *out, struct stmt_func *hook) {
+    fputs("  %args.count = zext i32 %argc to i64\n"
+          "  br label %args.size\nargs.size:\n"
+          "  %args.i = phi i64 [0, %entry], [%args.next, %args.size.done]\n"
+          "  %args.total = phi i64 [0, %entry], [%args.total.next, %args.size.done]\n"
+          "  %args.more = icmp ult i64 %args.i, %args.count\n"
+          "  br i1 %args.more, label %args.size.start, label %args.allocate\n"
+          "args.size.start:\n"
+          "  %args.slot = getelementptr ptr, ptr %argv, i64 %args.i\n"
+          "  %args.string = load ptr, ptr %args.slot\n"
+          "  br label %args.size.byte\nargs.size.byte:\n"
+          "  %args.len = phi i64 [0, %args.size.start], [%args.len.next, %args.size.byte]\n"
+          "  %args.char.ptr = getelementptr i8, ptr %args.string, i64 %args.len\n"
+          "  %args.char = load i8, ptr %args.char.ptr\n"
+          "  %args.len.next = add i64 %args.len, 1\n"
+          "  %args.end = icmp eq i8 %args.char, 0\n"
+          "  br i1 %args.end, label %args.size.done, label %args.size.byte\n"
+          "args.size.done:\n"
+          "  %args.total.next = add i64 %args.total, %args.len.next\n"
+          "  %args.next = add i64 %args.i, 1\n"
+          "  br label %args.size\nargs.allocate:\n"
+          "  %args.stream = alloca i8, i64 %args.total\n"
+          "  br label %args.copy\nargs.copy:\n"
+          "  %args.j = phi i64 [0, %args.allocate], [%args.j.next, %args.copy.done]\n"
+          "  %args.offset = phi i64 [0, %args.allocate], [%args.offset.next, %args.copy.done]\n"
+          "  %args.copy.more = icmp ult i64 %args.j, %args.count\n"
+          "  br i1 %args.copy.more, label %args.copy.start, label %args.ready\n"
+          "args.copy.start:\n"
+          "  %args.copy.slot = getelementptr ptr, ptr %argv, i64 %args.j\n"
+          "  %args.copy.string = load ptr, ptr %args.copy.slot\n"
+          "  br label %args.copy.byte\nargs.copy.byte:\n"
+          "  %args.k = phi i64 [0, %args.copy.start], [%args.k.next, %args.copy.byte]\n"
+          "  %args.from = getelementptr i8, ptr %args.copy.string, i64 %args.k\n"
+          "  %args.byte = load i8, ptr %args.from\n"
+          "  %args.position = add i64 %args.offset, %args.k\n"
+          "  %args.to = getelementptr i8, ptr %args.stream, i64 %args.position\n"
+          "  store i8 %args.byte, ptr %args.to\n"
+          "  %args.k.next = add i64 %args.k, 1\n"
+          "  %args.copy.end = icmp eq i8 %args.byte, 0\n"
+          "  br i1 %args.copy.end, label %args.copy.done, label %args.copy.byte\n"
+          "args.copy.done:\n"
+          "  %args.offset.next = add i64 %args.position, 1\n"
+          "  %args.j.next = add i64 %args.j, 1\n"
+          "  br label %args.copy\nargs.ready:\n"
+          "  call void ", out);
+    functionName(out, hook);
+    fputs("(ptr %args.stream, i64 %args.count)\n", out);
 }
 
 int emitLLVM(parseResult *program, FILE *output) {
@@ -5537,6 +5604,7 @@ int emitLLVM(parseResult *program, FILE *output) {
         if (!b.body || !b.slots)
             fail(&b, "could not create entry point buffers");
         else {
+            if (program->osSetArgs) emitOSArgs(b.body, program->osSetArgs);
             Value previous = pushTraceFrame(&b, main, main->name);
             if (!main->nResults)
                 fprintf(b.body, "  call void @\"ocean.main\"()\n");
@@ -5547,7 +5615,7 @@ int emitLLVM(parseResult *program, FILE *output) {
                 fprintf(b.body, "  ret i32 0\n");
             else
                 fprintf(b.body, "  %%status = trunc i64 %%result to i32\n  ret i32 %%status\n");
-            fprintf(output, "define i32 @main() {\nentry:\n");
+            fprintf(output, "define i32 @main(%s) {\nentry:\n", program->osSetArgs ? "i32 %argc, ptr %argv" : "");
             if (copy(b.slots, output) || copy(b.body, output))
                 fail(&b, "could not write entry point IR");
             fprintf(output, "}\n");

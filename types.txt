@@ -27,9 +27,16 @@ Instantiate arrays using T[n], with a nonnegative element count:
 
     fixed: int[3] = {1, 2, 3};
     other := int[2]{4, 5};
+    counted := int[...]{1, 2, 3}; // int[3], counted from the initializer
     empty: int[0] = {};
     n := 4;
     runtime: int[n];
+
+An untyped composite literal defaults to a static array: a := {1, 2, 3}
+infers int[3]. An explicit type or assignment destination, such as int[] or
+buffer<int>[3], takes precedence. Empty untyped literals require a destination type. T[...]{...} infers the
+length from the number of initializer entries, including zero for T[...]{}.
+The [...] suffix requires a literal body.
 
 An omitted initializer zero-initializes the elements. Array literals may supply
 fewer than n elements; the rest are zero-initialized. Too many elements fail.

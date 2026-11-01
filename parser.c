@@ -394,6 +394,33 @@ static expr primary(parserState *state) {
             case LESS_THAN:
             case LEFT_BRACKET: {
                 char angle = tok.type == LESS_THAN;
+                parserState inferred = *state;
+                if (!angle) advance(&inferred);
+                if (!angle && signatureEllipsis(&inferred)) {
+                    advance(&inferred); advance(&inferred); advance(&inferred);
+                    if (currentToken(&inferred).type != RIGHT_BRACKET) {
+                        signatureError(state, "Expected closing bracket after inferred array length");
+                        return (expr){0};
+                    }
+                    advance(&inferred);
+                    if (currentToken(&inferred).type != LEFT_CURLY_BRACE) {
+                        signatureError(state, "Inferred array length requires a literal body");
+                        return (expr){0};
+                    }
+                    *state = inferred;
+                    // Normalize the inferred dimension to an ordinary sized literal.
+                    long *count = calloc(1, sizeof(*count));
+                    CHECK_MALLOC(count);
+                    struct expr_literal dimension = {.type = LITERAL_TYPE_INT, .value = count};
+                    CONSTRUCT_EXPR_RES(EXPR_TYPE_LITERAL, dimension, index);
+                    index.location = tok;
+                    struct expr_index indexed = {.parent = parent, .index = index, .location = tok};
+                    CONSTRUCT_EXPR_RES(EXPR_TYPE_INDEX, indexed, prefix);
+                    parent = parseComposite(state, prefix);
+                    CHECK_SYNC;
+                    *count = (long)((struct expr_composite *)parent.underlying)->nEntries;
+                    break;
+                }
                 struct expr_instantiation instance = {.parent = parent, .location = tok};
                 if (tryCallTypeArguments(state, &instance)) {
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_INSTANTIATION, instance, result);

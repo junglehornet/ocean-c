@@ -200,7 +200,7 @@ raw buffer globals are rejected; use arrays for runtime-sized global storage.
 
 The backend supports:
 
-- `int`/`i64` (signed 64-bit), `i32`, `i16`, `i8`, `f32` (single precision), `float`/`f64` (double precision), `bool`,
+- `int`/`i64` (signed 64-bit), `i32`, `i16`, `i8`, `uint`/`u64` (unsigned 64-bit), `u32`, `u16`, `u8`, `f32` (single precision), `float`/`f64` (double precision), `bool`,
   and `string` (an alias for `i8[]`).
 - Functions, recursion, forward calls, typed variadic parameters, multiple return
   values, named results, local variables, and lexical shadowing.
@@ -1103,5 +1103,6 @@ uppercase letters. UTF-8 character literals decode to Unicode scalar values,
 and `\uXXXX`/`\UXXXXXXXX` escapes encode scalars as UTF-8 in strings. Invalid
 UTF-8 and surrogate/out-of-range escapes are rejected. Decimal floating literals
 accept signed `e`/`E` exponents. Integer scanning preserves magnitudes through
-`UINT64_MAX`, with larger literals rejected; unsupported unsigned lowering is
-reported by the backend and therefore by `--check`.
+`UINT64_MAX`, with larger literals rejected. Unsigned integers use unsigned division,
+remainder, comparisons, and logical right shifts. Mixed integer operations use
+64-bit unsigned arithmetic when either operand is unsigned.

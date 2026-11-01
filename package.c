@@ -376,17 +376,17 @@ static Package *resolveImport(packageBuild *b, Package *from, const char *path) 
 // Privilege follows the configured standard-library path, never a package name.
 // Resolve every source file too: a symlink cannot import privileged source from
 // an ordinary project or dependency into the standard reflect directory.
-static int standardReflectSource(packageBuild *b, Package *p, File *file) {
+static int standardPackageSource(packageBuild *b, Package *p, File *file, const char *name) {
     const char *source = standardSource(b);
     char *root = source ? canonical(b, source) : NULL;
     if (!root) return 0;
-    char *expected = format(b, "%s/reflect", root);
-    if (strcmp(p->directory, expected) || !p->name || strcmp(p->name, "reflect")) return 0;
+    char *expected = format(b, "%s/%s", root, name);
+    if (strcmp(p->directory, expected) || !p->name || strcmp(p->name, name)) return 0;
     char *resolved = canonical(b, file->path);
     return resolved && !strcmp(parent(b, resolved), expected);
 }
 static void markReflectionIntrinsic(packageBuild *b, Package *p, File *file, struct stmt_func *f) {
-    if (!standardReflectSource(b, p, file)) return;
+    if (!standardPackageSource(b, p, file, "reflect")) return;
     int fields = !strcmp(f->name.lexeme, "Fields"), predicate = !strcmp(f->name.lexeme, "IsStruct");
     if (!fields && !predicate) return;
     typeTokens element;
@@ -498,6 +498,17 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
             if (s->type == STMT_FUNC) {
                 struct stmt_func *f = s->value;
                 markReflectionIntrinsic(b, p, file, f);
+                if (!strcmp(f->name.lexeme, "setArgs") && standardPackageSource(b, p, file, "os")) {
+                    typeTokens stream = f->nParams ? f->paramTypeNames[0] : (typeTokens){0};
+                    int valid = !f->isExtern && !f->isVariadic && !f->receiverType.nTokens &&
+                        !f->nTypeParams && f->nParams == 2 && !f->nResults &&
+                        stream.nTokens == 4 && !strcmp(stream.tokens[0].lexeme, "buffer") &&
+                        stream.tokens[1].type == LESS_THAN && !strcmp(stream.tokens[2].lexeme, "i8") &&
+                        stream.tokens[3].type == GREATER_THAN &&
+                        f->paramTypeNames[1].nTokens == 1 && !strcmp(f->paramTypeNames[1].tokens[0].lexeme, "int");
+                    if (!valid) error(b, file->path, "invalid standard os.setArgs signature");
+                    else b->program.osSetArgs = f;
+                }
                 if (f->isExtern) {
                     Symbol *existing = file->externs;
                     while (existing && strcmp(existing->name, f->name.lexeme)) existing = existing->next;

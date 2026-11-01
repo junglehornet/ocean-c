@@ -142,6 +142,9 @@ if(BUILD_TESTING)
     add_test(NAME package_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_test.py" "$<TARGET_FILE:ocean-c>")
     set_tests_properties(package_test PROPERTIES TIMEOUT 90)
+    add_test(NAME os_args_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/os_args_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(os_args_test PROPERTIES TIMEOUT 60)
     add_test(NAME goto_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/goto_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(goto_test PROPERTIES TIMEOUT 60)

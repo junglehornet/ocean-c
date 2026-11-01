@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="ocean goto ") as directory:
     program('func main() int { n := 0; for (i := 0; i < 9; i++) { '
             'if (i == 3) goto done; n++; } done: return n; }', 3)
     program('func main() int { n := 0; { goto inside; n = 99; inside: { n = 4; } } return n; }', 4)
-    program('func main() int { a := {1}; { b := {7, 8}; a = b; goto done; } '
+    program('func main() int { a := int[]{1}; { b := int[]{7, 8}; a = b; goto done; } '
             'done: return a[0] + len(a); }', 9)
     program('func main() int { goto first; first: second: return 6; }', 6)
     program('func f() int { done: return 3; } func main() int { goto done; done: return f(); }', 3)

@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix="ocean semantic diagnostics ") as direct
     mismatch("func main() {\n\ta := {1, 2};\n\tx := a[1.5];\n}", "int", "float", "a[", "1.5")
     mismatch("struct Point { value bool; }\nfunc main() {\n\tp := Point{value: 7};\n}", "bool", "int", "p :=", "7")
     mismatch("func main() {\n\tx := 1;\n\tp: *bool = &x;\n}", "*bool", "*int", "p:", "p")
-    mismatch("func main() {\n\tb := {true};\n\ta: int[] = b;\n}", "int[]", "bool[]", "a:", "a")
+    mismatch("func main() {\n\tb := {true};\n\ta: int[] = b;\n}", "int[]", "bool[1]", "a:", "a")
     mismatch("func main() {\n\ta: buffer<int>[2];\n\tb: buffer<int>[3];\n\ta = b;\n}", "buffer<int>[2]", "buffer<int>[3]", "a =", "=")
     mismatch("struct Box<T any> { value T; }\nfunc main() {\n\tb := Box<bool>{true};\n\ta: Box<int> = b;\n}", "__pkg0_Box<int>", "__pkg0_Box<bool>", "a:", "a")
     mismatch("func f(x int) int { return x; }\nfunc g(x bool) bool { return x; }\n"

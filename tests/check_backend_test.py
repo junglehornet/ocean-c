@@ -7,7 +7,7 @@ with tempfile.TemporaryDirectory(prefix='ocean check backend ') as d:
     env=dict(os.environ,OCEAN_BUILD_CACHE=str(cache))
     cases=[
         ('func main() int { return 7; }',True,''),
-        ('func main() { x := 18446744073709551615; }',False,'backend'),
+        ('func main() { x := 18446744073709551615; }',True,''),
         ('extern int ocean_missing_symbol(); func main() int { return extern.ocean_missing_symbol(); }',False,'link'),
         ('func main() { defer main(); }',False,'backend'),
         ('func main() int { return -9223372036854775808; }',True,''),

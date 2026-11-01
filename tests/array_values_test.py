@@ -38,16 +38,16 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
     assert 'malloc' in callee and 'getelementptr { i64, i64, ptr }' in callee, callee
     assert "ptr %arg0" in callee, callee
 
-    program("func main() int { a := {1, 2, 3}; b := a; b[1] = 8; "
+    program("func main() int { a := int[]{1, 2, 3}; b := a; b[1] = 8; "
             "if (a[1] != 2 || b[1] != 8) return 1; b = a; a[0] = 7; "
             "if (b[0] != 1) return 2; return 0; }")
-    program("func change(p *int[]) { (*p)[0] = 7; } func main() int { a := {1, 2}; "
+    program("func change(p *int[]) { (*p)[0] = 7; } func main() int { a := int[]{1, 2}; "
             "change(&a); if (a[0] != 7) return 1; return 0; }")
     program("func choose(a int[], p *int[]) int { (*p)[0] = 8; return a[0]; } "
-            "func main() int { a := {1, 2}; if (choose(a, &a) != 1 || a[0] != 8) return 1; return 0; }")
+            "func main() int { a := int[]{1, 2}; if (choose(a, &a) != 1 || a[0] != 8) return 1; return 0; }")
     program("func change(p *int[]) int { (*p)[0] = 8; return 0; } "
             "func first(a int[], unused int) int { return a[0]; } "
-            "func main() int { a := {1}; if (first(a, change(&a)) != 1 || a[0] != 8) return 1; return 0; }")
+            "func main() int { a := int[]{1}; if (first(a, change(&a)) != 1 || a[0] != 8) return 1; return 0; }")
     program("func main() int { a := int[][]{{1, 2}, {3}}; b := a; b[0][0] = 9; "
             "if (a[0][0] != 1 || b[0][0] != 9) return 1; return 0; }")
     program("func change(a int[][]) { a[0][0] = 9; a[1] = {7, 8}; } "
@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
             "func (s *S) share() { s.items[0] = 8; } "
             "func main() int { a := S{{1, 2}}; a.change(); if (a.items[0] != 1) return 1; "
             "a.share(); if (a.items[0] != 8) return 2; return 0; }")
-    program("func reset<T>(p *T) { *p = zero(T); } func main() int { a := {1, 2}; "
+    program("func reset<T>(p *T) { *p = zero(T); } func main() int { a := int[]{1, 2}; "
             "reset<int[]>(&a); if (len(a) != 0) return 1; return 0; }")
     program("func make(n int) int[] { a := int[n]; a.data = {4}; return a; } "
             "func clobber() { b := int[2000]; b.data = {9}; } "
@@ -68,11 +68,11 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
             "if (len(a) != 3 || a[0] != 4 || a[2] != 0) return 1; return 0; }")
     program("func make(n int) int[][] { a := int[][n]; a[0] = {4, 5}; return a; } "
             "func main() int { a := make(2); if (a[0][1] != 5 || len(a[1]) != 0) return 1; return 0; }")
-    program("func main() int { a := {1}; { b := {2, 3}; a = b; b[0] = 9; } "
+    program("func main() int { a := int[]{1}; { b := int[]{2, 3}; a = b; b[0] = 9; } "
             "b := int[400]; b.data = {8}; if (len(a) != 2 || a[0] != 2) return 1; return 0; }")
-    program("func change(a ...int) { a[0] = 99; } func main() int { a := {1, 2}; "
+    program("func change(a ...int) { a[0] = 99; } func main() int { a := int[]{1, 2}; "
             "change(a...); if (a[0] != 1) return 1; return 0; }")
-    program("func copy<T>(a T[]) T[] { return a; } func main() int { a := {1, 2}; "
+    program("func copy<T>(a T[]) T[] { return a; } func main() int { a := int[]{1, 2}; "
             "b := copy<int>(a); b[0] = 9; if (a[0] != 1) return 1; return 0; }")
     program("func main() int { n := 9; a := int[n++]; a.data = {1}; b := a; "
             "if (n != 10 || len(b) != 9) return 1; return 0; }")
@@ -83,7 +83,7 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
             "if (x != 9 || *a[0] != 9) return 1; return 0; }")
 
     program("func sum(a int[], n int) int { if (n == 0) return a[0]; a[0]++; return sum(a, n - 1); } "
-            "func main() int { a := {1}; if (sum(a, 4) != 5 || a[0] != 1) return 1; return 0; }")
+            "func main() int { a := int[]{1}; if (sum(a, 4) != 5 || a[0] != 1) return 1; return 0; }")
     program("struct S { items int[]; } func (s S) read(unused int) int { return s.items[0]; } "
             "func change(p *S) int { p.items[0] = 8; return 0; } "
             "func main() int { a := S{{1}}; if (a.read(change(&a)) != 1 || a.items[0] != 8) return 1; return 0; }")
@@ -92,13 +92,13 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
     program("func main() int { a := int[][1]; { a.data = {{1, 2}}; } "
             "c := int[1000]; c.data = {8}; if (a[0][1] != 2) return 1; return 0; }")
     program("func replace(p *int[], source int[]) { *p = source; } "
-            "func main() int { a := {1, 2, 3}; b := {7, 8}; replace(&a, b); b[0] = 9; "
+            "func main() int { a := int[]{1, 2, 3}; b := int[]{7, 8}; replace(&a, b); b[0] = 9; "
             "if (len(a) != 2 || a[0] != 7 || a[1] != 8) return 1; return 0; }")
 
     program("func main() int { p: *int[] = null; return sizeof(*p); }", 8)
 
     source.write_text("package main; func replace(p *int[]) { *p = int[]{1, 2}; } "
-                      "func main() { a := {0}; replace(&a); }")
+                      "func main() { a := int[]{0}; replace(&a); }")
     built = run([compiler, "build", str(source), "-o", str(executable)])
     assert built.returncode == 0, built.stdout + built.stderr
     assert run([str(executable)]).returncode == 0, "dynamic array replacement through a pointer must allow growth"
@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
             "s := recur(n - 1); s.items[0]++; return s; } "
             "func main() int { s := recur(12); return s.items[0]; }", 15)
     program("func recur<T>(n int, a T[]) T[] { if (n == 0) return a; return recur<T>(n - 1, a); } "
-            "func main() int { a := {7, 8}; b := recur<int>(8, a); b[0] = 9; return a[0]; }", 7)
+            "func main() int { a := int[]{7, 8}; b := recur<int>(8, a); b[0] = 9; return a[0]; }", 7)
 
     program("func recur(n int, size int, calls *int) (int[], int) { (*calls)++; "
             "if (n == 0) { a := int[size]; a.data = {6}; return a, 2; } "

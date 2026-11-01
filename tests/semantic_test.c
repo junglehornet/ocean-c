@@ -20,7 +20,7 @@ int main(void) {
     analyze("func main() { xs: mixed any[] = 0->any; }", 0);
     analyze("struct Stack<T> { underlying T[]; top int; } func newStack<T>() Stack<T> { s: Stack<T> = {zero(T[]), 0}; return s; } func main() { s := newStack<int>(); }", 1);
     analyze("func main() { boxed := 0->any; xs: int[] = {1, 2}; value: any = xs; narrowed := value.(int[]); }", 1);
-    analyze("func use(p *int[]) {} func main() { a := {1, 2}; use(&a); }", 1);
+    analyze("func use(p *int[]) {} func main() { a := int[]{1, 2}; use(&a); }", 1);
     analyze("func use(p *int[]) {} func main() { x := 1; a := {&x}; use(a); }", 0);
 
     analyze("func main() { a: int = zero(int); b: bool = zero(bool); f: float = zero(float); s: string = zero(string); p: *int = zero(*int); xs: int[] = zero(int[]); }", 1);
