@@ -1,4 +1,8 @@
-# Ocean compiler
+# Ocean-c
+
+Pre-bootstrapping compiler for the [Ocean](https://ocean-lang.dev) programming language.
+Documentation, examples, and language guide available at [ocean-lang.dev](https://ocean-lang.dev).
+Standard Library available at [codeberg.org/junglehornet/ocean-src](https://codeberg.org/junglehornet/ocean-src). See documentation at [ocean-lang.dev/docs/getting-started/](https://ocean-lang.dev/docs/getting-started/) for installation instructions. 
 
 Build with CMake, a C23 compiler, and libffi development headers:
 
