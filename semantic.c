@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "semantic.h"
 #include "diagnostic.h"
 #include "array_type.h"
@@ -45,6 +46,7 @@ typedef struct Symbol {
 typedef struct Scope {
     struct Scope *parent;
     Symbol *symbols;
+    token open, close;
 } Scope;
 typedef struct Allocation {
     void *ptr;
@@ -59,6 +61,14 @@ typedef struct Context {
     struct stmt_func *function;
     Type *implicitReceiver;
     Allocation *allocations;
+    semanticIndex *index;
+    Symbol **indexedSymbols;
+    Type **referenceTypes;
+    Type **completionTypes;
+    token *completionUses;
+    size_t nCompletionTypes;
+    int declaringMembers;
+    token memberOwner;
 } Context;
 static Type nullValue = {.name = "null"};
 static Type unknown = {.name = "?"}, integer = {.name = "int"}, floating = {.name = "float"},
@@ -103,7 +113,11 @@ static Symbol *lookup(Context *c, const char *name) {
                 return v;
     return NULL;
 }
+static size_t indexSymbol(Context *, Symbol *);
+static void indexReference(Context *, token, Symbol *);
 static Symbol *declare(Context *c, token name, Type *type, int isType) {
+    if (isType && name.lexeme && !strcmp(name.lexeme, "array"))
+        error(c, name, "array is a reserved type name");
     if (!name.lexeme || name.type == EOF_TOKEN || !strcmp(name.lexeme, "_"))
         return NULL;
     for (Symbol *v = c->scope->symbols; v; v = v->next)
@@ -114,6 +128,7 @@ static Symbol *declare(Context *c, token name, Type *type, int isType) {
     Symbol *v = allocate(c, sizeof(*v));
     *v = (Symbol){.name = name, .type = type, .isType = isType, .ownerFunction = c->function, .next = c->scope->symbols};
     c->scope->symbols = v;
+    if (c->index) indexSymbol(c,v);
     return v;
 }
 static Type *canonical(Type *t) { return t->semanticBase ? t->semanticBase : t; }
@@ -130,6 +145,9 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
     if (definedType(expected)) return definedType(actual) && expected->declaration == actual->declaration;
     if (expected->interface) return interfaceFits(expected->context, expected, actual, 0);
     if (definedType(actual)) return 0;
+    if (!strcmp(expected->name, "fixed-array") && expected->bufferFamily == 2)
+        return !strcmp(actual->name, "fixed-array") &&
+               matchesTypeConstraint(expected->element, actual->element);
     if (!strcmp(expected->name, "buffer") && !strcmp(actual->name, "buffer") &&
         expected->bufferFamily)
         return expected->bufferFamily == 1 ||
@@ -185,6 +203,10 @@ static int compatibleTypes(Type *a, Type *b) {
         return matchesTypeConstraint(a, b);
     if (!strcmp(a->name, "pointer") && !strcmp(b->name, "pointer") && a->element && b->element &&
         representation(a->element)->immutableString != representation(b->element)->immutableString) return 0;
+    if (!strcmp(a->name, "fixed-array") && a->bufferFamily == 2)
+        return !strcmp(b->name, "fixed-array") && matchesTypeConstraint(a->element, b->element);
+    if (!strcmp(a->name, "fixed-array") && !strcmp(b->name, "fixed-array") && b->bufferFamily == 2)
+        return 0;
     if (a->element || b->element)
         return a->element && b->element && !strcmp(a->name, b->name) &&
                ((a->element == &signedByte || b->element == &signedByte)
@@ -280,6 +302,14 @@ static Type *typeOf(Context *c, typeTokens span) {
             error(c, t, "array elements must have a fixed storage size");
         return v;
     }
+    typeTokens unsizedElement;
+    if (unsizedArrayTypeParts(span, &unsizedElement)) {
+        Type *v = allocate(c, sizeof(*v));
+        v->name = "fixed-array"; v->bufferFamily = 2;
+        v->element = typeOf(c, unsizedElement);
+        if (v->element == &nothing) error(c, t, "void is not an array element storage type");
+        return v;
+    }
     typeTokens sizedElement, sizedDimension;
     if (sizedArrayTypeParts(span, &sizedElement, &sizedDimension)) {
         Type *v = allocate(c, sizeof(*v));
@@ -296,6 +326,10 @@ static Type *typeOf(Context *c, typeTokens span) {
             v->count = (size_t)sizedDimension.tokens[0].numValue.integer;
         }
         return v;
+    }
+    if (t.type == IDENTIFIER && !strcmp(t.lexeme, "array")) {
+        error(c, t, "array requires exactly one element type; use array<any> for any array");
+        return &unknown;
     }
     if (t.type == MIXED) {
         error(c, t, "mixed requires an array type");
@@ -350,6 +384,7 @@ static Type *typeOf(Context *c, typeTokens span) {
     const char *n = t.lexeme ? t.lexeme : "any";
     Symbol *s = lookup(c, n);
     if (s) {
+        indexReference(c,t,s);
         if (!s->isType) {
             error(c, t, "expected a type");
             return &unknown;
@@ -449,7 +484,7 @@ static Type *expression(Context *, expr *);
 static void statement(Context *, stmt *);
 static void predeclare(Context *, stmt *);
 static void block(Context *c, struct stmt_block *b, int nested) {
-    Scope scope = {c->scope, NULL};
+    Scope scope = {c->scope, NULL, b->open, b->close};
     if (nested)
         c->scope = &scope;
     for (size_t i = 0; i < b->nStmts; i++)
@@ -536,6 +571,8 @@ static void formatType(FILE *out, Type *t, unsigned depth) {
         if (t->mixed) fputs("mixed ", out);
         formatType(out, t->element, depth + 1);
         fputs("[]", out);
+    } else if (!strcmp(t->name, "fixed-array") && t->bufferFamily == 2) {
+        fputs("array<", out); formatType(out, t->element, depth + 1); fputc('>', out);
     } else if (!strcmp(t->name, "fixed-array")) {
         formatType(out, t->element, depth + 1);
         fputc('[', out);
@@ -593,6 +630,10 @@ static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
     struct expr_composite *v = e->underlying;
     if (v->location.filename)
         at = v->location;
+    if (!strcmp(target->name, "fixed-array") && target->bufferFamily == 2) {
+        error(c, at, "array<T> cannot instantiate an array; use T[n]");
+        return target;
+    }
     if (target == &unknown) {
         if (!v->nEntries) {
             error(c, at, "cannot infer an empty literal; specify an array, buffer, or struct type");
@@ -654,6 +695,7 @@ static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
                 error(c, record->fieldNames[j], "duplicate struct field initializer");
             initialized[j] = 1;
             Type *field = parameter(c, target, record->fieldTypes[j]);
+            if(v->keys[i].type==EXPR_TYPE_IDENTIFIER){Symbol *member=allocate(c,sizeof(*member));member->name=record->fieldNames[j];member->type=field;indexReference(c,((struct expr_identifier*)v->keys[i].underlying)->lexeme,member);}
             check(c, field, expectedExpression(c, field, &v->values[i], at), v->values[i].location);
         }
         for (size_t i = 0; i < record->nVarParams; i++)
@@ -869,7 +911,7 @@ static int functionFallsThrough(Context *c, struct stmt_func *function) {
 }
 
 static void function(Context *c, struct stmt_func *f) {
-    Scope scope = {c->scope, NULL};
+    Scope scope = {c->scope, NULL, f->body.open, f->body.close};
     c->scope = &scope;
     struct stmt_func *previous = c->function;
     c->function = f;
@@ -1151,7 +1193,7 @@ static int typeExpression(Context *c, expr *e, typeTokens *out) {
         if (v->parent.type != EXPR_TYPE_IDENTIFIER) return 0;
         token name = ((struct expr_identifier *)v->parent.underlying)->lexeme;
         Symbol *symbol = lookup(c, name.lexeme);
-        if (strcmp(name.lexeme, "buffer") && !(symbol && symbol->isType && symbol->type->record))
+        if (strcmp(name.lexeme, "buffer") && strcmp(name.lexeme, "array") && !(symbol && symbol->isType && symbol->type->record))
             return 0;
         size_t n = 3 + (v->nTypeArguments ? v->nTypeArguments - 1 : 0);
         for (size_t i = 0; i < v->nTypeArguments; i++) n += v->typeArguments[i].nTokens;
@@ -1218,7 +1260,7 @@ static token immutableTarget(Context *c, expr *e) {
         Type *rawParent = expression(c, &v->parent);
         Type *parent = recordReceiver(rawParent);
         token field = ((struct expr_identifier *)v->field.underlying)->lexeme;
-        if (!strcmp(parent->name, "dynamic-array") &&
+        if ((!strcmp(parent->name, "dynamic-array") || !strcmp(parent->name, "fixed-array")) &&
             (!strcmp(field.lexeme, "size") || !strcmp(field.lexeme, "length") || !strcmp(field.lexeme, "capacity")))
             return field;
         if (parent->record) {
@@ -1306,6 +1348,8 @@ static Type *expression(Context *c, expr *e) {
             if (!t->dynamicArray) error(c, at, "make requires a dynamic array type T[]");
             return t;
         }
+        if (!strcmp(t->name, "fixed-array") && t->bufferFamily == 2)
+            error(c, at, "array<T> cannot instantiate an array; use T[n]");
         if (t == &nothing) error(c, at, "new requires a storage type");
         Type *pointer = allocate(c, sizeof(*pointer));
         pointer->name = "pointer"; pointer->element = t;
@@ -1314,6 +1358,8 @@ static Type *expression(Context *c, expr *e) {
     case EXPR_TYPE_ZERO: {
         struct expr_zero *v = e->underlying;
         Type *t = typeOf(c, v->type);
+        if (!strcmp(t->name, "fixed-array") && t->bufferFamily == 2)
+            error(c, at, "array<T> cannot instantiate an array; use T[n]");
         if (t == &nothing) error(c, at, "void has no value representation");
         if (!strcmp(t->name, "buffer") && t->bufferFamily == 1)
             error(c, at, "zero requires a concrete buffer element type");
@@ -1333,6 +1379,7 @@ static Type *expression(Context *c, expr *e) {
             identifier->lexeme.lexeme = f->name.lexeme;
             Type *function = allocate(c, sizeof(*function));
             function->name = "function"; function->function = f;
+            Symbol *symbol=allocate(c,sizeof(*symbol));symbol->name=f->name;symbol->type=function;indexReference(c,t,symbol);
             return function;
         }
         if (!strcmp(t.lexeme, "true") || !strcmp(t.lexeme, "false"))
@@ -1342,6 +1389,7 @@ static Type *expression(Context *c, expr *e) {
             error(c, t, fileExtern(c, t) ? "extern functions must be called with extern.name(...)" : "unresolved name");
             return &unknown;
         }
+        indexReference(c,t,s);
         if (s->freed) error(c, t, "dynamic array has been freed; re-create it before use");
         return s->type;
     }
@@ -1494,10 +1542,33 @@ static Type *expression(Context *c, expr *e) {
     }
     case EXPR_TYPE_CALL: {
         struct expr_call *v = e->underlying;
+        if (v->func.type == EXPR_TYPE_IDENTIFIER) {
+            const char *name = ((struct expr_identifier *)v->func.underlying)->lexeme.lexeme;
+            int fields = !strcmp(name, "compilerReflectFields"), predicate = !strcmp(name, "compilerReflectIsStruct");
+            if (fields || predicate) {
+                enum compilerIntrinsic required = fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT;
+                if (!c->function || c->function->compilerIntrinsic != required) {
+                    error(c, at, "reflection intrinsics are restricted to the standard library reflect package");
+                    return &unknown;
+                }
+                if (v->nParams != 1 || v->spread) error(c, at, "reflection intrinsic requires exactly one value");
+                for (size_t i = 0; i < v->nParams; i++) expression(c, &v->params[i]);
+                return fields ? typeOf(c, c->function->resultTypes[0]) : &boolean;
+            }
+        }
         if (v->func.type == EXPR_TYPE_DOT) {
             struct expr_dot *dot = v->func.underlying;
             Type *parent = expression(c, &dot->parent);
             const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
+            Type *arrayReceiver = recordReceiver(parent);
+            if (arrayReceiver->dynamicArray && !strcmp(name, "array")) {
+                if (v->nParams || v->spread) error(c, at, "array() requires no arguments");
+                for (size_t i = 0; i < v->nParams; i++) expression(c, &v->params[i]);
+                Type *result = allocate(c, sizeof(*result));
+                result->name = "fixed-array"; result->bufferFamily = 2;
+                result->element = arrayReceiver->element;
+                return result;
+            }
             if (parent->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop"))) {
                 if (parent->immutableString) error(c, at, "strings are immutable; reassign the string instead");
                 if (!writable(c, &dot->parent)) error(c, at, "dynamic array mutation requires a writable dynamic array");
@@ -1699,11 +1770,9 @@ static Type *expression(Context *c, expr *e) {
         if ((v->operation == EXPR_ADD || v->operation == EXPR_ADD_EQUALS) &&
             !strcmp(a->name, "fixed-array") && !strcmp(b->name, "fixed-array")) {
             check(c, a->element, b->element, at);
-            if (a->bufferSize != 1 || b->bufferSize != 1) {
-                error(c, at, "array concatenation requires fixed lengths"); return &unknown;
-            }
             Type *result = allocate(c, sizeof(*result)); *result = *a;
-            result->count = a->count + b->count;
+            if (a->bufferSize == 1 && b->bufferSize == 1) result->count = a->count + b->count;
+            else { result->bufferFamily = 2; result->bufferSize = 0; result->count = 0; }
             if (v->operation == EXPR_ADD_EQUALS) {
                 if (v->left.type != EXPR_TYPE_IDENTIFIER || !writable(c, &v->left))
                     error(c, at, "array += requires a writable variable");
@@ -1856,6 +1925,12 @@ static Type *expression(Context *c, expr *e) {
         if (t == &nullValue)
             error(c, at, "null needs a typed pointer before member access");
         token field = ((struct expr_identifier *)v->field.underlying)->lexeme;
+        if (c->index) {
+            size_t n=c->nCompletionTypes++;
+            c->completionTypes=realloc(c->completionTypes,c->nCompletionTypes*sizeof(*c->completionTypes));
+            c->completionUses=realloc(c->completionUses,c->nCompletionTypes*sizeof(*c->completionUses));
+            c->completionTypes[n]=t; c->completionUses[n]=field;
+        }
         if (t->dynamicArray && (!strcmp(field.lexeme, "length") || !strcmp(field.lexeme, "capacity"))) return &integer;
 
         if (definedType(t)) {
@@ -1866,10 +1941,11 @@ static Type *expression(Context *c, expr *e) {
                 }
                 Type *callable = allocate(c, sizeof(*callable));
                 callable->name = "function"; callable->function = method; callable->receiver = t;
+                Symbol *symbol=allocate(c,sizeof(*symbol));symbol->name=method->name;symbol->type=callable;indexReference(c,field,symbol);
                 return callable;
             }
         }
-        if (!strcmp(t->name, "dynamic-array")) {
+        if (!strcmp(t->name, "dynamic-array") || !strcmp(t->name, "fixed-array")) {
             if (!strcmp(field.lexeme, "size"))
                 return &integer;
             if (!strcmp(field.lexeme, "data")) {
@@ -1891,8 +1967,12 @@ static Type *expression(Context *c, expr *e) {
                 return &unknown;
             }
             for (size_t i = 0; i < t->record->nFields; i++)
-                if (!strcmp(field.lexeme, t->record->fieldNames[i].lexeme))
-                    return parameter(c, t, t->record->fieldTypes[i]);
+                if (!strcmp(field.lexeme, t->record->fieldNames[i].lexeme)) {
+                    Type *fieldType=parameter(c,t,t->record->fieldTypes[i]);
+                    Symbol *symbol=allocate(c,sizeof(*symbol));symbol->name=t->record->fieldNames[i];symbol->type=fieldType;
+                    indexReference(c,field,symbol);
+                    return fieldType;
+                }
             struct stmt_func *method = findMethod(c, t, field.lexeme);
             if (method) {
                 if (!exportedName(method->name.lexeme) &&
@@ -1904,6 +1984,8 @@ static Type *expression(Context *c, expr *e) {
                 callable->name = "function";
                 callable->function = method;
                 callable->receiver = t;
+                Symbol *symbol=allocate(c,sizeof(*symbol));symbol->name=method->name;symbol->type=callable;
+                indexReference(c,field,symbol);
                 return callable;
             }
             error(c, field, "unknown field");
@@ -1975,6 +2057,7 @@ static void predeclare(Context *c, stmt *s) {
     }
     case STMT_ENUM: {
         struct stmt_enum *v = s->value;
+        if (!strcmp(v->name.lexeme, "array")) error(c, v->name, "array is a reserved type name");
         declare(c, v->name, &integer, 1);
         for (size_t i = 0; i < v->nMembers; i++)
             declare(c, v->names[i], &integer, 0);
@@ -2000,7 +2083,11 @@ static void statement(Context *c, stmt *s) {
         if (declared == &nothing) error(c, at, "void is not a variable storage type");
         if (declared && declared->record && declared->record->nVarParams && !v->nInitValues)
             error(c, v->vars[0], "struct with parameters requires an initializer");
-        if (declared && !strcmp(declared->name, "fixed-array")) checkBufferDimension(c, declared, v->vars[0]);
+        if (declared && !strcmp(declared->name, "fixed-array")) {
+            checkBufferDimension(c, declared, v->vars[0]);
+            if (declared->bufferFamily == 2 && !v->nInitValues)
+                error(c, v->vars[0], "array<T> requires an existing array initializer; instantiate with T[n]");
+        }
         if (declared && !strcmp(declared->name, "buffer")) {
             checkBufferDimension(c, declared, v->vars[0]);
             if (declared->bufferSize == 0 && !v->nInitValues)
@@ -2052,6 +2139,7 @@ static void statement(Context *c, stmt *s) {
             bound->semanticBase = &any;
             declare(c, v->typeParamNames[i], bound, 1);
         }
+        c->declaringMembers++; c->memberOwner=v->name;
         for (size_t i = 0; i < v->nFields; i++) {
             Type *fieldType = typeOf(c, v->fieldTypes[i]);
             if (fieldType == &nothing) error(c, v->fieldNames[i], "void is not a field storage type");
@@ -2061,6 +2149,7 @@ static void statement(Context *c, stmt *s) {
         }
         for (size_t i = 0; i < v->nFields; i++)
             checkBufferDimension(c, typeOf(c, v->fieldTypes[i]), v->fieldNames[i]);
+        c->declaringMembers--; c->memberOwner=(token){0};
         Type *oldReceiver = c->implicitReceiver;
         c->implicitReceiver = receiverType;
         for (size_t i = 0; i < v->nOperatorMethods; i++)
@@ -2103,7 +2192,7 @@ static void statement(Context *c, stmt *s) {
     }
     case STMT_IF: {
         struct stmt_if *v = s->value;
-        Scope scope = {c->scope, NULL};
+        Scope scope = {c->scope, NULL, v->open, v->close};
         c->scope = &scope;
         if (v->preStmt)
             statement(c, v->preStmt);
@@ -2117,7 +2206,7 @@ static void statement(Context *c, stmt *s) {
     }
     case STMT_FOR: {
         struct stmt_for *v = s->value;
-        Scope scope = {c->scope, NULL};
+        Scope scope = {c->scope, NULL, v->open, v->close};
         c->scope = &scope;
         if (v->initializer)
             statement(c, v->initializer);
@@ -2183,12 +2272,14 @@ static void statement(Context *c, stmt *s) {
         break;
     }
 }
-semanticResult analyzeSemantics(parseResult *program) {
+static void finishIndex(Context *c);
+static semanticResult analyzeIndexed(parseResult *program, semanticIndex *index) {
     if (!program || program->hasError)
         return (semanticResult){1};
     Scope root = {0};
     Context c = {.scope = &root, .program = program};
     // Give extern declarations private semantic names while retaining C linkage.
+    c.index = index;
     for (size_t i = 0; i < program->nStatements; i++) {
         stmt *s = &program->statements[i];
         if (s->type != STMT_FUNC) continue;
@@ -2232,6 +2323,7 @@ semanticResult analyzeSemantics(parseResult *program) {
                 error(&c, symbol->name, "cannot infer global type; add an explicit type");
     for (size_t i = 0; i < program->nStatements; i++)
         if (program->statements[i].type != STMT_VAR) statement(&c, &program->statements[i]);
+    if (index) finishIndex(&c);
     while (c.allocations) {
         Allocation *a = c.allocations;
         c.allocations = a->next;
@@ -2239,4 +2331,90 @@ semanticResult analyzeSemantics(parseResult *program) {
         free(a);
     }
     return (semanticResult){c.errors};
+}
+
+static size_t tokenOffset(Context *c, token t) {
+    const char *text=programSource(c->program,t.filename);if(!text)return 0;
+    size_t p=0;long line=1;while(text[p]&&line<t.line)if(text[p++]=='\n')line++;
+    return p+(t.column>0?(size_t)t.column-1:0);
+}
+static int sameToken(token a,token b){return a.filename&&b.filename&&!strcmp(a.filename,b.filename)&&a.line==b.line&&a.column==b.column;}
+static char *sourceName(Context *c,token t){
+    const char *s=programSource(c->program,t.filename);size_t p=tokenOffset(c,t),n=0;uint32_t code;size_t k;
+    while((k=unicodeDecode(s+p+n,&code))&&unicodeContinue(code))n+=k;
+    return n?strndup(s+p,n):strdup(t.lexeme?t.lexeme:"");
+}
+static size_t indexSymbol(Context *c,Symbol *symbol){
+    if(!c->index)return 0;
+    semanticIndex *index=c->index;
+    for(size_t i=0;i<index->nSymbols;i++)if(sameToken(index->symbols[i].declaration,symbol->name))return i;
+    size_t i=index->nSymbols++;
+    index->symbols=realloc(index->symbols,index->nSymbols*sizeof(*index->symbols));
+    c->indexedSymbols=realloc(c->indexedSymbols,index->nSymbols*sizeof(*c->indexedSymbols));
+    c->indexedSymbols[i]=symbol;
+    token open=c->scope->open,close=c->scope->close;
+    if(!open.filename&&c->function){open=c->function->body.open;close=c->function->body.close;}
+    index->symbols[i]=(semanticSymbol){.declaration=symbol->name,.name=sourceName(c,symbol->name),
+        .packageId=sourcePackage(c,symbol->name.filename),.begin=open.filename?tokenOffset(c,open):0,
+        .end=close.filename?tokenOffset(c,close):(size_t)-1,.global=!c->scope->parent,.member=c->declaringMembers,
+        .kind=symbol->isType?7:symbol->type&&symbol->type->function?3:6,.owner=c->memberOwner};
+    return i;
+}
+static void indexReference(Context *c,token use,Symbol *symbol){
+    if(!c->index||!use.filename||!symbol)return;
+    semanticIndex *index=c->index;size_t binding=indexSymbol(c,symbol);
+    for(size_t i=0;i<index->nReferences;i++)if(sameToken(index->references[i].use,use)&&index->references[i].symbol==binding)return;
+    size_t i=index->nReferences++;
+    index->references=realloc(index->references,index->nReferences*sizeof(*index->references));
+    c->referenceTypes=realloc(c->referenceTypes,index->nReferences*sizeof(*c->referenceTypes));
+    index->references[i]=(semanticReference){.use=use,.symbol=binding};c->referenceTypes[i]=symbol->type;
+}
+static char *typeText(Type *t){
+    char *text=NULL;size_t size=0;FILE *out=open_memstream(&text,&size);if(!out)return strdup("?");
+    if(t->immutableString)fputs("string",out);else formatType(out,t,0);fclose(out);
+    // Package qualification is an implementation detail, not a source type name.
+    char *p=text;while((p=strstr(p,"__pkg"))){char *q=p+5;while(*q>='0'&&*q<='9')q++;if(*q=='_')memmove(p,q+1,strlen(q+1)+1);else p=q;}
+    return text;
+}
+static void finishIndex(Context *c){
+    semanticIndex *index=c->index;
+    for(size_t i=0;i<index->nReferences+c->nCompletionTypes;i++){
+        Type *original=i<index->nReferences?c->referenceTypes[i]:c->completionTypes[i-index->nReferences],*t=recordReceiver(representation(original));
+        semanticMembers group={.use=i<index->nReferences?index->references[i].use:c->completionUses[i-index->nReferences],.collection=t->dynamicArray?1:!strcmp(t->name,"fixed-array")?2:0,.immutable=t->immutableString};
+        if(t->record){
+            for(size_t j=0;j<t->record->nFields;j++){
+                token name=t->record->fieldNames[j];
+                if(!exportedName(name.lexeme)&&sourcePackage(c,name.filename)!=sourcePackage(c,group.use.filename))continue;
+                Symbol *member=allocate(c,sizeof(*member));member->name=name;member->type=parameter(c,t,t->record->fieldTypes[j]);
+                size_t id=indexSymbol(c,member);index->symbols[id].member=1;index->symbols[id].owner=t->record->name;
+                group.symbols=realloc(group.symbols,(group.count+1)*sizeof(size_t));group.symbols[group.count++]=id;
+            }
+        }
+        for(size_t j=0;j<c->program->nStatements;j++)if(c->program->statements[j].type==STMT_FUNC){
+            struct stmt_func *f=c->program->statements[j].value;
+            if(!f->receiverType.nTokens||findMethod(c,original,f->name.lexeme)!=f)continue;
+            if(!exportedName(f->name.lexeme)&&sourcePackage(c,f->name.filename)!=sourcePackage(c,group.use.filename))continue;
+            Type *callable=allocate(c,sizeof(*callable));callable->name="function";callable->function=f;callable->receiver=original;
+            Symbol *member=allocate(c,sizeof(*member));member->name=f->name;member->type=callable;
+            size_t id=indexSymbol(c,member);index->symbols[id].member=1;index->symbols[id].owner=t->record?t->record->name:t->declaration?t->declaration->name:(token){0};
+            group.symbols=realloc(group.symbols,(group.count+1)*sizeof(size_t));group.symbols[group.count++]=id;
+        }
+        if(group.count||group.collection){index->members=realloc(index->members,(index->nMembers+1)*sizeof(*index->members));index->members[index->nMembers++]=group;}
+    }
+    for(size_t i=0;i<index->nSymbols;i++){
+        Type *t=c->indexedSymbols[i]->type;index->symbols[i].type=typeText(t);
+        while(!definedType(t)&&t->element&&!strcmp(t->name,"pointer"))t=t->element;
+        if(t->declaration)index->symbols[i].typeDeclaration=t->declaration->name;
+        else if(t->record)index->symbols[i].typeDeclaration=t->record->name;
+    }
+    for(size_t i=0;i<index->nReferences;i++)index->references[i].type=typeText(c->referenceTypes[i]);
+    free(c->indexedSymbols);free(c->referenceTypes);free(c->completionTypes);free(c->completionUses);
+}
+semanticResult analyzeSemantics(parseResult *program){return analyzeIndexed(program,NULL);}
+semanticResult indexSemantics(parseResult *program,semanticIndex *index){memset(index,0,sizeof(*index));return analyzeIndexed(program,index);}
+void freeSemanticIndex(semanticIndex *index){
+    for(size_t i=0;i<index->nSymbols;i++){free(index->symbols[i].name);free(index->symbols[i].type);}
+    for(size_t i=0;i<index->nReferences;i++)free(index->references[i].type);
+    for(size_t i=0;i<index->nMembers;i++)free(index->members[i].symbols);
+    free(index->symbols);free(index->references);free(index->members);memset(index,0,sizeof(*index));
 }

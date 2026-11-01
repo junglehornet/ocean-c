@@ -9,6 +9,10 @@ packageBuild *loadPackage(const char *location);
 typedef struct packageSource { const char *path, *text; } packageSource;
 packageBuild *loadPackageWithSources(const char *location, const packageSource *sources, size_t count);
 const char *packageDirectory(packageBuild *build);
+/* Editor queries may inspect successfully parsed sources after binding errors. */
+parseResult *packagePartialProgram(packageBuild *build);
 parseResult *packageProgram(packageBuild *build);
+typedef void (*packageImportVisitor)(const char *file, const char *alias, size_t packageId, void *context);
+void visitPackageImports(packageBuild *build, packageImportVisitor visitor, void *context);
 void freePackage(packageBuild *build);
 #endif

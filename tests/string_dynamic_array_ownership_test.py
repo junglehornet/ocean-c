@@ -315,6 +315,85 @@ void writeFirst(char *data) { data[0] = 'X'; }
         }
         return extern.liveAllocations() - baseline;
     }''')
+    program('''struct Item { name string; values int[]; }
+    func copy(a array<string>) array<string> { a[0] = "callee"; return a; }
+    func makeWords(n int) array<string> {
+        words: string[n]; if (n > 0) words[0] = "runtime"; return words;
+    }
+    func copyItems(a array<Item>) array<Item> { a[0].name = "changed"; return a; }
+    func copyNested(a array<string[2]>) array<string[2]> { a[0][0] = "nested"; return a; }
+    func recursive(a array<string>, depth int) array<string> {
+        if (depth == 0) return a; return recursive(a, depth - 1);
+    }
+    func exercise() int {
+        original: string[2] = {"first", "second"};
+        for (i := 0; i < 50; i++) {
+            a := copy(original); b := makeWords(3); c := recursive(a, 3);
+            if (original[0] != "first" || a[0] != "callee" || b[0] != "runtime" || len(b) != 3 || c[1] != "second") return 1;
+            a = b; a = a; if (len(a) != 3 || a[0] != "runtime") return 2;
+            items: Item[1] = {Item{"record", {1, 2}}}; modified := copyItems(items);
+            if (items[0].name != "record" || modified[0].name != "changed" || modified[0].values[1] != 2) return 3;
+            nested: string[2][1] = {{"one", "two"}}; changed := copyNested(nested);
+            if (changed[0][0] != "nested" || nested[0][0] != "one" || changed[0][1] != "two") return 4;
+            copy(original); makeWords(2);
+        }
+        return 0;
+    }
+    func main() int {
+        if (exercise() != 0) return 1;
+        return extern.liveAllocations();
+    }''')
+    program('''func create(n int) array<array<string>> {
+        a: string[n][2]; a[1][0] = "nested"; return a;
+    }
+    func exercise() int {
+        for (i := 0; i < 20; i++) {
+            values := create(3); if (len(values[1]) != 3 || values[1][0] != "nested") return 1;
+            n := 3; p := new(string[n]); (*p)[0] = "heap";
+            if (len(*p) != n || (*p)[0] != "heap") return 2; free(p);
+        }
+        return 0;
+    }
+    func main() int { if (exercise() != 0) return 1; return extern.liveAllocations(); }''')
+    program('''func copy(a array<array<string>>) array<array<string>> { return a; }
+    func inspect(v any) int {
+        a := v.(array<string>); a[0] = "changed";
+        switch (b := v.(type)) {
+        case array<string>: if (b[0] != "one" || len(b) != 2) return 1;
+        default: return 2;
+        }
+        return 0;
+    }
+    func exercise() int {
+        a: string[2][1] = {{"one", "two"}};
+        b := copy(a); b[0][0] = "changed";
+        if (a[0][0] != "one" || b[0][1] != "two") return 1;
+        if (inspect(a[0]) != 0) return 2;
+        return 0;
+    }
+    func main() int { if (exercise() != 0) return 1; return extern.liveAllocations(); }''')
+    program('''struct Entry { name string; values int[]; }
+    func snapshot(values string[]) array<string> { return values.array(); }
+    func exercise() int {
+        for (i := 0; i < 50; i++) {
+            words: string[] = {"one", "two"}; copied := words.array(); returned := snapshot(words);
+            words[0] = "changed"; copied[1] = "independent"; free(words);
+            if (copied[0] != "one" || returned[1] != "two") return 1;
+            nested: string[][] = {{"nested"}, {"second"}};
+            arrays := nested.array(); nested[0][0] = "changed"; free(nested);
+            if (arrays[0][0] != "nested" || arrays[1][0] != "second") return 2;
+            records: Entry[] = {Entry{"record", {1, 2}}}; saved := records.array(); free(records);
+            if (saved[0].name != "record" || saved[0].values[1] != 2) return 3;
+            saved[0].values[0] = 9;
+            p := new(string[]); *p = {"heap"}; heap := p.array(); free(p);
+            if (heap[0] != "heap") return 4;
+            heap = returned; heap = heap;
+            heap[0] = "separate"; if (returned[0] != "one") return 5;
+            make(string[]).array();
+        }
+        return 0;
+    }
+    func main() int { if (exercise() != 0) return 1; return extern.liveAllocations(); }''')
     for statement in ("s[0] = 'x';", "s[0]++;", "s[0] += 1;", "s.append(1);", "s.prepend(1);", "s.add(0, 1);", "s.data = {1};"):
         rejected('func main() { s := "abc"; ' + statement + ' }', 'immutable')
     rejected('func main() { s := "abc"; p := &s[0]; }', 'immutable')

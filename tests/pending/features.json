@@ -2,50 +2,6 @@
   "version": 1,
   "features": [
     {
-      "id": "unicode",
-      "stage": "scanner",
-      "reason": "Unicode escapes and non-ASCII identifiers are incomplete.",
-      "syntax": "existing",
-      "cases": [
-        {
-          "id": "short_escape",
-          "source": "\"\\u03A9\"",
-          "check": "omega"
-        },
-        {
-          "id": "long_escape",
-          "source": "\"\\U0001F30A\"",
-          "check": "wave"
-        },
-        {
-          "id": "identifier",
-          "source": "\u03b1",
-          "check": "unicode_identifier",
-          "missing_diagnostic": "Unexpected or invalid character"
-        },
-        {
-          "id": "invalid_escape",
-          "source": "\"\\uZZZZ\"",
-          "check": "reject",
-          "rejection_diagnostic": "[Uu]nicode|escape"
-        }
-      ]
-    },
-    {
-      "id": "scientific_numbers",
-      "stage": "scanner",
-      "reason": "Exponent notation is not recognized by the numeric scanner.",
-      "syntax": "proposed",
-      "cases": [
-        {
-          "id": "exponent",
-          "source": "1.25e2",
-          "check": "exponent",
-          "missing_diagnostic": "invalid numeric digit"
-        }
-      ]
-    },
-    {
       "id": "debug_printer",
       "stage": "debug",
       "reason": "Newer expression nodes still abort in the debug AST printer.",

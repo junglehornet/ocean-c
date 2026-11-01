@@ -117,7 +117,7 @@ char scanning_error = 0;
 
 static void scan_literal_string(struct scannerState *state);
 static token scan_raw_string(struct scannerState *state);
-static uint16_t scan_literal_char(struct scannerState *state);
+static uint32_t scan_literal_char(struct scannerState *state);
 static void scan_literal_number(struct scannerState *state);
 static void multiline_comment(struct scannerState *state);
 
@@ -167,9 +167,6 @@ tokenlist *scanTokens(char *source, char *filename) {
                 break;
             case ']':
                 push_tokenlist(list, (token){.type = RIGHT_BRACKET, .lexeme = "]", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
-                break;
-            case '_':
-                push_tokenlist(list, (token){.type = UNDERSCORE, .lexeme = "_", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '\"':
                 scan_literal_string(&state);
@@ -310,7 +307,7 @@ tokenlist *scanTokens(char *source, char *filename) {
                     scanning_error = 1;
                     break;
                 }
-                uint16_t c = scan_literal_char(&state);
+                uint32_t c = scan_literal_char(&state);
                 if (scanning_error) break;
                 if (next_char(&state) != '\'') {
                     diagnostic(state.source, (token){.filename = filename, .line = state.thisLine, .column = state.thisColumn}, "scanner", "error", "Expected closing quote after character literal");
@@ -341,21 +338,24 @@ tokenlist *scanTokens(char *source, char *filename) {
                 } else {
                     charlist chars = {0};
                     init_charlist(&chars);
-                    if (!is_alphaNumeric(currentChar)) {
-                        diagnostic(state.source, (token){.filename = state.filename, .line = state.line, .column = state.column}, "scanner", "error", "Unexpected or invalid character: '%c'. Note: Only the characters A-Z, a-z, 0-9, and underscores are allowed in identifiers.", currentChar);
-                        free_charlist(&chars);
-                        scanning_error = 1;
-                        break;
+                    uint32_t code; size_t bytes = unicodeDecode(state.source + state.offset, &code);
+                    if (!bytes || !unicodeStart(code)) {
+                        diagnostic(state.source, (token){.filename=state.filename,.line=state.line,.column=state.column}, "scanner", "error", "Unexpected or invalid character or UTF-8 encoding in identifier");
+                        free_charlist(&chars); scanning_error = 1; break;
                     }
-                    push_charlist(&chars, currentChar);
-                    while (is_alphaNumeric(peek(&state))) push_charlist(&chars, next_char(&state));
+                    for (;;) {
+                        for (size_t i=0;i<bytes;i++) { push_charlist(&chars,state.source[state.offset]); if(i+1<bytes)next_char(&state); }
+                        bytes=unicodeDecode(state.source+state.offset+1,&code);
+                        if(!bytes || !unicodeContinue(code))break;
+                        next_char(&state);
+                    }
                     char *chararr = to_chararray(&chars);
                     char *lexeme = malloc(chars.top + 1);
                     memcpy(lexeme, chararr, chars.top);
                     lexeme[chars.top] = '\0';
                     free(chararr);
                     free_charlist(&chars);
-                    push_tokenlist(list, (token){.type = get_keyword_type(lexeme), .lexeme = lexeme, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                    push_tokenlist(list, (token){.type = !strcmp(lexeme,"_") ? UNDERSCORE : get_keyword_type(lexeme), .lexeme = lexeme, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
         }
         if (scanning_error) goto end_loop;
@@ -438,9 +438,16 @@ static void scan_literal_string(struct scannerState *state) {
             goto end_loop;
         }
 
-        uint16_t c = scan_literal_char(state);
-        if (c <= 255) {
-            push_charlist(state->lexeme, c);
+        int utf8 = (unsigned char)currentChar >= 128 ||
+                   (currentChar == '\\' && (peek(state) == 'u' || peek(state) == 'U'));
+        uint32_t c = scan_literal_char(state);
+        if (scanning_error) return;
+        if (!utf8 || c < 128) push_charlist(state->lexeme, c);
+        else {
+            if (c < 0x800) push_charlist(state->lexeme, 0xc0 | (c >> 6));
+            else if (c < 0x10000) { push_charlist(state->lexeme, 0xe0 | (c >> 12)); push_charlist(state->lexeme,0x80 | ((c>>6)&63)); }
+            else { push_charlist(state->lexeme,0xf0 | (c>>18));push_charlist(state->lexeme,0x80 | ((c>>12)&63));push_charlist(state->lexeme,0x80 | ((c>>6)&63)); }
+            push_charlist(state->lexeme,0x80 | (c&63));
         }
     }
 
@@ -483,69 +490,41 @@ static token scan_raw_string(struct scannerState *state) {
 }
 
 static void scan_literal_number(struct scannerState *state) {
-    long line = state->line, column = state->column;
-    size_t start = state->offset;
-    int base = 10;
-    if (state->source[state->offset] == '0') {
-        switch (peek(state)) {
-            case 'x': case 'X': base = 16; break;
-            case 'b': case 'B': base = 2; break;
-            case 'o': case 'O': base = 8; break;
-        }
-        if (base != 10) { next_char(state); next_char(state); }
+    size_t start=state->offset, at=start; unsigned base=10; int floating=0;
+    const char *s=state->source;
+    if(s[at]=='0') { switch(s[at+1]) {case 'x':case 'X':base=16;break;case 'b':case 'B':base=2;break;case 'o':case 'O':base=8;break;} if(base!=10)at+=2; }
+    size_t digits=at; uint64_t integer=0; long double mantissa=0; int overflow=0;
+    while(is_digit(s[at],base==16)) {
+        unsigned digit=char_to_decimal(s[at]);
+        if(digit>=base)goto invalid;
+        if(integer>(UINT64_MAX-digit)/base)overflow=1;
+        integer=integer*base+digit;mantissa=mantissa*base+digit;at++;
     }
-    long integer = 0;
-    size_t digits = 0;
-    while (is_digit(state->source[state->offset], 1)) {
-        int digit = char_to_decimal(state->source[state->offset]);
-        if (digit >= base || integer > (LONG_MAX - digit) / base) {
-            diagnostic(state->source, (token){.filename = state->filename, .line = line, .column = column}, "scanner", "error", "invalid numeric digit or integer overflow");
-            scanning_error = 1;
-            return;
-        }
-        integer = integer * base + digit;
-        digits++;
-        if (!is_digit(peek(state), 1)) break;
-        next_char(state);
+    if(at==digits)goto invalid;
+    long double value=mantissa;
+    if(s[at]=='.' && is_digit(s[at+1],base==16)) {
+        floating=1;at++;long double divisor=base;
+        while(is_digit(s[at],base==16)) {unsigned digit=char_to_decimal(s[at]);if(digit>=base)goto invalid;value+=digit/divisor;divisor*=base;at++;}
     }
-    if (!digits) {
-        diagnostic(state->source, (token){.filename = state->filename, .line = line, .column = column}, "scanner", "error", "Expected numeric digit after base prefix");
-        scanning_error = 1;
-        return;
+    if(base==10 && (s[at]=='e'||s[at]=='E')) {
+        floating=1;at++;int negative=0;if(s[at]=='+'||s[at]=='-'){negative=s[at]=='-';at++;}
+        if(!is_digit(s[at],0))goto invalid;
+        unsigned exponent=0;while(is_digit(s[at],0)){if(exponent<100000)exponent=exponent*10+(s[at]-'0');at++;}
+        if (value != 0) value*=powl(10,negative?-(long double)exponent:(long double)exponent);
     }
-    double value = (double)integer;
-    char floating = 0;
-    if (peek(state) == '.' && is_digit(state->source[state->offset + 2], base == 16)) {
-        floating = 1;
-        next_char(state);
-        next_char(state);
-        double divisor = base;
-        do {
-            int digit = char_to_decimal(state->source[state->offset]);
-            if (digit >= base) {
-                diagnostic(state->source, (token){.filename = state->filename, .line = line, .column = column}, "scanner", "error", "invalid numeric digit");
-                scanning_error = 1;
-                return;
-            }
-            value += digit / divisor;
-            divisor *= base;
-            if (!is_digit(peek(state), 1)) break;
-            next_char(state);
-        } while (1);
-    }
-    size_t length = state->offset - start + 1;
-    char *lexeme = malloc(length + 1);
-    assert(lexeme);
-    memcpy(lexeme, state->source + start, length);
-    lexeme[length] = '\0';
-    token result = {.type = floating ? LITERAL_FLOAT : LITERAL_INT, .lexeme = lexeme,
-        .line = line, .column = column, .filename = state->filename};
-    if (floating) result.numValue.floating = value;
-    else result.numValue.integer = integer;
-    push_tokenlist(state->list, result);
+    if(is_alphaNumeric(s[at]))goto invalid;
+    if((overflow && !floating) || (floating && !isfinite((double)value)))goto invalid;
+    token result={.type=floating?LITERAL_FLOAT:LITERAL_INT,.line=state->thisLine,.column=state->thisColumn,.filename=state->filename};
+    size_t n=at-start;result.lexeme=malloc(n+1);assert(result.lexeme);memcpy(result.lexeme,s+start,n);result.lexeme[n]=0;
+    if(floating)result.numValue.floating=(double)value;
+    else {result.unsignedLiteral=integer>LONG_MAX;result.numValue.unsignedInteger=integer;}
+    while(state->offset+1<at)next_char(state);
+    push_tokenlist(state->list,result);return;
+invalid:
+    diagnostic(state->source,(token){.filename=state->filename,.line=state->thisLine,.column=state->thisColumn},"scanner","error","invalid numeric digit, exponent, or integer overflow (maximum UINT64_MAX)");scanning_error=1;
 }
 
-static uint16_t scan_literal_char(struct scannerState *state) {
+static uint32_t scan_literal_char(struct scannerState *state) {
     char currentChar = state->source[state->offset];
     
     switch (currentChar) {
@@ -575,17 +554,30 @@ static uint16_t scan_literal_char(struct scannerState *state) {
                 case 'x':
                     next_char(state);
                     return scan_numn(state, 2, 2, 16, 1);
-                case 'u':
-                    diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "warning", "ocean-c does not support unicode yet and \\u is ignored.");
-                    return 'u';
-                case 'U':
-                    diagnostic(state->source, (token){.filename = state->filename, .line = state->line, .column = state->column}, "scanner", "warning", "ocean-c does not support unicode yet and \\U is ignored.");
-                    return 'U';
+                case 'u': case 'U': {
+                    unsigned count = currentChar == 'u' ? 4 : 8;
+                    // currentChar is updated to the escaped letter above.
+                    uint32_t value = 0;
+                    for (unsigned i=0;i<count;i++) {
+                        char digit = next_char(state);
+                        if (!is_digit(digit,1)) { scanning_error=1; break; }
+                        value = (value<<4) | (unsigned)char_to_decimal(digit);
+                    }
+                    if (scanning_error || value>0x10ffff || (value>=0xd800 && value<=0xdfff)) {
+                        diagnostic(state->source,(token){.filename=state->filename,.line=state->line,.column=state->column},"scanner","error","Invalid Unicode escape sequence");
+                        scanning_error=1; return UINT32_MAX;
+                    }
+                    return value;
+                }
                 default:
                     return scan_numn(state, 1, 3, 8, 0);
             }
-        default:
-            return (unsigned char)currentChar;
+        default: {
+            uint32_t code; size_t n=unicodeDecode(state->source+state->offset,&code);
+            if(!n){diagnostic(state->source,(token){.filename=state->filename,.line=state->line,.column=state->column},"scanner","error","Invalid UTF-8 encoding");scanning_error=1;return UINT32_MAX;}
+            for(size_t i=1;i<n;i++)next_char(state);
+            return code;
+        }
     }
 }
 

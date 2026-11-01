@@ -1,6 +1,8 @@
 #ifndef ocean_c_token
 #define ocean_c_token
 #include <stddef.h>
+#include <stdint.h>
+#include "unicode.h"
 
 enum tokenType {
     // keywords and types
@@ -44,9 +46,11 @@ enum tokenType {
 
 typedef struct {
     char *lexeme;
+    char unsignedLiteral; // Integer magnitude exceeds LONG_MAX, but fits uint64_t.
     size_t stringLength; // Decoded bytes, excluding the scanner storage terminator.
     union {
         long integer;
+        uint64_t unsignedInteger;
         double floating;
     } numValue;
     long line, column;
@@ -62,7 +66,7 @@ void printToken(token tok);
 
 /* Identifiers currently use the ASCII alphabet supported by the scanner. */
 static inline int exportedName(const char *name) {
-    return name && name[0] >= 'A' && name[0] <= 'Z';
+    uint32_t c; return name && unicodeDecode(name, &c) && unicodeUpper(c);
 }
 
 #endif

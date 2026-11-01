@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "backend.h"
+#include "build_cache.h"
+#include "llvm_packages.h"
 #include "semantic.h"
 #include "package.h"
 #include "lsp.h"
@@ -43,6 +45,25 @@ static int sameFile(const char *a, const char *b) {
     struct stat x, y;
     return !stat(a, &x) && !stat(b, &y) && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
 }
+static int nativeBuild(buildCache *cache, parseResult *program, const char *irPath, const char *output, int library) {
+    char key[65];
+    if (!buildCacheObjectKey(cache,irPath,key)) return library?compileLLVMObject(irPath,output):compileLLVM(irPath,output);
+    llvmPackages units={0};
+    if(splitLLVMPackages(program,irPath,&units))return 1;
+    char **objects=calloc(units.count,sizeof(char*));int failed=!objects;
+    for(size_t i=0;!failed&&i<units.count;i++){
+        objects[i]=malloc(strlen(units.paths[i])+3);if(!objects[i]){failed=1;break;}
+        sprintf(objects[i],"%s.o",units.paths[i]);
+        if(!buildCacheObjectKey(cache,units.paths[i],key)){failed=1;break;}
+        if(!readBuildCache(cache,key,objects[i])){
+            failed=compileLLVMObject(units.paths[i],objects[i]);char after[65];
+            if(!failed&&buildCacheObjectKey(cache,units.paths[i],after)&&!strcmp(key,after))storeBuildCache(cache,key,objects[i]);
+        }
+    }
+    if(!failed)failed=linkLLVMObjects((const char**)objects,units.count,irPath,output,library);
+    if(objects){for(size_t i=0;i<units.count;i++){if(objects[i]){unlink(objects[i]);free(objects[i]);}}free(objects);}
+    freeLLVMPackages(&units);return failed;
+}
 static int packageMain(int argc, char **argv) {
     int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, argumentStart = argc;
     const char *location = NULL, *output = NULL;
@@ -72,6 +93,7 @@ static int packageMain(int argc, char **argv) {
         freePackage(build); return 1;
     }
     int failed = analyzeSemantics(program).nErrors != 0;
+    if (check && !failed) failed = checkBackend(program);
     if (failed || check) { freePackage(build); return failed; }
     char *temporaryDirectory = NULL, *temporaryExecutable = NULL, *defaultOutput = NULL;
     struct sigaction oldInterrupt, oldTerminate, oldHangup;
@@ -118,21 +140,22 @@ static int packageMain(int argc, char **argv) {
         if (sameFile(output, program->sources[i].filename)) {
             fprintf(stderr, "ocean: output would overwrite an input file\n"); failed = 1;
         }
+    buildCache *cache = failed ? NULL : openBuildCache(argv[0], program, packageDirectory(build));
     char irPath[] = "/tmp/ocean-ir-XXXXXX";
     int fd = failed ? -1 : mkstemp(irPath);
-    FILE *ir = fd < 0 ? NULL : fdopen(fd, "w");
-    if (!failed && !ir) {
-        perror("ocean: could not create IR file"); failed = 1;
-        if (fd >= 0) close(fd);
+    if (!failed && fd < 0) { perror("ocean: could not create IR file"); failed = 1; }
+    if (fd >= 0) close(fd);
+    if (!failed && !readBuildCache(cache, buildCacheIRKey(cache), irPath)) {
+        FILE *ir = fopen(irPath, "w");
+        if (!ir) { perror("ocean: could not create IR file"); failed = 1; }
+        else {
+            failed = emitLLVM(program, ir);
+            if (fclose(ir)) failed = 1;
+            if (!failed) storeBuildCache(cache, buildCacheIRKey(cache), irPath);
+        }
     }
-    if (ir) {
-        failed = emitLLVM(program, ir);
-        if (fclose(ir)) failed = 1;
-        if (!failed) failed = emit ? writeIR(irPath, output)
-                                  : program->isLibrary ? compileLLVMObject(irPath, output)
-                                                       : compileLLVM(irPath, output);
-    }
-    unlink(irPath);
+    if (!failed) failed = emit ? writeIR(irPath, output) : nativeBuild(cache, program, irPath, output, program->isLibrary);
+    unlink(irPath); closeBuildCache(cache);
     freePackage(build);
     int status = failed ? 1 : 0;
     if (run && !failed && !interrupted) {
@@ -141,14 +164,20 @@ static int packageMain(int argc, char **argv) {
         else {
             arguments[0] = temporaryExecutable;
             for (int i = argumentStart; i < argc; i++) arguments[i - argumentStart + 1] = argv[i];
+            sigset_t blocked, previous;
+            sigemptyset(&blocked);
+            sigaddset(&blocked, SIGINT); sigaddset(&blocked, SIGTERM); sigaddset(&blocked, SIGHUP);
+            sigprocmask(SIG_BLOCK, &blocked, &previous);
             pid_t child = fork();
             if (!child) {
                 signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGHUP, SIG_DFL);
+                sigprocmask(SIG_SETMASK, &previous, NULL);
                 execv(temporaryExecutable, arguments); perror("ocean run"); _exit(127);
             }
-            if (child < 0) { perror("ocean run: fork"); status = 1; }
+            if (child < 0) { sigprocmask(SIG_SETMASK, &previous, NULL); perror("ocean run: fork"); status = 1; }
             else {
                 runningChild = child;
+                sigprocmask(SIG_SETMASK, &previous, NULL);
                 if (interrupted) kill(child, interrupted);
                 int childStatus;
                 while (waitpid(child, &childStatus, 0) < 0) {
@@ -222,6 +251,11 @@ int main(int argc, char **argv) {
         }
         return packageMain(argc, argv);
     }
+    if (argc > 1 && !strcmp(argv[1], "clean")) {
+        if (argc == 3 && (!strcmp(argv[2], "--cache") || !strcmp(argv[2], "-cache"))) return cleanBuildCache();
+        if (argc == 3 && !strcmp(argv[2], "--help")) { puts("Usage: ocean clean --cache"); return 0; }
+        fputs("Usage: ocean clean --cache\n", stderr); return 1;
+    }
     if (argc > 1 && !strcmp(argv[1], "mod")) return moduleMain(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "run"))) {
         if (argc == 3 && !strcmp(argv[2], "--help")) {
@@ -236,7 +270,8 @@ int main(int argc, char **argv) {
                "       ocean run [location] [-- program-arguments]\n"
                "       ocean check [location]\n"
                "       ocean check --lsp\n"
-               "       ocean mod init [name]\n");
+               "       ocean mod init [name]\n"
+               "       ocean clean --cache\n");
         return argc == 1 ? 1 : 0;
     }
     fprintf(stderr, "ocean: unknown command: %s\n", argv[1]);

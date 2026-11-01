@@ -93,10 +93,10 @@ int main(void) {
     r = valid("struct Pair<T, U any, V ~int | ~string,> { first Box<Box<T>>; second U; }");
     box = r.statements[0].value;
     assert(box->nTypeParams == 3 && box->typeParamConstraints[2].nTokens == 5);
-    assert(box->fieldTypes[0].tokens[box->fieldTypes[0].nTokens - 1].type == BITSHIFT_RIGHT);
+    assert(box->fieldTypes[0].tokens[box->fieldTypes[0].nTokens - 1].type == GREATER_THAN);
     r = valid("type Nested Box<Box<int>>;");
     struct stmt_type *type = r.statements[0].value;
-    assert(type->underlying.nTokens == 6 && type->underlying.tokens[5].type == BITSHIFT_RIGHT);
+    assert(type->underlying.nTokens == 7 && type->underlying.tokens[6].type == GREATER_THAN);
     valid("type Deep Box<Box<Box<int>>>;");
     valid("type Mixed Box<Box[int], Pair<int, []string>>;");
     valid("interface Derived<T Box<int>> { Base<Box<T>>; Read(value Box<T>) Box<T>; }");
@@ -111,7 +111,7 @@ int main(void) {
     assert(inst->typeArguments[0].nTokens == 4);
     e = expression("make<Box<Box<int>>>(x);");
     inst = instance(((struct expr_call*)e.underlying)->func, 1);
-    assert(inst->typeArguments[0].nTokens == 6);
+    assert(inst->typeArguments[0].nTokens == 7);
     e = expression("make<Box<int>>(x);");
     inst = instance(((struct expr_call*)e.underlying)->func, 1);
     assert(inst->typeArguments[0].nTokens == 4 && inst->typeArguments[0].tokens[3].type == GREATER_THAN);
@@ -183,7 +183,7 @@ int main(void) {
     assert(sw->isTypeSwitch && sw->binding.type == EOF_TOKEN);
     sw = switchNode("switch (prepare(); item := value.(type)) { case []int, Box<Box<int>>, pkg.Item*: use(item); default: break; }");
     assert(sw->isTypeSwitch && sw->initializer.type == STMT_EXPR && sw->cases[0].nTypes == 3);
-    assert(sw->cases[0].types[1].nTokens == 6);
+    assert(sw->cases[0].types[1].nTokens == 7);
     e = expression("value.(Box<int>).field;"); assert(e.type == EXPR_TYPE_DOT);
     assert(((struct expr_dot*)e.underlying)->parent.type == EXPR_TYPE_ASSERTION);
     sw = switchNode("switch (value.(type)) { case func(), func() int: break; }");

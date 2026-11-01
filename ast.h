@@ -50,6 +50,7 @@ typedef struct stmt {
 } stmt;
 
 struct stmt_block {
+    token open, close;
     size_t nStmts;
     stmt *stmts;
 };
@@ -159,7 +160,10 @@ struct stmt_interface {
     typeTokens *fieldTypes;
 };
 
+enum compilerIntrinsic { INTRINSIC_NONE, INTRINSIC_REFLECT_FIELDS, INTRINSIC_REFLECT_IS_STRUCT };
+
 struct stmt_func {
+    enum compilerIntrinsic compilerIntrinsic; // Set only by the trusted standard-library loader.
     typeTokens type; // Complete result syntax, including parentheses when present.
     token name;
     token receiverName; // EOF_TOKEN when this is not a method.
@@ -188,6 +192,7 @@ struct stmt_func {
 };
 
 struct stmt_if {
+    token open, close;
     stmt *preStmt;
     expr *condition;
 
@@ -196,6 +201,7 @@ struct stmt_if {
 };
 
 struct stmt_for {
+    token open, close;
     stmt *initializer;  // Executed once before the loop; optional.
     expr *condition;    // NULL means true for a three-clause loop.
     expr *update;       // Executed after each iteration; optional.
@@ -287,6 +293,7 @@ enum literalType {
 
 struct expr_literal {
     enum literalType type;
+    char unsignedLiteral;
     size_t stringLength;
     void *value;
 };

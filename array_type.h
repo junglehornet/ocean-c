@@ -35,6 +35,27 @@ static inline int sizedArrayTypeParts(typeTokens t, typeTokens *element, typeTok
     *dimension = (typeTokens){end - close - 1, t.tokens + close + 1};
     return 1;
 }
+static inline int arrayHasRuntimeDimension(typeTokens t) {
+    typeTokens element, dimension;
+    if (!sizedArrayTypeParts(t, &element, &dimension)) return 0;
+    return bufferDimensionKind(dimension) == 2 || arrayHasRuntimeDimension(element);
+}
+/* array<T> erases only the length of an immutable-size array. */
+static inline int unsizedArrayTypeParts(typeTokens t, typeTokens *element) {
+    if (t.nTokens < 4 || t.tokens[0].type != IDENTIFIER ||
+        strcmp(t.tokens[0].lexeme, "array") || t.tokens[1].type != LESS_THAN ||
+        t.tokens[t.nTokens - 1].type != GREATER_THAN) return 0;
+    size_t depth = 0;
+    for (size_t i = 2; i + 1 < t.nTokens; i++) {
+        enum tokenType k = t.tokens[i].type;
+        if (k == LESS_THAN) depth++;
+        else if (k == GREATER_THAN) { if (!depth) return 0; depth--; }
+        else if (k == COMMA && !depth) return 0;
+    }
+    if (depth) return 0;
+    *element = (typeTokens){t.nTokens - 3, t.tokens + 2};
+    return 1;
+}
 static inline int builtinStorageTypeName(const char *name) {
     const char *names[] = {"int", "uint", "byte", "rune",  "i8",  "i16", "i32",  "i64",   "u8",
                            "u16", "u32",  "u64",  "float", "f32", "f64", "bool", "string", "any"};

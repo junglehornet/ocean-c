@@ -431,7 +431,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("struct P { x int; y int; } func main() int { a := P[2]; a.data = {{2,3}, {4,5}}; a[1].x++; b: buffer<P>[2] = {{6,7}}; b[0].y++; return a[1].x + b[0].y + b[1].x; }", 13, optimize=True)
     program("struct P { x int; } func first(xs ...P) int { xs[0].x++; return xs[0].x; } func main() int { p := P{4}; return first(p) + p.x; }", 9, optimize=True)
     program("struct P { x int; } func pair() (P, P) { return P{2}, P{3}; } func main() int { a,b := pair(); a.x,b.x = b.x,a.x; return a.x * 10 + b.x; }", 32, optimize=True)
-    program("struct Empty<T any> {} func main() int { e := Empty<int>{}; return sizeof(e); }", 0, optimize=True)
+    program("struct Empty<T any> {} func main() int { e := Empty<int>{}; return sizeof(e); }", 1, optimize=True)
     program("struct S { x int; y int; } func make(n buffer<int>[]) S { n[0]++; return S{n[0], 2}; } func main() int { n: buffer<int>[] = {0}; return make(n).x + n[0]; }", 2, optimize=True)
     program("struct Empty<T any> { data int; } func main() int { a := Empty<int>{4}; b := Empty<bool>{5}; return sizeof(a) + sizeof(b) + a.data + b.data; }", 25, optimize=True)
 

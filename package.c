@@ -1,6 +1,7 @@
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
 #include "package.h"
+#include "array_type.h"
 #include "diagnostic.h"
 #include "scanner.h"
 #include "source_path.h"
@@ -372,6 +373,34 @@ static Package *resolveImport(packageBuild *b, Package *from, const char *path) 
     if (!resolved || !directory(resolved)) { error(b, location, "package directory does not exist"); return NULL; }
     return loadDirectory(b, resolved);
 }
+// Privilege follows the configured standard-library path, never a package name.
+// Resolve every source file too: a symlink cannot import privileged source from
+// an ordinary project or dependency into the standard reflect directory.
+static int standardReflectSource(packageBuild *b, Package *p, File *file) {
+    const char *source = standardSource(b);
+    char *root = source ? canonical(b, source) : NULL;
+    if (!root) return 0;
+    char *expected = format(b, "%s/reflect", root);
+    if (strcmp(p->directory, expected) || !p->name || strcmp(p->name, "reflect")) return 0;
+    char *resolved = canonical(b, file->path);
+    return resolved && !strcmp(parent(b, resolved), expected);
+}
+static void markReflectionIntrinsic(packageBuild *b, Package *p, File *file, struct stmt_func *f) {
+    if (!standardReflectSource(b, p, file)) return;
+    int fields = !strcmp(f->name.lexeme, "Fields"), predicate = !strcmp(f->name.lexeme, "IsStruct");
+    if (!fields && !predicate) return;
+    typeTokens element;
+    int valid = !f->isExtern && !f->isVariadic && !f->receiverType.nTokens && !f->nTypeParams &&
+                f->nParams == 1 && f->paramTypeNames[0].nTokens == 1 &&
+                f->paramTypeNames[0].tokens[0].type == ANY && f->nResults == 1;
+    if (valid && fields)
+        valid = unsizedArrayTypeParts(f->resultTypes[0], &element) && element.nTokens == 1 &&
+                !strcmp(element.tokens[0].lexeme, "Field");
+    if (valid && predicate)
+        valid = f->resultTypes[0].nTokens == 1 && !strcmp(f->resultTypes[0].tokens[0].lexeme, "bool");
+    if (!valid) { error(b, file->path, "invalid standard reflect intrinsic signature: %s", f->name.lexeme); return; }
+    f->compilerIntrinsic = fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT;
+}
 static int compareNames(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 static Symbol *symbol(Package *package, const char *name) {
     for (Symbol *s = package->symbols; s; s = s->next) if (!strcmp(s->name, name)) return s;
@@ -468,6 +497,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
             stmt *s = &file->ast.statements[j];
             if (s->type == STMT_FUNC) {
                 struct stmt_func *f = s->value;
+                markReflectionIntrinsic(b, p, file, f);
                 if (f->isExtern) {
                     Symbol *existing = file->externs;
                     while (existing && strcmp(existing->name, f->name.lexeme)) existing = existing->next;
@@ -591,7 +621,10 @@ static void rewriteType(Rewrite *r, Local *scope, typeTokens *type) {
             Symbol *s = importedSymbol(r, imported, member, name.lexeme);
             if (s) { member.lexeme = s->qualified; tokens[count++] = member; i += 2; continue; }
         }
-        rewriteToken(r, scope, &name);
+        if (!(name.type == IDENTIFIER && !strcmp(name.lexeme, "array") &&
+              (i == 0 || type->tokens[i - 1].type == LESS_THAN ||
+               type->tokens[i - 1].type == STAR || type->tokens[i - 1].type == BITWISE_OR)))
+            rewriteToken(r, scope, &name);
         tokens[count++] = name;
     }
     *type = (typeTokens){count, tokens};
@@ -848,6 +881,9 @@ packageBuild *loadPackageWithSources(const char *location, const packageSource *
     }
     return b;
 }
+parseResult *packagePartialProgram(packageBuild *b) {
+    return b && b->program.nSources ? &b->program : NULL;
+}
 parseResult *packageProgram(packageBuild *b) {
     return b && !b->errors ? &b->program : NULL;
 }
@@ -866,4 +902,9 @@ void freePackage(packageBuild *b) {
 
 const char *packageDirectory(packageBuild *build) {
     return build && build->root ? build->root->directory : NULL;
+}
+
+void visitPackageImports(packageBuild *build, packageImportVisitor visitor, void *context) {
+    for(Package *p=build->packages;p;p=p->next)for(File *file=p->files;file;file=file->next)
+        for(Import *i=file->imports;i;i=i->next)visitor(file->displayPath,i->alias,i->package->id+1,context);
 }

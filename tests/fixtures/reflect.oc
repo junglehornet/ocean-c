@@ -1,0 +1,19 @@
+package reflect;
+
+// A field snapshot. Values are independent copies; pointer values remain non-owning.
+struct Field {
+    Name string;
+    Value any;
+}
+
+// Fields returns every field in declaration order, including struct value parameters.
+// Non-struct values return an empty array. Pointers are not dereferenced.
+// The compiler grants these intrinsics only to this standard-library package.
+func Fields(value any) array<Field> {
+    return compilerReflectFields(value);
+}
+
+// IsStruct distinguishes an empty struct from a non-struct value.
+func IsStruct(value any) bool {
+    return compilerReflectIsStruct(value);
+}

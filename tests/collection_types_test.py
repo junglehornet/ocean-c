@@ -62,7 +62,7 @@ func main() int {
     program('''func take(a int[3]) int { a[0] = 8; return a[2]; }
 func main() int {
     a: int[3] = {1, 2, 3}; b := int[2]{4, 5}; c := a + b;
-    if (len(c) != 5 || c[4] != 5 || sizeof(c) != 40) return 1;
+    if (len(c) != 5 || c[4] != 5 || sizeof(c) != 48) return 1;
     c += b;
     if (len(c) != 7 || c[6] != 5) return 2;
     x, ok := a[3]; if (ok || x != 0) return 3;
@@ -70,7 +70,7 @@ func main() int {
     x, ok = a[1]; if (!ok || x != 2) return 5;
     sum := 0; for (i, value := range a) sum += value;
     if (take(a) != 3 || a[0] != 1 || sum != 6) return 6;
-    z: int[0] = {}; if (len(z) != 0 || sizeof(z) != 0) return 7;
+    z: int[0] = {}; if (len(z) != 0 || sizeof(z) != 8) return 7;
     return 0;
 }''')
     rejected('func take(a int[3]) {} func main() { a: int[2]; take(a); }', 'type mismatch')

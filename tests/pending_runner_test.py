@@ -25,7 +25,7 @@ class PendingRunnerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.probe = self.root / "probe"
         self.probe.touch()
-        self.feature, self.case = self.cases["scientific_numbers.exponent"]
+        self.feature, self.case = self.cases["debug_printer.index"]
 
     def process(self, code=0, output="", error=""):
         return subprocess.CompletedProcess([], code, output, error)
@@ -35,7 +35,7 @@ class PendingRunnerTests(unittest.TestCase):
             return runner.native_contract(str(self.probe), self.feature, self.case, self.root)
 
     def test_inventory_has_every_documented_area(self):
-        expected = {"unicode", "scientific_numbers", "debug_printer",
+        expected = {"debug_printer",
                     "imports", "module_discovery", "symbol_binding", "type_checking",
                     "generic_instantiation", "ambiguous_calls", "generic_function_values",
                     "type_dimension_resolution", "constant_evaluation", "enum_values",
@@ -65,7 +65,7 @@ class PendingRunnerTests(unittest.TestCase):
         self.assertFalse(self.native(self.process(10, "CONTRACT_MISSING: index AST"))[0])
 
     def test_success_is_detected(self):
-        self.assertTrue(self.native(self.process())[0])
+        self.assertTrue(self.native(self.process(output=self.case["stdout"]))[0])
 
     def test_arbitrary_nonzero_exit_is_error(self):
         with self.assertRaises(runner.InfrastructureError): self.native(self.process(1, "broken fixture"))
@@ -147,11 +147,6 @@ class PendingRunnerTests(unittest.TestCase):
             with self.assertRaises(runner.InfrastructureError):
                 runner.adapter_contract(str(self.probe), feature, case, self.root)
 
-    def test_scanner_rejection_satisfies_negative_contract(self):
-        feature, case = self.cases["unicode.invalid_escape"]
-        with patch.object(runner.subprocess, "run", return_value=self.process(1, "Invalid Unicode escape")):
-            self.assertTrue(runner.native_contract(str(self.probe), feature, case, self.root)[0])
-
     def test_invalid_utf8_diagnostic_does_not_crash_runner(self):
         # The scanner currently prints individual UTF-8 bytes in diagnostics.
         with patch.object(runner.subprocess, "run", return_value=self.process(1, "invalid")) as call:
@@ -161,13 +156,13 @@ class PendingRunnerTests(unittest.TestCase):
     def test_xpass_fails_instead_of_silently_skipping(self):
         with patch.object(runner, "native_contract", return_value=(True, "contract met")):
             with redirect_stdout(io.StringIO()) as output:
-                status = runner.main(["--case", "scientific_numbers.exponent", "--probe", str(self.probe)])
+                status = runner.main(["--case", "debug_printer.index", "--probe", str(self.probe)])
         self.assertEqual(status, 1); self.assertIn("XPASS", output.getvalue())
 
     def test_missing_contract_has_skip_exit_code(self):
         with patch.object(runner, "native_contract", return_value=(False, "not implemented")):
             with redirect_stdout(io.StringIO()) as output:
-                status = runner.main(["--case", "scientific_numbers.exponent", "--probe", str(self.probe)])
+                status = runner.main(["--case", "debug_printer.index", "--probe", str(self.probe)])
         self.assertEqual(status, 77); self.assertIn("XFAIL", output.getvalue())
 
     def test_unknown_case_is_error(self):

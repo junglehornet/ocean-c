@@ -39,6 +39,8 @@ typedef struct Scope {
     struct Scope *parent;
     Value savedStack;
     Value savedBoxes;
+    DynamicArrayTemporary *savedArrayTemps;
+    int hasTempMark;
     int hasStack;
     int hasBreak;
     const void *jumpRegion;
@@ -147,6 +149,8 @@ typedef struct {
     TypeConstraint *constraints;
     unsigned nConstraints;
     int arrayViewUsed, homogeneousUsed;
+    int reflectionUsed;
+    Kind reflectionFieldsKind;
     unsigned fixedCScalars;
     Value boxRegion;
     int anyUsed;
@@ -378,7 +382,9 @@ static Kind fixedArrayKind(Backend *b, Kind element, size_t count) {
     BufferKind *v = checked(sizeof(*v));
     *v = *bufferKind(b, raw);
     v->kind = (Kind)(BUFFER + b->nBuffers++);
-    v->ir = strdup(v->ir);
+    size_t n = strlen(irType(b, element)) + 80;
+    v->ir = checked(n);
+    snprintf(v->ir, n, "{ i64, [%zu x %s] }", count, irType(b, element));
     v->fixedArray = 1;
     v->next = b->buffers; b->buffers = v;
     return v->kind;
@@ -424,19 +430,9 @@ static Kind pointerBufferKind(Backend *b, Kind element) {
     b->buffers = v;
     return v->kind;
 }
-static Kind runtimeArrayKind(Backend *b, Kind element) {
-    for (BufferKind *v = b->buffers; v; v = v->next)
-        if (v->shape == 3 && v->fixedArray && v->element == element) return v->kind;
-    Kind raw = pointerBufferKind(b, element);
-    BufferKind *v = checked(sizeof(*v));
-    *v = *bufferKind(b, raw); v->ir = strdup(v->ir);
-    v->kind = (Kind)(BUFFER + b->nBuffers++); v->fixedArray = 1;
-    v->next = b->buffers; b->buffers = v;
-    return v->kind;
-}
 static Kind arrayValueKind(Backend *b, Kind element) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->ir && v->shape == 4 && !v->dynamicArray && !v->count && !v->requirement && v->element == element)
+        if (!v->definition && v->ir && v->shape == 4 && !v->dynamicArray && !v->fixedArray && !v->count && !v->requirement && v->element == element)
             return v->kind;
     BufferKind *v = checked(sizeof(*v));
     v->kind = (Kind)(BUFFER + b->nBuffers++);
@@ -449,6 +445,16 @@ static Kind arrayValueKind(Backend *b, Kind element) {
     snprintf(v->layout, n, "{ i64, [0 x %s] }", irType(b, element));
     v->next = b->buffers;
     b->buffers = v;
+    return v->kind;
+}
+static Kind runtimeArrayKind(Backend *b, Kind element) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (!v->definition && v->shape == 4 && v->fixedArray && v->element == element) return v->kind;
+    Kind base = arrayValueKind(b, element);
+    BufferKind *v = checked(sizeof(*v)); *v = *bufferKind(b, base);
+    v->kind = (Kind)(BUFFER + b->nBuffers++); v->fixedArray = 1;
+    v->ir = strdup(v->ir); v->layout = strdup(v->layout);
+    v->next = b->buffers; b->buffers = v;
     return v->kind;
 }
 static Kind dynamicArrayKind(Backend *b, Kind element) {
@@ -559,7 +565,7 @@ static Kind recordFieldKind(Backend *b, typeTokens span) {
         Kind item = recordFieldKind(b, element);
         if (dimension.nTokens == 1 && dimension.tokens[0].type == LITERAL_INT)
             return fixedArrayKind(b, item, dimension.tokens[0].numValue.integer);
-        return arrayValueKind(b, item);
+        return runtimeArrayKind(b, item);
     }
     return type(b, span);
 }
@@ -741,6 +747,8 @@ static Kind constraintKind(Backend *b, typeTokens span) {
     if (bufferTypeParts(span, &element, &dimension) &&
         span.tokens[span.nTokens - 1].type == GREATER_THAN)
         return constraintShape(b, 9, constraintKind(b, element), 0);
+    if (unsizedArrayTypeParts(span, &element))
+        return constraintShape(b, 16, constraintKind(b, element), 0);
     Kind child;
     int shape = -1;
     size_t count = 0;
@@ -802,7 +810,10 @@ static int matchesConstraint(Backend *b, Kind pattern, Kind actual) {
     if (p && p->shape == 12) return matchesInterface(b, p->contract, actual);
     if ((p && p->definition) || (a && a->definition)) return 0;
     if (!p || !a) return 0;
+    if (p->fixedArray && p->shape == 4)
+        return a->fixedArray && matchesConstraint(b, p->element, a->element);
     if (p->shape == 4 && a->shape == 4) {
+        if (a->fixedArray) return 0;
         if (!p->count && a->count) return 0;
         Kind bound = p->requirement ? p->requirement : p->element;
         Kind element = a->requirement ? a->requirement : a->element;
@@ -819,6 +830,7 @@ static int matchesConstraint(Backend *b, Kind pattern, Kind actual) {
             if (!matchesConstraint(b, p->arguments[i], a->arguments[i])) return 0;
         return 1;
     }
+    if (p->shape == 16) return a->fixedArray && matchesConstraint(b, p->element, a->element);
     if (p->shape == 15) return a->fixedArray && !a->shape && p->count == a->count &&
         matchesConstraint(b, p->element, a->element);
     return p->shape == a->shape && p->fixedArray == a->fixedArray && p->count == a->count &&
@@ -861,6 +873,8 @@ static Kind type(Backend *b, typeTokens t) {
             return constrainedArrayKind(b, constraintKind(b, arrayElement), t.tokens[0].type == MIXED);
         return dynamicArrayKind(b, element);
     }
+    typeTokens unsizedElement;
+    if (unsizedArrayTypeParts(t, &unsizedElement)) return runtimeArrayKind(b, type(b, unsizedElement));
     typeTokens sizedElement, sizedDimension;
     if (sizedArrayTypeParts(t, &sizedElement, &sizedDimension)) {
         if (sizedDimension.nTokens == 1 && sizedDimension.tokens[0].type == LITERAL_INT &&
@@ -1362,6 +1376,8 @@ static void store(Backend *b, Value address, Value v) {
     if (targetArray && sourceArray && targetArray->shape == 4 && sourceArray->shape == 4 &&
         targetArray->element == SCALAR_ANY && address.kind != v.kind)
         v = coerce(b, v, address.kind);
+    if (targetArray && targetArray->fixedArray && targetArray->shape == 4 && v.kind != address.kind)
+        v = coerce(b, v, address.kind);
     if (address.kind == SCALAR_ANY) v = coerce(b, v, SCALAR_ANY);
     if (address.elementRequirement) checkElementRequirement(b, v, address.elementRequirement);
     if (address.homogeneousArray) {
@@ -1376,10 +1392,14 @@ static void store(Backend *b, Value address, Value v) {
         rawStore(b, address, replacement);
         return;
     }
-    if (targetArray && targetArray->shape == 4 && !targetArray->dynamicArray && address.throughPointer && v.kind == address.kind) {
+    if (targetArray && targetArray->shape == 4 && !targetArray->dynamicArray && v.kind == address.kind) {
         // A string/reference value stored through *T may change size. Its new
         // backing must outlive this frame, including when T lives on the heap.
-        int previous = b->copyTransport; b->copyTransport = 1;
+        int previous = b->copyTransport;
+        if (address.throughPointer || address.owner == b->globalScope) b->copyTransport = 1;
+        else if (address.owner)
+            for (Scope *scope = b->scope; scope && scope != address.owner; scope = scope->parent)
+                scope->retainAllocations = 1;
         Value replacement = copyValue(b, v, 0);
         b->copyTransport = previous;
         escapeDynamicArrays(b, replacement);
@@ -1529,6 +1549,15 @@ static Value unboxMatched(Backend *b, Value box, Kind kind) {
     return representationKind(b, kind) == F32 ? convert(b, result, kind) : result;
 }static Value unboxValue(Backend *b, Value box, Kind kind) {
     BufferKind *array = bufferKind(b, kind);
+    if (array && !array->definition && array->fixedArray && array->shape == 4) {
+        Kind pattern = constraintShape(b, 16, array->element, 0);
+        Value matches = testConstraint(b, box, pattern, 0);
+        unsigned good = ++b->label, bad = ++b->label;
+        branch(b, matches, good, bad); label(b, bad);
+        fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+        b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
+        return array->element == SCALAR_ANY ? unboxArrayView(b, box, kind) : unboxMatched(b, box, kind);
+    }
     if (array && !array->definition && array->shape == 4 && array->element == SCALAR_ANY)
         return unboxArrayView(b, box, kind);
     Value metadata = anyMetadata(b, kind), tag = temp(b, RAW_POINTER), bits = temp(b, INT), matches = temp(b, BOOL);
@@ -1551,6 +1580,24 @@ static Value coerce(Backend *b, Value v, Kind expected) {
         fail(b, "distinct type requires an explicit cast"); return v;
     }
     BufferKind *target = bufferKind(b, expected), *source = bufferKind(b, v.kind);
+    if (target && source && target->fixedArray && target->shape == 4 && source->fixedArray) {
+        if (target->element == SCALAR_ANY && source->element != SCALAR_ANY) {
+            Value boxed = boxArray(b, v); boxed.kind = expected; return boxed;
+        }
+        if (target->element == source->element) {
+            if (!source->shape) {
+                // Include a provenance word before the public size/data header.
+                Value base = temp(b, RAW_POINTER), pointer = temp(b, expected);
+                fprintf(b->body, "  %s = alloca { i64, %s }, align 8\n", base.operand, source->ir);
+                rawStore(b, base, value(b, RAW_POINTER, "null"));
+                fprintf(b->body, "  %s = getelementptr { i64, %s }, ptr %s, i32 0, i32 1\n", pointer.operand, source->ir, base.operand);
+                rawStore(b, value(b, v.kind, "%s", pointer.operand), v);
+                return pointer;
+            }
+            v.kind = expected; return v;
+        }
+        return collectionCopy(b, v, expected);
+    }
     if (target && source && target->shape == 4 && source->shape == 4 &&
         target->element == source->element && (target->dynamicArray != source->dynamicArray || target->immutableString != source->immutableString))
         return collectionCopy(b, v, expected);
@@ -1576,7 +1623,9 @@ static Value coerce(Backend *b, Value v, Kind expected) {
         source->element == target->element) {
         Value storage = bufferLiteralSlot(b, v.kind);
         store(b, storage, v);
-        return value(b, expected, "%s", storage.operand);
+        Value stored = load(b, storage);
+        Value data = source->fixedArray ? arrayData(b, stored) : value(b, expected, "%s", storage.operand);
+        data.kind = expected; return data;
     }
     if ((integral(b, v.kind) && integral(b, expected)) || (floating(b, v.kind) && floating(b, expected)))
         v = convert(b, v, expected);
@@ -1618,8 +1667,8 @@ static Value extract(Backend *b, Value aggregate, size_t index) {
         return value(b, BAD, "0");
     }
     Value result = temp(b, t->shape ? t->members[index] : t->element);
-    fprintf(b->body, "  %s = extractvalue %s %s, %zu\n", result.operand, t->ir, aggregate.operand,
-            index);
+    fprintf(b->body, "  %s = extractvalue %s %s, %s%zu\n", result.operand, t->ir, aggregate.operand,
+            t->fixedArray && !t->shape ? "1, " : "", index);
     return result;
 }
 static Value insert(Backend *b, Value aggregate, Value member, size_t index) {
@@ -1627,8 +1676,9 @@ static Value insert(Backend *b, Value aggregate, Value member, size_t index) {
     Kind expected = t->shape ? t->members[index] : t->element;
     member = coerce(b, member, expected);
     Value result = temp(b, aggregate.kind);
-    fprintf(b->body, "  %s = insertvalue %s %s, %s %s, %zu\n", result.operand, t->ir,
-            aggregate.operand, irType(b, member.kind), member.operand, index);
+    fprintf(b->body, "  %s = insertvalue %s %s, %s %s, %s%zu\n", result.operand, t->ir,
+            aggregate.operand, irType(b, member.kind), member.operand,
+            t->fixedArray && !t->shape ? "1, " : "", index);
     return result;
 }
 static Value storageSize(Backend *b, Kind k) {
@@ -1648,6 +1698,11 @@ static Value arrayData(Backend *b, Value array) {
     BufferKind *t = bufferKind(b, array.kind);
     if (!t->shape) {
         Value storage = slot(b, array.kind); rawStore(b, storage, array);
+        if (t->fixedArray) {
+            Value data = temp(b, pointerBufferKind(b, t->element));
+            fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 1, i64 0\n", data.operand, t->ir, storage.operand);
+            return data;
+        }
         return value(b, pointerBufferKind(b, t->element), "%s", storage.operand);
     }
     if (t->shape == 3) return array;
@@ -1665,6 +1720,12 @@ static Value arrayData(Backend *b, Value array) {
 static void initializeArray(Backend *, Value, Value);
 static Value allocateArrayStorage(Backend *b, Kind element, Value count) {
     count = coerce(b, count, INT);
+    Value valid = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp sge i64 %s, 0\n", valid.operand, count.operand);
+    unsigned good = ++b->label, bad = ++b->label;
+    branch(b, valid, good, bad); label(b, bad);
+    fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+    b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
     Value elementSize = storageSize(b, element), bytes = temp(b, INT);
     fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, count.operand, elementSize.operand);
     Kind kind = arrayValueKind(b, element);
@@ -1731,6 +1792,8 @@ static Kind arrayAdditionKind(Backend *b, Kind left, Kind right) {
     BufferKind *a = bufferKind(b, left), *c = bufferKind(b, right);
     if (a && c && !a->shape && !c->shape && a->fixedArray && c->fixedArray && a->element == c->element)
         return fixedArrayKind(b, a->element, a->count + c->count);
+    if (a && c && a->fixedArray && c->fixedArray && a->element == c->element)
+        return runtimeArrayKind(b, a->element);
     int la = a && a->shape == 4, ra = c && c->shape == 4;
     if (la && ra && (left == right || a->element == c->element || a->element == SCALAR_ANY || c->element == SCALAR_ANY))
         return a->count ? left : c->count ? right : c->element == SCALAR_ANY ? right : left;
@@ -1801,7 +1864,7 @@ static Kind expressionKind(Backend *b, expr *e) {
         }
         if (t && t->dynamicArray && (!strcmp(((struct expr_identifier *)v->field.underlying)->lexeme.lexeme, "length") ||
                               !strcmp(((struct expr_identifier *)v->field.underlying)->lexeme.lexeme, "capacity"))) return INT;
-        if (t && t->shape == 4)
+        if (t && (t->shape == 4 || t->fixedArray))
             return !strcmp(((struct expr_identifier *)v->field.underlying)->lexeme.lexeme, "size")
                        ? INT
                        : pointerBufferKind(b, t->element);
@@ -1819,10 +1882,21 @@ static Kind expressionKind(Backend *b, expr *e) {
         if (dot) {
             BufferKind *parent = bufferKind(b, expressionKind(b, &dot->parent));
             const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
+            BufferKind *arrayReceiver = parent;
+            while (arrayReceiver && arrayReceiver->shape == 6) arrayReceiver = bufferKind(b, arrayReceiver->element);
+            if (arrayReceiver && arrayReceiver->shape == 4 && !arrayReceiver->fixedArray && !strcmp(name, "array"))
+                return runtimeArrayKind(b, arrayReceiver->element);
             if (parent && parent->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop"))) return parent->element;
             if (parent && parent->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add"))) return VOID;
             return methodResult(b, methodInstance(b, expressionKind(b, &dot->parent),
                 ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme, typeArguments, count));
+        }
+        if (v->func.type == EXPR_TYPE_IDENTIFIER) {
+            const char *name = ((struct expr_identifier *)v->func.underlying)->lexeme.lexeme;
+            if (!strcmp(name, "compilerReflectFields") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_FIELDS)
+                return resultType(b, b->function);
+            if (!strcmp(name, "compilerReflectIsStruct") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_IS_STRUCT)
+                return BOOL;
         }
         struct stmt_func *f = directCallee(b, &v->func, &typeArguments, &count);
         if (f && f->nTypeParams)
@@ -2087,6 +2161,11 @@ static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
 }
 static Value arrayBytes(Backend *b, Value array) {
     BufferKind *t = bufferKind(b, array.kind);
+    if (!t->shape && t->fixedArray) {
+        Value bytes = temp(b, INT);
+        fprintf(b->body, "  %s = extractvalue %s %s, 0\n", bytes.operand, t->ir, array.operand);
+        return bytes;
+    }
     if (t->dynamicArray) {
         Value count = load(b, value(b, INT, "%s", array.operand)), stride = storageSize(b, t->element), bytes = temp(b, INT);
         fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, count.operand, stride.operand);
@@ -2298,8 +2377,8 @@ static void copyInto(Backend *b, Value destination, Value source, unsigned depth
     for (size_t i = 0; i < t->count; i++) {
         Kind member = t->shape ? t->members[i] : t->element;
         Value address = temp(b, member);
-        fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, %s %zu\n", address.operand, t->ir,
-                destination.operand, t->shape ? "i32" : "i64", i);
+        fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, %s%s %zu\n", address.operand, t->ir,
+                destination.operand, t->fixedArray && !t->shape ? "i32 1, " : "", t->shape ? "i32" : "i64", i);
         copyInto(b, address, extract(b, source, i), depth + 1);
     }
 }
@@ -2440,12 +2519,19 @@ static Value expectedValue(Backend *b, expr *e, Kind expected) {
             (e->type == EXPR_TYPE_IDENTIFIER || e->type == EXPR_TYPE_INDEX ||
              e->type == EXPR_TYPE_DOT)) {
             Value storage = address(b, e);
+            if (source->fixedArray) {
+                Value data = temp(b, expected);
+                fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 1, i64 0\n", data.operand, source->ir, storage.operand);
+                return data;
+            }
             return value(b, expected, "%s", storage.operand);
         }
         return coerce(b, expression(b, e), expected);
     }
     Value result = expression(b, e);
     BufferKind *targetArray = bufferKind(b, expected), *sourceArray = bufferKind(b, result.kind);
+    if (targetArray && sourceArray && targetArray->fixedArray && targetArray->shape == 4 && sourceArray->fixedArray && expected != result.kind)
+        return coerce(b, result, expected);
     if (targetArray && sourceArray && targetArray->shape == 4 && sourceArray->shape == 4 &&
         (targetArray->element == SCALAR_ANY || targetArray->element == sourceArray->element) && expected != result.kind)
         result = coerce(b, result, expected);
@@ -2494,6 +2580,10 @@ static ValueList tryIndexValues(Backend *b, struct expr_index *v) {
     unsigned yes = ++b->label, end = ++b->label;
     branch(b, ok, yes, end); label(b, yes);
     Value data = t->shape == 4 ? arrayData(b, parent) : parent;
+    if (!t->shape && t->fixedArray) {
+        data = temp(b, pointerBufferKind(b, t->element));
+        fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 1, i64 0\n", data.operand, t->ir, parent.operand);
+    }
     Value item = temp(b, t->element);
     fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", item.operand,
             irType(b, t->element), data.operand, index.operand);
@@ -2597,7 +2687,7 @@ static Value unboxArrayView(Backend *b, Value box, Kind kind) {
     Value result = copyValue(b, heap, 0);
     b->copyTransport = previous;
     BufferKind *target = bufferKind(b, kind);
-    if (!target->count) {
+    if (!target->count && !target->fixedArray) {
         b->homogeneousUsed = 1;
         fprintf(b->body, "  call void @__ocean.array.check(ptr %s)\n", result.operand);
     }
@@ -2635,7 +2725,7 @@ static int hasNonzeroEmptyValue(Backend *b, Kind kind) {
         for (size_t i = 0; i < t->count; i++)
             if (hasNonzeroEmptyValue(b, t->members[i])) return 1;
     }
-    return t && (t->shape == 4 || (!t->shape && hasNonzeroEmptyValue(b, t->element)));
+    return t && (t->shape == 4 || (!t->shape && (t->fixedArray || hasNonzeroEmptyValue(b, t->element))));
 }
 static Value emptyValue(Backend *b, Kind kind) {
     if (representationKind(b, kind) == SCALAR_ANY) {
@@ -2674,6 +2764,9 @@ static Value emptyValue(Backend *b, Kind kind) {
             return value(b, BAD, "0");
         }
         int record = t->shape == 5 || t->shape == 2;
+        if (!record && t->fixedArray) {
+            fprintf(constant, "{ i64 ptrtoint (ptr getelementptr (%s, ptr null, i64 %zu) to i64), [%zu x %s] ", irType(b, t->element), t->count, t->count, irType(b, t->element));
+        }
         fputs(record ? "{ " : "[ ", constant);
         for (size_t i = 0; i < t->count; i++) {
             Kind member = record ? t->members[i] : t->element;
@@ -2681,6 +2774,7 @@ static Value emptyValue(Backend *b, Kind kind) {
             fprintf(constant, "%s%s %s", i ? ", " : "", irType(b, member), zero.operand);
         }
         fputs(record ? " }" : " ]", constant);
+        if (!record && t->fixedArray) fputs(" }", constant);
         if (fclose(constant)) {
             free(text);
             fail(b, "could not write aggregate zero constant");
@@ -2828,7 +2922,8 @@ static Value materialize(Backend *b, expr *e) {
     int arrayMember = 0;
     if (e->type == EXPR_TYPE_DOT) {
         BufferKind *parent = bufferKind(b, expressionKind(b, &((struct expr_dot *)e->underlying)->parent));
-        arrayMember = parent && parent->shape == 4;
+        while (parent && parent->shape == 6) parent = bufferKind(b, parent->element);
+        arrayMember = parent && (parent->shape == 4 || parent->fixedArray);
     }
     if (addressable(e) && !arrayMember) return address(b, e);
     Value aggregate = expression(b, e), storage = bufferLiteralSlot(b, aggregate.kind);
@@ -2940,8 +3035,8 @@ static Value address(Backend *b, expr *e) {
                 rawStore(b, header, bytes);
                 checkArrayIndex(b, value(b, arrayValueKind(b, t->element), "%s", header.operand), index, v->location);
             }
-            fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 0, i64 %s\n", result.operand,
-                    t->ir, base.operand, index.operand);
+            fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 0, %si64 %s\n", result.operand,
+                    t->ir, base.operand, t->fixedArray ? "i32 1, " : "", index.operand);
         }
         return result;
     }
@@ -3059,7 +3154,7 @@ static Value addArrayValues(Backend *b, Value left, Value right, Kind resultKind
     Value lengths[2];
     for (size_t i = 0; i < 2; i++) {
         BufferKind *piece = bufferKind(b, pieces[i].kind);
-        arrays[i] = piece && piece->shape == 4 && pieces[i].kind != resultType->element;
+        arrays[i] = piece && (piece->shape == 4 || piece->fixedArray) && pieces[i].kind != resultType->element;
         lengths[i] = arrays[i] ? arrayLength(b, pieces[i]) : value(b, INT, "1");
     }
     Value length = temp(b, INT);
@@ -3286,13 +3381,22 @@ static Value expressionImpl(Backend *b, expr *e) {
         fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
         b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
         rawStore(b, value(b, element, "%s", result.operand), emptyValue(b, element));
+        typeTokens arrayElement, dimension;
+        typeTokens requested = ((struct expr_zero *)e->underlying)->type;
+        if (sizedArrayTypeParts(requested, &arrayElement, &dimension) && arrayHasRuntimeDimension(requested)) {
+            Value initial = parameterArrayValue(b, requested, element, NULL);
+            Value destination = value(b, element, "%s", result.operand); destination.throughPointer = 1;
+            store(b, destination, initial);
+        }
         return result;
     }
     case EXPR_TYPE_LITERAL: {
         struct expr_literal *v = e->underlying;
         if (v->type == LITERAL_TYPE_NULL) return value(b, NULL_VALUE, "@__ocean.null");
-        if (v->type == LITERAL_TYPE_INT)
+        if (v->type == LITERAL_TYPE_INT) {
+            if (v->unsignedLiteral) fail(b, "unsigned integer literal requires unsigned integer code generation");
             return value(b, INT, "%ld", *(long *)v->value);
+        }
         if (v->type == LITERAL_TYPE_FLOAT) {
             union {
                 double d;
@@ -3347,11 +3451,30 @@ static Value expressionImpl(Backend *b, expr *e) {
     case EXPR_TYPE_DOT: {
         struct expr_dot *v = e->underlying;
         BufferKind *parentType = bufferKind(b, expressionKind(b, &v->parent));
-        if (parentType && (parentType->shape == 5 || parentType->shape == 6))
-            return load(b, address(b, e));
+        BufferKind *underlying = parentType;
+        while (underlying && underlying->shape == 6) underlying = bufferKind(b, underlying->element);
+        if (underlying && underlying->shape == 5) return load(b, address(b, e));
+        const char *fieldName = ((struct expr_identifier *)v->field.underlying)->lexeme.lexeme;
+        if (underlying && underlying->fixedArray && !underlying->shape && !strcmp(fieldName, "data")) {
+            Value storage = materialize(b, &v->parent);
+            BufferKind *actual = bufferKind(b, storage.kind);
+            while (actual && actual->shape == 6) {
+                Value pointer = load(b, storage); requirePointer(b, pointer);
+                storage = value(b, actual->element, "%s", pointer.operand);
+                actual = bufferKind(b, actual->element);
+            }
+            Value data = temp(b, pointerBufferKind(b, underlying->element));
+            fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 1, i64 0\n", data.operand, underlying->ir, storage.operand);
+            return data;
+        }
         Value parent = expression(b, &v->parent);
         BufferKind *t = bufferKind(b, parent.kind);
-        if (t && t->shape == 4) {
+        while (t && t->shape == 6) {
+            requirePointer(b, parent);
+            parent = load(b, value(b, t->element, "%s", parent.operand));
+            t = bufferKind(b, parent.kind);
+        }
+        if (t && (t->shape == 4 || t->fixedArray)) {
             char *field = ((struct expr_identifier *)v->field.underlying)->lexeme.lexeme;
             if (t->dynamicArray && !strcmp(field, "length")) return arrayLength(b, parent);
             if (t->dynamicArray && !strcmp(field, "capacity")) {
@@ -3385,12 +3508,41 @@ static Value expressionImpl(Backend *b, expr *e) {
         Kind source = expressionKind(b, &v->child);
         BufferKind *from = bufferKind(b, source);
         Value a;
-        if (from && !from->shape && wanted && (wanted->shape == 3 || !wanted->shape))
+        if (from && !from->shape && from->fixedArray && wanted && wanted->shape == 3) {
+            a = arrayData(b, expression(b, &v->child));
+        } else if (from && !from->shape && wanted && (wanted->shape == 3 || !wanted->shape || wanted->fixedArray))
             a = value(b, pointerBufferKind(b, from->element), "%s", materialize(b, &v->child).operand);
         else a = expression(b, &v->child);
         typeTokens element, dimension;
         if (wanted && (bufferTypeParts(v->type, &element, &dimension) ||
                        sizedArrayTypeParts(v->type, &element, &dimension))) {
+            if (wanted->fixedArray && bufferKind(b, a.kind) && bufferKind(b, a.kind)->shape == 3) {
+                expr *size = parseBufferDimension(dimension);
+                if (!size) { fail(b, "invalid array length"); return value(b, BAD, "0"); }
+                Value count = coerce(b, expression(b, size), INT); free(size);
+                Value result = wanted->shape ? allocateCollection(b, target, count) : emptyValue(b, target);
+                if (!wanted->shape) {
+                    for (size_t i = 0; i < wanted->count; i++) {
+                        Value item = temp(b, wanted->element);
+                        fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %zu\n", item.operand, irType(b, wanted->element), a.operand, i);
+                        result = insert(b, result, copyValue(b, load(b, item), 0), i);
+                    }
+                    trackDynamicArrays(b, result);
+                } else {
+                    Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+                    unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
+                    jump(b, condition); label(b, condition);
+                    Value i = load(b, cursor), more = temp(b, BOOL);
+                    fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+                    branch(b, more, body, end); label(b, body);
+                    Value item = temp(b, wanted->element);
+                    fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", item.operand, irType(b, wanted->element), a.operand, i.operand);
+                    store(b, elementAddress(b, result, i), load(b, item));
+                    Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+                    rawStore(b, cursor, next); jump(b, condition); label(b, end);
+                }
+                return result;
+            }
             if (!wanted->shape && bufferKind(b, a.kind) && bufferKind(b, a.kind)->shape == 3)
                 return load(b, value(b, target, "%s", a.operand));
             if (wanted->shape == 3) {
@@ -3419,6 +3571,18 @@ static Value expressionImpl(Backend *b, expr *e) {
             name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
             Kind actual = expressionKind(b, &dot->parent);
             BufferKind *dynamicArray = bufferKind(b, actual);
+            BufferKind *arrayReceiver = dynamicArray;
+            while (arrayReceiver && arrayReceiver->shape == 6) arrayReceiver = bufferKind(b, arrayReceiver->element);
+            if (arrayReceiver && arrayReceiver->shape == 4 && !arrayReceiver->fixedArray && !strcmp(name, "array")) {
+                Value source = expression(b, &dot->parent);
+                BufferKind *sourceType = bufferKind(b, source.kind);
+                while (sourceType && sourceType->shape == 6) {
+                    requirePointer(b, source);
+                    source = load(b, value(b, sourceType->element, "%s", source.operand));
+                    sourceType = bufferKind(b, source.kind);
+                }
+                return collectionCopy(b, source, runtimeArrayKind(b, arrayReceiver->element));
+            }
             if (dynamicArray && dynamicArray->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop")))
                 return removeDynamicArray(b, dot, v);
             if (dynamicArray && dynamicArray->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add")))
@@ -3463,6 +3627,25 @@ static Value expressionImpl(Backend *b, expr *e) {
         } else {
             fail(b, "only direct function and method calls are supported");
             return value(b, BAD, "0");
+        }
+        if (!strcmp(name, "compilerReflectFields") || !strcmp(name, "compilerReflectIsStruct")) {
+            int fields = !strcmp(name, "compilerReflectFields");
+            if (!b->function || b->function->compilerIntrinsic != (fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT) ||
+                v->nParams != 1 || v->spread) {
+                fail(b, "reflection intrinsics are restricted to the standard library reflect package");
+                return value(b, BAD, "0");
+            }
+            Kind kind = fields ? resultType(b, b->function) : BOOL;
+            Value source = coerce(b, expression(b, &v->params[0]), SCALAR_ANY), result = temp(b, kind);
+            b->reflectionUsed = 1;
+            if (fields) b->reflectionFieldsKind = kind;
+            fprintf(b->body, "  %s = call %s @__ocean.reflect.%s({ ptr, i64 } %s)\n", result.operand,
+                    irType(b, kind), fields ? "fields" : "is_struct", source.operand);
+            if (fields) {
+                int previous = b->copyTransport; b->copyTransport = 2;
+                result = copyValue(b, result, 0); b->copyTransport = previous;
+            }
+            return result;
         }
         if (!f && !strcmp(name, "free")) {
             Value item = expression(b, &v->params[0]);
@@ -3908,6 +4091,7 @@ static int statementAllocatesStack(stmt *s) {
     return 0;
 }
 static void saveStack(Backend *b, Scope *scope, int needed) {
+    scope->savedArrayTemps = dynamicArrayTempMark(b); scope->hasTempMark = 1;
     Value region = boxRegion(b);
     scope->savedBoxes = load(b, region);
     if (!needed)
@@ -3922,6 +4106,7 @@ static void restoreStack(Backend *b, Scope *scope) {
             dropNestedDynamicArrays(b, load(b, binding->address), 0);
             rawStore(b, binding->address, emptyValue(b, binding->address.kind));
         }
+    if (scope->hasTempMark) cleanDynamicArrayTemps(b, scope->savedArrayTemps);
     if (scope->savedBoxes.operand && !scope->retainAllocations)
         fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr %s)\n", boxRegion(b).operand, scope->savedBoxes.operand);
     if (scope->hasStack && !scope->retainAllocations)
@@ -4097,6 +4282,19 @@ static void statementImpl(Backend *b, stmt *s) {
         struct stmt_var *v = s->value;
         typeTokens element, dimension;
         int runtimeArray = sizedArrayTypeParts(v->type, &element, &dimension);
+        if (runtimeArray && arrayHasRuntimeDimension(v->type)) {
+            Kind kind = type(b, v->type);
+            for (size_t i = 0; i < v->nVars; i++) {
+                if (v->vars[i].type == UNDERSCORE) continue;
+                Value storage = parameterArrayValue(b, v->type, kind, v->nInitValues ? &v->initValues[i] : NULL);
+                Value binding = slot(b, kind);
+                bind(b, v->vars[i].lexeme, binding);
+                b->scope->bindings->autoRelease = 1;
+                escapeDynamicArrays(b, storage); rawStore(b, binding, storage);
+            }
+            break;
+        }
+
         if ((runtimeArray || bufferTypeParts(v->type, &element, &dimension)) && bufferDimensionKind(dimension) == 2) {
             expr *size = parseBufferDimension(dimension);
             if (!size) {
@@ -4434,6 +4632,8 @@ static void statementImpl(Backend *b, stmt *s) {
                 BufferKind *family = bufferKind(b, pattern);
                 int underlyingMatch = family && family->shape == 14;
                 if (underlyingMatch) family = bufferKind(b, family->element);
+                if (family && family->shape == 16)
+                    kind = runtimeArrayKind(b, concreteConstraint(b, family->element) ? family->element : SCALAR_ANY);
                 if (family && family->shape == 4 && !concreteConstraint(b, family->element))
                     kind = constrainedArrayKind(b, family->element, family->count != 0);
                 if (family && family->shape == 9 && concreteConstraint(b, family->element)) {
@@ -4453,6 +4653,7 @@ static void statementImpl(Backend *b, stmt *s) {
                 Value address = slot(b, kind);
                 store(b, address, bound);
                 bind(b, v->binding.lexeme, address);
+                b->scope->bindings->autoRelease = containsDynamicArrays(b, kind);
             }
             struct stmt_block *body = &v->cases[i].body;
             int falls = body->nStmts && body->stmts[body->nStmts - 1].type == STMT_FALLTHROUGH;
@@ -4727,6 +4928,10 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
             fprintf(b->body, "  ret %s %s\n", irType(b, kind), zero.operand);
         }
     }
+    size_t packageId = 1;
+    for (size_t i=0;i<b->program->nSources;i++)
+        if (f->name.filename && !strcmp(f->name.filename,b->program->sources[i].filename)) packageId=b->program->sources[i].packageId;
+    fprintf(output,"; ocean-package: %zu\n",packageId);
     signature(b, f, output);
     fprintf(output, " {\nentry:\n");
     if (copy(b->slots, output) || copy(b->body, output))
@@ -4977,6 +5182,89 @@ static void emitAnyType(Backend *b, Kind kind) {
         (unsigned)kind, irType(b, kind), (unsigned)kind, irType(b, kind), irType(b, kind), (unsigned)kind);
     b->copyTransport = 0; b->scope = NULL;
 }
+// Only trusted reflect wrappers can call these internal entry points. Dispatch
+// uses the existing concrete any tags; no raw layout API is exposed to Ocean.
+static void emitReflection(Backend *b) {
+    if (!b->reflectionUsed) return;
+    for (BufferKind *t = b->buffers; t; t = t->next)
+        if (t->shape == 5 && t->record) anyMetadata(b, t->kind);
+    FILE *previousBody = b->body, *previousSlots = b->slots;
+    Scope *previousScope = b->scope;
+    struct stmt_func *previousFunction = b->function;
+    Value previousRegion = b->boxRegion;
+    int previousTransport = b->copyTransport;
+    b->function = NULL; b->copyTransport = 0;
+    if (b->reflectionFieldsKind) {
+        BufferKind *array = bufferKind(b, b->reflectionFieldsKind);
+        BufferKind *field = array ? bufferKind(b, array->element) : NULL;
+        if (!array || !array->fixedArray || array->shape != 4 || !field || field->shape != 5 || !field->record || field->count != 2 ||
+            strcmp(field->record->fieldNames[0].lexeme, "Name") || strcmp(field->record->fieldNames[1].lexeme, "Value") ||
+            !bufferKind(b, field->members[0]) || !bufferKind(b, field->members[0])->immutableString || field->members[1] != SCALAR_ANY) {
+            fail(b, "standard reflect.Field must contain Name string and Value any, in that order");
+            b->function = previousFunction; b->copyTransport = previousTransport;
+            return;
+        }
+        Scope scope = {.parent = b->globalScope}; b->scope = &scope;
+        b->body = tmpfile(); b->slots = tmpfile(); b->boxRegion = (Value){0}; b->terminated = 0;
+        DynamicArrayTemporary *mark = dynamicArrayTempMark(b);
+        Value input = value(b, SCALAR_ANY, "%%input"), tag = temp(b, RAW_POINTER);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %%input, 0\n", tag.operand);
+        // All concrete struct specializations are registered above, including
+        // named types and structs only encountered while reflecting a field.
+        for (AnyType *a = b->anyTypes; a; a = a->next) {
+            BufferKind *record = bufferKind(b, a->kind);
+            if (!record || record->shape != 5 || !record->record) continue;
+            Value matches = temp(b, BOOL);
+            fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)a->kind);
+            unsigned body = ++b->label, next = ++b->label;
+            branch(b, matches, body, next); label(b, body);
+            Value source = unboxMatched(b, input, a->kind);
+            Value result = allocateCollection(b, b->reflectionFieldsKind, value(b, INT, "%zu", record->count));
+            for (size_t i = 0; i < record->count; i++) {
+                const char *name = record->record->fieldNames[i].lexeme;
+                size_t length = strlen(name);
+                Value nameValue = allocateCollection(b, field->members[0], value(b, INT, "%zu", length));
+                Value data = arrayData(b, nameValue), text = moduleString(b, name);
+                fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %zu, i1 false)\n", data.operand, text.operand, length);
+                b->dataCopyUsed = 1;
+                Value descriptor = emptyValue(b, field->kind);
+                descriptor = insert(b, descriptor, nameValue, 0);
+                descriptor = insert(b, descriptor, boxScalar(b, extract(b, source, i), 0), 1);
+                store(b, elementAddress(b, result, value(b, INT, "%zu", i)), descriptor);
+            }
+            b->copyTransport = 1;
+            Value returned = copyValue(b, result, 0);
+            b->copyTransport = 0; escapeDynamicArrays(b, returned);
+            cleanDynamicArrayTemps(b, mark);
+            fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
+            fprintf(b->body, "  ret ptr %s\n", returned.operand); b->terminated = 1;
+            label(b, next);
+        }
+        // Non-structs have no fields. Pointers are intentionally not followed.
+        Value result = allocateCollection(b, b->reflectionFieldsKind, value(b, INT, "0"));
+        b->copyTransport = 1; Value returned = copyValue(b, result, 0); b->copyTransport = 0;
+        escapeDynamicArrays(b, returned); cleanDynamicArrayTemps(b, mark);
+        fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
+        fprintf(b->body, "  ret ptr %s\n", returned.operand);
+        fprintf(b->out, "define internal ptr @__ocean.reflect.fields({ ptr, i64 } %%input) {\nentry:\n");
+        if (copy(b->slots, b->out) || copy(b->body, b->out)) fail(b, "could not emit reflection fields");
+        fprintf(b->out, "}\n"); fclose(b->slots); fclose(b->body);
+        clearScope(&scope);
+    }
+    fprintf(b->out, "define internal i1 @__ocean.reflect.is_struct({ ptr, i64 } %%input) {\nentry:\n  %%tag = extractvalue { ptr, i64 } %%input, 0\n");
+    unsigned count = 0;
+    for (AnyType *a = b->anyTypes; a; a = a->next) {
+        BufferKind *record = bufferKind(b, a->kind);
+        if (!record || record->shape != 5 || !record->record) continue;
+        fprintf(b->out, "  %%m%u = icmp eq ptr %%tag, @__ocean.any.type.%u\n", count, (unsigned)a->kind);
+        if (count) fprintf(b->out, "  %%r%u = or i1 %s%u, %%m%u\n", count, count == 1 ? "%m" : "%r", count - 1, count);
+        count++;
+    }
+    if (count) fprintf(b->out, "  ret i1 %s%u\n}\n", count == 1 ? "%m" : "%r", count - 1);
+    else fprintf(b->out, "  ret i1 false\n}\n");
+    b->body = previousBody; b->slots = previousSlots; b->scope = previousScope;
+    b->function = previousFunction; b->boxRegion = previousRegion; b->copyTransport = previousTransport;
+}
 static void emitArrayView(Backend *b) {
     if (!b->arrayViewUsed) return;
     b->body = tmpfile(); b->slots = tmpfile();
@@ -4990,7 +5278,7 @@ static void emitArrayView(Backend *b) {
         AnyType *entry = NULL;
         for (AnyType *a = b->anyTypes; a; a = a->next) {
             BufferKind *t = bufferKind(b, a->kind);
-            if (!a->arrayEmitted && t && t->shape == 4) { entry = a; break; }
+            if (!a->arrayEmitted && t && (t->shape == 4 || t->fixedArray)) { entry = a; break; }
         }
         if (!entry) break;
         entry->arrayEmitted = 1;
@@ -5001,8 +5289,10 @@ static void emitArrayView(Backend *b) {
         fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)kind);
         branch(b, matches, good, next); label(b, good);
         Value source = temp(b, kind);
-        fprintf(b->body, "  %s = inttoptr i64 %s to ptr\n", source.operand, bits.operand);
-        Value view = t->element == SCALAR_ANY ? source : boxArray(b, source);
+        if (!t->shape)
+            fprintf(b->body, "  %s = call %s @__ocean.any.unbox.%u(i64 %s)\n", source.operand, t->ir, (unsigned)kind, bits.operand);
+        else fprintf(b->body, "  %s = inttoptr i64 %s to ptr\n", source.operand, bits.operand);
+        Value view = t->element == SCALAR_ANY && t->shape == 4 ? source : boxArray(b, source);
         int previous = b->copyTransport;
         b->copyTransport = 1;
         Value heap = copyValue(b, view, 0);
@@ -5270,6 +5560,7 @@ int emitLLVM(parseResult *program, FILE *output) {
     output = b.out;
     FILE *anyRuntime = tmpfile();
     b.out = anyRuntime;
+    emitReflection(&b);
     emitArrayView(&b);
     emitHomogeneousRuntime(&b);
     for (TypeConstraint *c = b.constraints; c; c = c->next) {
@@ -5301,6 +5592,8 @@ int emitLLVM(parseResult *program, FILE *output) {
         if (t->shape != 5 || t->definition) continue;
         validateLayout(&b, t);
         fprintf(output, "%s = type { ", t->ir);
+        // A byte-size header must determine array length even for empty records.
+        if (!t->count) fprintf(output, "i8");
         for (size_t i = 0; i < t->count; i++)
             fprintf(output, "%s%s", i ? ", " : "", irType(&b, t->members[i]));
         fprintf(output, " }\n");
@@ -5373,7 +5666,7 @@ int emitLLVM(parseResult *program, FILE *output) {
 }
 /* Stage beside the destination so a failed compiler/linker preserves old output.
  * exec arguments are passed directly; paths never become shell commands. */
-static int compileLLVMMode(const char *irPath, const char *outputPath, int object) {
+static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath) {
     size_t len = strlen(outputPath) + 16;
     char *staged = checked(len);
     snprintf(staged, len, "%s.XXXXXX", outputPath);
@@ -5402,7 +5695,10 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         return 1;
     }
     if (!child) {
-        if (object)
+        if (objectPath) {
+            if (needsFFI) execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, "-lffi", (char *)NULL);
+            else execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, (char *)NULL);
+        } else if (object)
             execlp("clang", "clang", "-Wno-override-module", "-c", "-x", "ir", irPath, "-o", staged, (char *)NULL);
         else if (needsFFI)
             execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, "-lffi", (char *)NULL);
@@ -5431,8 +5727,44 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
 }
 
 int compileLLVM(const char *irPath, const char *outputPath) {
-    return compileLLVMMode(irPath, outputPath, 0);
+    return compileLLVMMode(irPath, outputPath, 0, NULL);
 }
 int compileLLVMObject(const char *irPath, const char *outputPath) {
-    return compileLLVMMode(irPath, outputPath, 1);
+    return compileLLVMMode(irPath, outputPath, 1, NULL);
+}
+
+int linkLLVMObject(const char *objectPath, const char *irPath, const char *outputPath) {
+    return compileLLVMMode(irPath, outputPath, 0, objectPath);
+}
+
+int checkBackend(parseResult *program) {
+    char directory[] = "/tmp/ocean-check-XXXXXX";
+    if (!mkdtemp(directory)) { perror("ocean check: temporary directory"); return 1; }
+    char irPath[128], output[128];
+    snprintf(irPath,sizeof(irPath),"%s/check.ll",directory);
+    snprintf(output,sizeof(output),"%s/check.out",directory);
+    FILE *ir=fopen(irPath,"w"); int failed=!ir;
+    if(ir){failed=emitLLVM(program,ir);if(fclose(ir))failed=1;}
+    if(!failed){
+        failed=program->isLibrary?compileLLVMObject(irPath,output):compileLLVM(irPath,output);
+        if(failed)diagnostic(program->sourceText,(token){.filename=(char *)program->sourceFilename,.line=1,.column=1},"backend","error","LLVM compilation or linking failed during check");
+    }
+    unlink(irPath);unlink(output);rmdir(directory);return failed;
+}
+
+int linkLLVMObjects(const char **objects, size_t count, const char *irPath, const char *output, int library) {
+    char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
+    int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
+    int ffi=0;FILE *ir=fopen(irPath,"r");char line[1024];if(ir){while(fgets(line,sizeof(line),ir))if(strstr(line,"@ffi_type_"))ffi=1;fclose(ir);}
+    char **args=checked(sizeof(char*)*(count+12));size_t n=0;
+    args[n++]="clang";args[n++]="-Wno-override-module";
+    if(library){args[n++]="-r";args[n++]="-nostdlib";args[n++]="-no-pie";}
+    for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
+    args[n++]="-o";args[n++]=staged;if(ffi&&!library)args[n++]="-lffi";args[n]=NULL;
+    pid_t child=fork();if(!child){execvp(args[0],args);perror("could not execute clang");_exit(127);}
+    int status=0,failed=child<0;
+    if(child>0){while(waitpid(child,&status,0)<0)if(errno!=EINTR){failed=1;break;}if(!WIFEXITED(status)||WEXITSTATUS(status))failed=1;}
+    if(failed)fprintf(stderr,"backend error: clang failed to link package objects\n");
+    else if(rename(staged,output)){perror("could not save output");failed=1;}
+    unlink(staged);free(staged);free(args);return failed;
 }

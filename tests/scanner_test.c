@@ -13,9 +13,9 @@ static void kinds(char *source, const enum tokenType *expected, size_t count) {
     assert(list->arr[count].type == EOF_TOKEN);
     release(list);
 }
-static void unicode_placeholders(void) {
-    tokenlist *list = scan("\"\\u\\U\"");
-    assert(!strcmp(list->arr[0].lexeme, "uU"));
+static void unicode_escapes(void) {
+    tokenlist *list = scan("\"\\u03A9\\U0001F30A\"");
+    assert(!strcmp(list->arr[0].lexeme, "Ω🌊"));
     release(list);
 }
 static char *badSource;
@@ -106,10 +106,28 @@ int main(void) {
     assert(!memcmp(list->arr[0].lexeme, "\xCE\xA9", 2));
     release(list);
     int unicodeStatus;
-    char *unicodeOutput = capture_child(unicode_placeholders, &unicodeStatus);
-    assert(WIFEXITED(unicodeStatus) && !WEXITSTATUS(unicodeStatus) &&
-           strstr(unicodeOutput, "does not support unicode"));
+    char *unicodeOutput = capture_child(unicode_escapes, &unicodeStatus);
+    assert(WIFEXITED(unicodeStatus) && !WEXITSTATUS(unicodeStatus));
     free(unicodeOutput);
+    list = scan("_name Ωmega café a\xcc\x81 Δelta");
+    assert(list->top == 6);
+    for (size_t i=0;i<5;i++) assert(list->arr[i].type == IDENTIFIER);
+    assert(exportedName(list->arr[4].lexeme) && !exportedName(list->arr[1].lexeme + 2));
+    release(list);
+    list = scan("1e3 2.5E-2 3e+2 0e99999 18446744073709551615 0xffffffffffffffff 'Ω' '🌊'");
+    assert(list->top == 9);
+    assert(list->arr[0].numValue.floating == 1000);
+    assert(fabs(list->arr[1].numValue.floating - .025) < 1e-12);
+    assert(list->arr[2].numValue.floating == 300 && list->arr[3].numValue.floating == 0);
+    for(size_t i=4;i<6;i++) assert(list->arr[i].unsignedLiteral && list->arr[i].numValue.unsignedInteger == UINT64_MAX);
+    assert(list->arr[6].numValue.integer == 0x3a9 && list->arr[7].numValue.integer == 0x1f30a);
+    release(list);
+    rejected("1e", "exponent"); rejected("1e+", "exponent");
+    rejected("18446744073709551616", "overflow");
+    rejected("0x10000000000000000", "overflow");
+    rejected("\"\\uD800\"", "Unicode"); rejected("\"\\U00110000\"", "Unicode");
+    rejected("\xc0\xaf", "UTF-8"); rejected("\xf4\x90\x80\x80", "UTF-8");
+    rejected("'\xed\xa0\x80'", "UTF-8");
     char boundary[80];
     snprintf(boundary, sizeof(boundary), "%ld", LONG_MAX);
     list = scan(boundary);

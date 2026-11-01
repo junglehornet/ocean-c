@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <limits.h>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -260,6 +261,7 @@ static expr atomicImpl(parserState *state) {
         case LITERAL_INT:
             struct expr_literal lit_int = {0};
             lit_int.type = LITERAL_TYPE_INT;
+            lit_int.unsignedLiteral = tok.unsignedLiteral;
             lit_int.value = malloc(sizeof(long));
             CHECK_MALLOC(lit_int.value);
             *(long*) lit_int.value = tok.numValue.integer;
@@ -573,6 +575,14 @@ static expr secondaryImpl(parserState *state) {
             tok = advance(state);
             expr child2 = secondary(state);
             CHECK_SYNC;
+            if (child2.type == EXPR_TYPE_LITERAL) {
+                struct expr_literal *literal = child2.underlying;
+                if (literal->type == LITERAL_TYPE_INT && literal->unsignedLiteral &&
+                    *(uint64_t *)literal->value == (uint64_t)LONG_MAX + 1) {
+                    literal->unsignedLiteral = 0; *(long *)literal->value = LONG_MIN;
+                    return child2;
+                }
+            }
             struct expr_unary unary_n5 = {0};
             unary_n5.child = child2;
             unary_n5.operation = UNARY_NEGATE;
@@ -1001,15 +1011,27 @@ static char checkTypeName(parserState *state, token tok) {
 }
 
 static typeTokens copySignatureSpan(parserState *state, size_t start, size_t end) {
-    typeTokens result = {.nTokens = end - start + (state->pendingGreater && end == state->tokenIndex)};
-    if (result.nTokens) {
-        result.tokens = malloc(result.nTokens * sizeof(token));
-        CHECK_MALLOC(result.tokens);
-        memcpy(result.tokens, state->tokens + start, result.nTokens * sizeof(token));
-        if (state->pendingGreater && end == state->tokenIndex) {
-            result.tokens[result.nTokens - 1].type = GREATER_THAN;
-            result.tokens[result.nTokens - 1].lexeme = ">";
+    size_t count = end - start + (state->pendingGreater && end == state->tokenIndex);
+    typeTokens result = {0};
+    if (!count) return result;
+    result.tokens = malloc(2 * count * sizeof(token));
+    CHECK_MALLOC(result.tokens);
+    size_t angles = 0, brackets = 0;
+    for (size_t i = 0; i < count; i++) {
+        token t = state->tokens[start + i];
+        if (i + 1 == count && state->pendingGreater && end == state->tokenIndex) {
+            t.type = GREATER_THAN; t.lexeme = ">";
         }
+        if (t.type == LEFT_BRACKET) brackets++;
+        if (t.type == RIGHT_BRACKET && brackets) brackets--;
+        if (!brackets && t.type == BITSHIFT_RIGHT && angles >= 2) {
+            t.type = GREATER_THAN; t.lexeme = ">";
+            result.tokens[result.nTokens++] = t;
+            angles--;
+        }
+        if (!brackets && t.type == LESS_THAN) angles++;
+        if (!brackets && t.type == GREATER_THAN && angles) angles--;
+        result.tokens[result.nTokens++] = t;
     }
     return result;
 }
@@ -1697,6 +1719,7 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
         do {
             if (tok.type != IDENTIFIER) return signatureError(state, "Expected type parameter name");
             if (!checkTypeName(state, tok)) return 0;
+            if (!strcmp(tok.lexeme, "array")) return signatureError(state, "array is a reserved type name");
             count++;
             tok = advance(state);
             if (tok.type != COMMA) break;
@@ -1874,7 +1897,9 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
         char oldGuard = state->allowTypeGuard;
         size_t oldGuards = state->typeGuards;
         state->allowTypeGuard = 0;
+        function.body.open = currentToken(state);
         stmtlist *body = parseBlock(state);
+        function.body.close = state->tokens[state->tokenIndex ? state->tokenIndex-1 : 0];
         state->allowTypeGuard = oldGuard;
         state->typeGuards = oldGuards;
         state->functionDepth--;
@@ -2022,7 +2047,7 @@ static stmt parseFor(parserState *state) {
     tok = advance(state);
     expect(LEFT_PAREN, "Expected start of for loop header", stmt);
     tok = advance(state);
-    struct stmt_for loop = {0};
+    struct stmt_for loop = {.open = tok};
 
     // Recognize identifier[, identifier] := range before declaration parsing.
     size_t bindingStart = state->tokenIndex;
@@ -2111,6 +2136,7 @@ static stmt parseFor(parserState *state) {
     *loop.body = body;
     struct stmt_for *result = malloc(sizeof(struct stmt_for));
     CHECK_MALLOC(result);
+    loop.close = state->tokens[state->tokenIndex ? state->tokenIndex-1 : 0];
     *result = loop;
     return (stmt){.type = STMT_FOR, .value = result};
 
@@ -2124,6 +2150,9 @@ static stmt parseTypeDeclaration(parserState *state) {
     tok = advance(state);
     expect(IDENTIFIER, "Expected type name", stmt);
     if (!checkTypeName(state, tok)) return (stmt){0};
+    if (!strcmp(tok.lexeme, "array")) {
+        signatureError(state, "array is a reserved type name"); return (stmt){0};
+    }
     struct stmt_type node = {.name = tok, .displayName = tok.lexeme};
     tok = advance(state);
     if (tok.type == EQUALS) {
@@ -2164,6 +2193,9 @@ static stmt parseStruct(parserState *state) {
     tok = advance(state);
     expect(IDENTIFIER, "Expected struct name", stmt);
     if (!checkTypeName(state, tok)) return (stmt){0};
+    if (!strcmp(tok.lexeme, "array")) {
+        signatureError(state, "array is a reserved type name"); return (stmt){0};
+    }
     token name = tok;
     struct stmt_func *operatorMethods = nullptr;
     size_t nOperatorMethods = 0;
@@ -2325,6 +2357,9 @@ static stmt parseInterface(parserState *state) {
     token tok = advance(state);
     expect(IDENTIFIER, "Expected interface name", stmt);
     if (!checkTypeName(state, tok)) return (stmt){0};
+    if (!strcmp(tok.lexeme, "array")) {
+        signatureError(state, "array is a reserved type name"); return (stmt){0};
+    }
     struct stmt_interface *node = calloc(1, sizeof(*node));
     CHECK_MALLOC(node);
     node->name = tok;
@@ -2394,6 +2429,9 @@ static stmt parseEnum(parserState *state) {
     tok = advance(state);
     expect(IDENTIFIER, "Expected enum name", stmt);
     if (!checkTypeName(state, tok)) return (stmt){0};
+    if (!strcmp(tok.lexeme, "array")) {
+        signatureError(state, "array is a reserved type name"); return (stmt){0};
+    }
     struct stmt_enum node = {.name = tok};
     tok = advance(state);
     expect(LEFT_CURLY_BRACE, "Expected enum body", stmt);
@@ -2788,6 +2826,7 @@ static stmt parseStatementImpl(parserState *state) {
             tok = advance(state);
             return declExpr;
         case LEFT_CURLY_BRACE:
+            token blockOpen = tok;
             stmtlist *statements = parseBlock(state);
             if (!statements) {
                 state->hasError = state->isSynchronizing = 1;
@@ -2798,12 +2837,15 @@ static stmt parseStatementImpl(parserState *state) {
             }
             struct stmt_block *block = malloc(sizeof(struct stmt_block));
             CHECK_MALLOC(block);
+            block->open = blockOpen;
+            block->close = state->tokens[state->tokenIndex ? state->tokenIndex-1 : 0];
             block->stmts = to_stmtarray(statements);
             block->nStmts = listlen(statements);
             free_stmtlist(statements);
             free(statements);
             return (stmt){.type = STMT_BLOCK, .value = block};
-        case IF:
+        case IF:;
+            token ifOpen = tok;
             tok = advance(state);
             expect(LEFT_PAREN, "Expected condition for if statement", stmt);
             tok = advance(state);
@@ -2856,6 +2898,8 @@ static stmt parseStatementImpl(parserState *state) {
             }
             stmt ifStatement = {.type = STMT_IF, .value = malloc(sizeof(struct stmt_if))};
             CHECK_MALLOC(ifStatement.value);
+            ((struct stmt_if*)ifStatement.value)->open = ifOpen;
+            ((struct stmt_if*)ifStatement.value)->close = state->tokens[state->tokenIndex ? state->tokenIndex-1 : 0];
             ((struct stmt_if*)ifStatement.value)->preStmt = preStmt;
             ((struct stmt_if*)ifStatement.value)->condition = condition;
             ((struct stmt_if*)ifStatement.value)->ifTrue = malloc(sizeof(stmt));

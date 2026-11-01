@@ -8,5 +8,32 @@
 typedef struct semanticResult {
     size_t nErrors;
 } semanticResult;
+typedef struct {
+    token declaration, typeDeclaration, owner;
+    char *name, *type;
+    size_t packageId, begin, end;
+    int global, member, kind;
+} semanticSymbol;
+typedef struct {
+    token use;
+    size_t symbol;
+    char *type;
+} semanticReference;
+typedef struct {
+    token use;
+    size_t *symbols;
+    size_t count;
+    int collection, immutable;
+} semanticMembers;
+typedef struct {
+    semanticSymbol *symbols;
+    size_t nSymbols;
+    semanticReference *references;
+    size_t nReferences;
+    semanticMembers *members;
+    size_t nMembers;
+} semanticIndex;
 semanticResult analyzeSemantics(parseResult *program);
+semanticResult indexSemantics(parseResult *program, semanticIndex *index);
+void freeSemanticIndex(semanticIndex *index);
 #endif

@@ -3,6 +3,7 @@
 #include "lsp.h"
 #include "package.h"
 #include "semantic.h"
+#include "backend.h"
 #include "source_path.h"
 #include <ctype.h>
 #include <errno.h>
@@ -148,7 +149,7 @@ static void reply(Json *id, const char *result, int code, const char *message) {
     fputs("{\"jsonrpc\":\"2.0\",\"id\":", out);
     if (id) fwrite(id->start, 1, (size_t)(id->end - id->start), out); else fputs("null", out);
     if (code) { fprintf(out, ",\"error\":{\"code\":%d,\"message\":", code); quoted(out, message); fputs("}}", out); }
-    else fprintf(out, ",\"result\":%s}", result);
+    else fprintf(out, ",\"result\":%s}", result ? result : "null");
     fclose(out); sendMessage(body); free(body);
 }
 
@@ -220,7 +221,7 @@ static void publish(Document *doc, Document *documents, int clear) {
             if (slash == directory) slash[1] = 0; else *slash = 0;
             packageBuild *build = loadPackageWithSources(directory, sources, count);
             parseResult *program = packageProgram(build);
-            if (program) analyzeSemantics(program);
+            if (program && !analyzeSemantics(program).nErrors) checkBackend(program);
             fflush(stderr); _exit(0); /* Also releases parser allocations on scanner failure. */
         }
         if (child > 0) {
@@ -252,6 +253,7 @@ static void publish(Document *doc, Document *documents, int clear) {
     }
     fputs("]}}", out); fclose(out); sendMessage(body); free(body);
 }
+#include "lsp_semantic.inc"
 static void freeDocument(Document *d) { free(d->uri); free(d->path); free(d->text); free(d); }
 
 int oceanLsp(void) {
@@ -286,10 +288,13 @@ int oceanLsp(void) {
             if (initialized) reply(id, NULL, -32600, "Already initialized");
             else if (id) {
                 initialized = 1;
-                reply(id, "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":true}},\"serverInfo\":{\"name\":\"ocean\"}}", 0, NULL);
+                reply(id, "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"hoverProvider\":true,\"definitionProvider\":true,\"declarationProvider\":true,\"typeDefinitionProvider\":true,\"referencesProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"completionProvider\":{\"triggerCharacters\":[\".\"]},\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":true}},\"serverInfo\":{\"name\":\"ocean\"}}", 0, NULL);
             }
         } else if (!initialized) { if (id) reply(id, NULL, -32002, "Server not initialized"); }
         else if (!strcmp(method, "shutdown")) { if (id) { shutdown = 1; reply(id, "null", 0, NULL); } }
+        else if (!strcmp(method,"textDocument/hover")||!strcmp(method,"textDocument/definition")||!strcmp(method,"textDocument/declaration")||!strcmp(method,"textDocument/typeDefinition")||!strcmp(method,"textDocument/references")||!strcmp(method,"textDocument/rename")||!strcmp(method,"textDocument/prepareRename")||!strcmp(method,"textDocument/completion")) {
+            if(id)semanticRequest(id,method,params,documents);
+        }
         else if (!strcmp(method, "textDocument/didOpen") || !strcmp(method, "textDocument/didChange") ||
                  !strcmp(method, "textDocument/didSave") || !strcmp(method, "textDocument/didClose")) {
             Json *td = member(params, "textDocument");

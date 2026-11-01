@@ -1,4 +1,5 @@
 package io;
+import "reflect";
 extern int write(i32 fd, buffer<i8>[] data, int count);
 extern i32 snprintf(buffer<i8>[] out, int size, buffer<i8>[] format, ...);
 
@@ -87,6 +88,8 @@ func sprintItem(item any) string {
 			return sprintFloat(item.(float), 2);
 		case f32:
 			return sprintFloat(item.(f32)->float, 2);
+		case bool:
+			return item.(bool) ? "true" : "false";
 		case string:
 			return item.(string);
 		case buffer:
@@ -97,8 +100,22 @@ func sprintItem(item any) string {
 				str += (i > 0 ? " " : "") + sprintItem(value);
 			}
 			return str + "]";
+		case array<any>:
+			str := "[";
+			for (i, value := range item.(array<any>)) {
+				str += (i > 0 ? " " : "") + sprintItem(value);
+			}
+			return str + "]";
 		default:
-			return "[unknown type]"
+			if (reflect.IsStruct(item)) {
+				str := "{";
+				for (i, field := range reflect.Fields(item)) {
+					if (i > 0) str += ", ";
+					str += field.Name + ": " + sprintItem(field.Value);
+				}
+				return str + "}";
+			}
+			return "[unknown type]";
 	}
 }
 

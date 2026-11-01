@@ -375,7 +375,7 @@ The CTest suite now contains:
   empty composites/switch cases, and invalid input/nesting limits.
 - `scanner_test`: every keyword and operator token, literal values and lexemes,
   source positions, nested comments, escape sequences, integer boundaries,
-  character literals, Unicode placeholder warnings, and rejected input.
+  character literals, Unicode identifiers/scalars/escapes, scientific exponents, unsigned magnitude boundaries, and rejected input.
 - `dynarray_test`: all five generated list types, growth, shrinking, insertion
   order, independent snapshots, emptying/reuse, and invalid operations.
 - `token_test`: all real token names, unknown-token fallback, and printer output.
@@ -694,7 +694,11 @@ nested arrays, strings, structs, fixed-buffer elements, pointer elements, and
 format substitutions and escapes, signed integer boundaries, float rounding,
 `i16`/`f32` arithmetic and C varargs, value switches and fallthrough, homogeneous
 `any[]` arrays, mixed `...any` packs, array-family switches, and diagnostics.
-The fixture mirrors `../ocean-src/io/io.oc` so the suite is self-contained.
+Boolean and fixed/runtime array formatting checks include empty, nested, mixed,
+and `.array()` values. Struct formatting checks cover `{key: value}` output,
+empty and generic structs, nested fields and arrays, and format substitutions.
+The suite supplies its own trusted `reflect` fixture through `OCEAN_SRC`. The fixture mirrors `../ocean-src/io/io.oc` so the suite
+is self-contained.
 
 `mixed_arrays_test.py` checks `mixed any[]`, homogeneous and mixed named-interface
 arrays, empty-interface equivalence, method signatures and pointer method sets,
@@ -756,3 +760,40 @@ Dynamic array removal tests cover `remove(index)` and `pop()` return values,
 order and length changes, bounds failures, invalid arguments, immutable string
 rejection, and independent ownership of removed strings, records, and nested
 arrays at `-O0` and `-O2`, including discarded results and heap receivers.
+
+`runtime_array_test.py` checks immutable byte-size headers, `array<T>` value
+parameters and returns, fixed-length signatures, generic constraints, variable
+names, runtime bounds, checked indexing, concatenation, nested layouts, type
+assertions, and constructor rejection at `-O0` and `-O2`. The ownership suite
+also tracks allocations across copies and returns of arrays containing strings,
+records, nested arrays, recursive calls, reassignment, and discarded results.
+
+Dynamic array `.array()` regressions cover independent scalar and deep copies,
+empty values, byte-size headers, temporaries, heap receivers, function returns,
+global snapshots, boxed elements, string byte copies, bounds, and invalid
+arguments. Allocation tracking checks cleanup and survival after freeing the
+source at both `-O0` and `-O2`.
+
+`reflect_test.py` exercises standard-library struct field snapshots, primitive
+and named/generic/empty structs, declaration order and value parameters, private
+fields, deep copies and allocation cleanup, pointer lifetimes, and installed
+`bin/ocean` plus `src/reflect` lookup. It checks `-O0` and `-O2` and rejects
+compiler primitive calls from ordinary code, copied packages, project-local
+lookalikes, other standard-library packages, and escaping source/directory
+symlinks. `OCEAN_SRC` points at a temporary trusted standard library.
+
+`build_cache_test.py` verifies IR and native-object cache hits by counting Clang
+invocations. It covers output reuse, `run`, checks, library objects, source and
+dependency changes, standard-library edits, tool/compiler/environment identity,
+checksums against Python SHA-256, corruption recovery, concurrent writers,
+disabled/unavailable caches, error/output preservation, and symlink-safe cleanup.
+All cache files are isolated in temporary directories through `OCEAN_BUILD_CACHE`.
+
+
+`check_backend_test` verifies that checks perform lowering and native validation,
+report missing native symbols, never execute the program, and publish no outputs
+or cache artifacts. `lsp_semantic_test` exercises resolved hover, navigation,
+references, binding-aware rename, imported symbols, incomplete member completion,
+function-result completion, unsaved buffers, and UTF-16 positions. The build cache
+suite counts native compiler invocations to verify per-package object reuse,
+content invalidation, corruption recovery, and concurrent publication.

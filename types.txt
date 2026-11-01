@@ -1,0 +1,145 @@
+Collection types
+
+Arrays: T[n] and array<T>
+
+An array is a value with a fixed element count. Every array begins with an
+immutable int size field, followed by its element data. size measures the data
+in BYTES, excluding the size field, padding before the data, and any private
+compiler bookkeeping. It is not the element count.
+
+For example, an int[3] has size == 3 * sizeof(int), and len(array) == 3.
+The conceptual layout is:
+
+    struct arr<T>(size int) {
+        // Conceptual payload: size / sizeof(T) elements, not size elements.
+        data T[size / sizeof(T)];
+    }
+
+The backend stores constant-length arrays as a size header plus inline element
+storage. Runtime-sized arrays also have a size header followed by inline data;
+they use an indirect value ABI so their complete size need not be known in a
+function signature. Nested constant-length arrays each have their own header.
+Empty structs occupy one padding byte, so an array of empty structs still has
+a recoverable length. Array elements remain mutable. The size field cannot be assigned, incremented,
+or exposed through a mutable address. An array value cannot grow in place.
+
+Instantiate arrays using T[n], with a nonnegative element count:
+
+    fixed: int[3] = {1, 2, 3};
+    other := int[2]{4, 5};
+    empty: int[0] = {};
+    n := 4;
+    runtime: int[n];
+
+An omitted initializer zero-initializes the elements. Array literals may supply
+fewer than n elements; the rest are zero-initialized. Too many elements fail.
+For compatibility, T[n] without a literal body in an expression still constructs
+a dynamic array. Use a declaration x: T[n] or a literal T[n]{...} for an array.
+
+T[n] keeps its length in the type when n is a compile-time constant. Existing
+fixed-length parameter and return signatures remain valid:
+
+    func fixedCopy(a int[3]) int[3] { return a; }
+
+array<T> denotes an array of T with its length erased from the static type.
+It accepts any length, including zero. It is valid in variable declarations
+initialized from existing arrays, function parameters, and return types:
+
+    func copy(a array<int>) array<int> { return a; }
+    func create(n int) array<int> {
+        result: int[n];
+        return result;
+    }
+    result := copy(int[3]{1, 2, 3});
+    another: array<int> = create(5);
+
+array<T> is not constructor syntax. array<T>{...}, an uninitialized array<T>
+variable, zero(array<T>), and new(array<T>) are rejected. Instantiate with T[n]
+then pass, return, or assign that value instead.
+
+An array<T> argument is passed as a pointer to its header. Before executing the
+function body, the callee copies the size and data into its own local value.
+Owned elements are deep-copied. Changing the local copy does not affect the
+caller. A return also gets an independent copy that survives the returning
+function's cleanup. Pointers inside elements remain non-owning pointer values.
+
+array<T> as a type constraint matches arrays of T of any length. array<any>
+matches arrays of any element type. These constraints do not match dynamic
+arrays or raw buffers. 'array' is reserved in the type namespace: it cannot be
+a declared type name or type parameter name. It remains valid as a variable
+name. Bare 'array' is not a type or constraint; use array<any>.
+
+Both T[n] and array<T> support len, bounds-checked indexing, two-binding checked
+indexing, range iteration, value assignment, and concatenation with + or +=.
+On runtime-sized arrays, len and bounds checks derive the element count from
+the byte-size header and element storage size. .size reads payload bytes;
+.data exposes the element buffer. A normal invalid index fails with a bounds
+error. The two-binding form returns zero and false instead:
+
+    value, ok := result[len(result)];
+
+The array header participates in sizeof(T[n]) and struct field layouts. Raw
+buffer<T> storage has no array header. Use .data to pass array elements to C.
+
+Raw buffers
+
+buffer<T>[n] is unchecked element storage with lexical length metadata, not an
+array value. buffer<T> and buffer<T>[] carry a raw element pointer. Function
+parameters erase a buffer's length; a sized cast can restore it. Buffer data
+is not automatically owned or freed as array/string backing memory.
+
+Dynamic arrays: T[]
+
+Dynamic arrays have a length/capacity/data header and heap-backed element data.
+They can change length through reassignment, concatenation, and mutation methods:
+
+    values := make(int[]);
+    values: int[] = {1, 2};
+    pointer := new(int[]); // *int[], initially empty
+
+Methods:
+    array()               // independent array<T> copy of the current elements
+    add(index, ...values)  // insert values before index
+    append(...values)     // add values at the end
+    prepend(...values)    // add values at the beginning
+    remove(index)         // remove and return the indexed element
+    pop()                 // remove and return the last element
+
+array() takes no arguments and copies length elements, excluding unused capacity.
+The result has the immutable byte-size header of array<T>, owns independent
+copies of nested strings/arrays/records, and cannot grow in place. Pointer
+elements remain non-owning pointer copies. It also works on temporary dynamic
+arrays and pointers to dynamic arrays. Strings support array() as a read-only
+operation returning an independent, mutable array<i8>.
+
+remove preserves the remaining order. remove and pop reduce length by one;
+invalid removal indices and pop on an empty dynamic array raise bounds errors.
+Removed owned values have independent backing memory. len, indexing, checked
+two-binding indexing, range, +, +=, .length, .capacity, .size, and .data are
+available. .size reports element payload bytes.
+
+Strings
+
+string is an immutable heap-backed dynamic array of i8. Its capacity equals its
+length. Indexing reads bytes; element writes, mutable element addresses, and
+add/append/prepend/remove/pop are rejected. Length and capacity are read-only.
+Reassignment and += replace the string with an independently allocated value
+and automatically release its old backing storage. String/i8[] conversions
+copy bytes; mutable copies cannot modify the original string. String .data
+passed to a function is a separate temporary byte buffer valid for that call.
+
+Ownership and allocation
+
+Array, dynamic array, and string value copies are independent, including owned
+values nested in records or arrays. Value arguments and returns copy owned
+backing data. Scope exit, early returns, and loop exits release owned values;
+cleanup is emitted inline without a tracing garbage collector or array registry.
+Reassignment copies the new value before releasing the old one.
+
+Pointers are non-owning. Leaving a scope never automatically frees a pointer's
+pointee. Pointer fields and elements are copied as addresses. new(T) allocates
+zeroed heap storage, initializes the language zero value, and returns *T.
+free(pointer) releases owned contents and then the allocation without following
+nested pointer fields. Explicit heap allocations may leak unless freed.
+free(dynamicArrayOrString) releases its backing data early; recreate it before
+using it again. new(void) and new(array<T>) are invalid.

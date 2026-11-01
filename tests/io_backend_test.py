@@ -1,17 +1,24 @@
 """Exercise IO formatting and its backend requirements at O0 and O2."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
 
 compiler, clang = map(lambda x: str(Path(x).resolve()), sys.argv[1:])
-io = Path(__file__).with_name('fixtures').joinpath('io.oc').read_text()
+fixtures = Path(__file__).with_name('fixtures')
+io = fixtures.joinpath('io.oc').read_text()
+environment = dict(os.environ)
 
 def run(*args):
-    return subprocess.run(args, text=True, capture_output=True, timeout=20)
+    return subprocess.run(args, text=True, capture_output=True, timeout=20, env=environment)
 
 with tempfile.TemporaryDirectory(prefix='ocean io ') as directory:
     root = Path(directory)
+    standard = root / 'standard'
+    (standard / 'reflect').mkdir(parents=True)
+    (standard / 'reflect' / 'reflect.oc').write_text(fixtures.joinpath('reflect.oc').read_text())
+    environment['OCEAN_SRC'] = str(standard)
     source, ir, exe = root / 'main.oc', root / 'main.ll', root / 'main'
     def program(body, output='', status=0, library=False):
         source.write_text((io.replace('package io;', 'package main;') if library else 'package main;') + body)
@@ -39,7 +46,41 @@ func main() int {
     c := cStrOf("hello"); if (len(c) != 6 || c[5] != 0) return 1;
     return 0;
 }
-''', 'ab\n\nx12yQz\na{b\\q{c\\d\n0 12345 -987 -9223372036854775808\n7 -8 9 1.25\n2.00 -0.125\n2.0 1.25 2\n[1 3]\n[1 two [unknown type]]\n[a b]\n[[1 2] [3]]\n', library=True)
+''', 'ab\n\nx12yQz\na{b\\q{c\\d\n0 12345 -987 -9223372036854775808\n7 -8 9 1.25\n2.00 -0.125\n2.0 1.25 2\n[1 3]\n[1 two true]\n[a b]\n[[1 2] [3]]\n', library=True)
+
+    program('''func runtime(n int) array<int> {
+        values: int[n]; for (i := 0; i < n; i++) values[i] = i + 1;
+        return values;
+    }
+    func main() int {
+        Println(true, " ", false);
+        fixed: int[3] = {1, 2, 3}; Println(fixed); Println(runtime(3));
+        empty: int[0]; Println(empty); Println(runtime(0));
+        flags: bool[2] = {true, false}; Println(flags);
+        words: string[2] = {"one", "two"}; Println(words);
+        nested: int[2][2] = {{1, 2}, {3, 4}}; Println(nested);
+        mixedValues: any[3] = {true, "two", 3}; Println(mixedValues);
+        dynamic: int[] = {4, 5}; Println(dynamic.array());
+        Println(Sprintf("{} / {}", false, fixed));
+        return 0;
+    }''', 'true false\n[1 2 3]\n[1 2 3]\n[]\n[]\n[true false]\n[one two]\n[[1 2] [3 4]]\n[true two 3]\n[4 5]\nfalse / [1 2 3]\n', library=True)
+
+    program('''struct Empty {}
+    struct Child { count int; active bool; }
+    struct Entry { name string; child Child; values int[2]; }
+    struct Box<T> { value T; }
+    func main() int {
+        empty := Empty{}; Println(empty);
+        child := Child{2, true}; Println(child);
+        entry := Entry{"Ada", child, {3, 4}}; Println(entry);
+        Println(Box<string>{"generic"});
+        entries: Entry[] = {entry}; Println(entries);
+        fixed: Child[2] = {child, Child{0, false}}; Println(fixed);
+        Println(Sprintf("value={}", child));
+        if (Sprint(entry) != "{name: Ada, child: {count: 2, active: true}, values: [3 4]}") return 1;
+        if (entry.name != "Ada" || entry.child.count != 2 || entry.values[0] != 3) return 2;
+        return 0;
+    }''', '{}\n{count: 2, active: true}\n{name: Ada, child: {count: 2, active: true}, values: [3 4]}\n{value: generic}\n[{name: Ada, child: {count: 2, active: true}, values: [3 4]}]\n[{count: 2, active: true} {count: 0, active: false}]\nvalue={count: 2, active: true}\n', library=True)
 
     program('''
 func classify(x any) int { switch (y := x.(type)) {

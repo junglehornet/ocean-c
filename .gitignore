@@ -45,3 +45,5 @@ Testing/
 *.profdata
 __pycache__/
 *.py[cod]
+
+/install_manifest.txt

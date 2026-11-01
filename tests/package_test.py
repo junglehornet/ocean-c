@@ -404,7 +404,8 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
     write(visibility / 'main.oc', 'package main; import "lib"; '
           'func accept<T lib.Constraint>(value T) {} '
           'func main() { value: lib.Alias = 1; choice := lib.First; accept<int>(value); }')
-    invoke('build', '--check', visibility)
+    # Enum lowering remains unsupported; --check must now report that backend gap.
+    invoke('build', '--check', visibility, status=1, contains='backend error')
     for type_name in ('privateAlias', 'privateConstraint'):
         write(visibility / 'main.oc', 'package main; import "lib"; '
               'func use(value lib.' + type_name + ') {} func main() {}')

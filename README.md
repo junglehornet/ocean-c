@@ -44,20 +44,26 @@ build/ocean check ./hello.oc
 build/ocean check --lsp
 ```
 
-`--emit-llvm` defaults to `a.ll`; `--check` checks the complete package graph.
+`--emit-llvm` defaults to `a.ll`; `--check` validates the complete package graph through native code generation.
 
 `ocean check [file-or-directory]` checks syntax and semantics for the package and
-its imports without generating LLVM, object files, or an executable. It defaults
+its imports, including backend lowering, LLVM verification, and native linking. Temporary artifacts are removed; no output is published and the program is never executed. It defaults
 to the current directory and exits with a nonzero status on errors.
 
 `ocean check --lsp` starts the Ocean language server over stdin/stdout using
 [Language Server Protocol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/)
 framing. Configure an editor's Ocean language client to run `ocean` with arguments
 `["check", "--lsp"]`. The server supports initialization, shutdown, full-document
-synchronization, and syntax/semantic diagnostics on open, change, and save. Open
+synchronization, and scanner, parser, semantic, backend, and native diagnostics on open, change, and save. Open
 buffers, including new unsaved files, are checked together with their package and
-imports without modifying source files. Diagnostic positions use UTF-16. Completion,
-hover, and navigation are not currently implemented.
+imports without modifying source files. Diagnostic and edit positions use UTF-16.
+Semantic hover displays resolved types. Definition, declaration, type-definition,
+and references follow symbol bindings across files and imports. Prepare-rename
+and rename produce workspace edits, respect shadowed bindings, and reject invalid
+names, collisions, and changes that make an imported export private. Completion
+uses lexical scope and inferred receiver types, including fields, methods,
+dynamic-array operations, and exported package members. Requests use unsaved
+buffers, including incomplete member expressions.
 
 Both `ocean` and `ocean-c` use this command interface. A standalone source file
 can be passed as the location and must include a package declaration.
@@ -126,7 +132,60 @@ its repository; undeclared conventional `host/owner/repository/subpackage`
 imports use the repository's default branch. Cached modules are reused. This
 uses direct Git repositories, without a module proxy or Go vanity-URL discovery.
 `OCEAN_MOD_CACHE` overrides the cache, and `OCEAN_SRC` overrides the standard
-library source directory. `cmake --install build` installs the `ocean` command.
+library source directory. `cmake --install build` installs the `ocean` command
+under `bin/` and the standard-library tree under `src/`. The CMake cache option
+`OCEAN_STANDARD_LIBRARY_SOURCE` selects the source tree to install (by default,
+the sibling `../ocean-src` repository).
+
+The standard `reflect` package exposes struct snapshots:
+
+```Ocean
+import "reflect";
+
+struct Person { name string; age int; }
+// Inside a function:
+fields := reflect.Fields(Person{"Ada", 36});
+// fields[0].Name == "name", fields[0].Value.(string) == "Ada"
+```
+
+`reflect.Fields(value any)` returns `array<reflect.Field>` in declaration order;
+each `Field` has `Name string` and `Value any`. It includes private fields and
+struct value parameters. Field values are independent deep copies, with normal
+scope cleanup; pointer fields remain non-owning address copies. Non-structs
+return an empty array, and pointers are not automatically dereferenced.
+`reflect.IsStruct(value any)` distinguishes an empty struct from a non-struct.
+
+Only the `reflect` package physically located under the configured standard
+library root can call the compiler primitives implementing this API. A package
+name, module replacement, copied implementation, or symlink escaping that
+directory cannot enable them. Other standard-library packages also have no
+intrinsic access. Ordinary Ocean code can import the public reflection API.
+`OCEAN_SRC` is an explicit override of that trusted root for development.
+
+Builds automatically cache generated LLVM IR and native object files in
+`~/.cache/ocean-build`. Cache keys include the compiler executable, source
+contents throughout the resolved import graph, source paths, and the working
+directory. Object keys also include the IR, Clang identity, host target, and
+environment. Changing a source or dependency invalidates the relevant action;
+returning to previous contents can reuse the earlier result. Output filenames
+and `ocean run` arguments do not invalidate the cache.
+
+Generated LLVM is partitioned into one native object per source package and a
+shared runtime/data object. Each object has an independent content key, so editing
+a dependency reuses unaffected package objects. Changes to shared types, globals,
+or generated specializations can also invalidate objects that depend on them.
+Merged IR remains cached for `--emit-llvm`.
+Parsing and semantic checks still run on every invocation. Executables are
+always relinked against the current system libraries. Library `.o` builds and
+`--emit-llvm` also reuse their cached artifacts; `ocean run` reuses the same
+build cache. Failed artifacts are never published. Checksums and atomic writes
+protect against corrupt entries and concurrent builds. An unavailable cache
+silently falls back to compilation.
+
+Set `OCEAN_BUILD_CACHE=/path/to/cache` to override its location, or
+`OCEAN_BUILD_CACHE=off` to disable caching. `ocean clean --cache` (also
+`ocean clean -cache`) removes the managed cache entries. Build and download
+caches are independent: cleaning this cache does not remove downloaded modules.
 
 Package globals are default-initialized before user initializers execute.
 Imported packages initialize before their importers; within a package, files
@@ -970,6 +1029,33 @@ func main() {
 }
 ```
 
+Every array begins with an immutable `size` field containing its payload size
+in bytes. `T[n]` retains a compile-time length in its type, while `array<T>`
+accepts arrays of any length:
+
+```Ocean
+func copy(values array<int>) array<int> { return values; }
+func create(n int) array<int> {
+    values: int[n];
+    return values;
+}
+```
+
+An `array<T>` argument is passed as a pointer to its size header and inline
+payload; the callee copies the complete value before running its body. Returned
+arrays are copied into independent storage. `len`, indexing, checked indexing,
+and range use the byte-size header for runtime-sized arrays. Strings and nested
+owned elements are deep-copied and cleaned up on scope exit.
+
+`array<T>` is also a length-independent type constraint; use `array<any>` to
+match any array. Dynamic arrays and buffers do not match. Bare `array` is not a
+valid type or constraint. The name is reserved for types and remains available
+for variables. Construct arrays with `T[n]`, then pass or return them as
+`array<T>`; `array<T>{...}`, `new(array<T>)`, and `zero(array<T>)` are rejected.
+Existing `T[n]` function signatures remain supported. The size header is included
+in `sizeof(T[n])`, including zero-length arrays. Empty structs occupy one padding
+byte so their array lengths can also be recovered from the payload byte size.
+
 An array's fixed length participates in type checking, and ordinary indexing
 checks its bounds. Two-binding indexing returns an element and a success flag.
 Buffers remain unchecked; their lexical length is available to `len`, but is
@@ -978,6 +1064,11 @@ metadata. Dynamic arrays own a heap payload and expose length and capacity; repl
 extending, or freeing a dynamic array releases its previous allocation. Dynamic array value
 copies are independent, including nested dynamic arrays. Strings use the same heap
 dynamic array representation, with read-only bytes and capacity fixed to length.
+
+`values.array()` returns an independent `array<T>` copy of a dynamic array's
+current elements, excluding unused capacity. Strings and nested owned values
+are deep-copied; pointer elements retain their non-owning addresses. Strings
+also support `.array()`, returning an independent, mutable `array<i8>`.
 
 Dynamic arrays support `append(...values)`, `prepend(...values)`, and
 `add(index, ...values)`. `remove(index)` removes and returns the indexed element,
@@ -1004,3 +1095,13 @@ Their lengths, initialization, indexing, and value copies work, but their exact
 inline memory layout is not yet the layout specified in `types.txt`. The dynamic array
 header also uses the compiler's indirect value ABI. Do not rely on either layout
 for C interoperability; pass a collection's `.data` buffer explicitly.
+
+
+Scanner identifiers support Unicode 16.0 identifier characters and leading
+underscores; a lone `_` remains the discard token. Exported names use Unicode
+uppercase letters. UTF-8 character literals decode to Unicode scalar values,
+and `\uXXXX`/`\UXXXXXXXX` escapes encode scalars as UTF-8 in strings. Invalid
+UTF-8 and surrogate/out-of-range escapes are rejected. Decimal floating literals
+accept signed `e`/`E` exponents. Integer scanning preserves magnitudes through
+`UINT64_MAX`, with larger literals rejected; unsupported unsigned lowering is
+reported by the backend and therefore by `--check`.

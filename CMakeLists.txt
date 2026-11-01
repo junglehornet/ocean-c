@@ -27,6 +27,8 @@ target_sources(ocean-c
         ast.c
         semantic.c
         backend.c
+        build_cache.c
+        llvm_packages.c
 )
 
 if(UNIX)
@@ -37,6 +39,9 @@ add_custom_target(ocean ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE_DIR:ocean-c>/ocean"
     DEPENDS ocean-c)
 install(PROGRAMS "$<TARGET_FILE:ocean-c>" DESTINATION bin RENAME ocean)
+set(OCEAN_STANDARD_LIBRARY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../ocean-src" CACHE PATH "Ocean standard library source tree")
+install(DIRECTORY "${OCEAN_STANDARD_LIBRARY_SOURCE}/" DESTINATION src OPTIONAL
+    PATTERN ".git" EXCLUDE PATTERN ".gitignore" EXCLUDE)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -69,6 +74,12 @@ if(BUILD_TESTING)
     endforeach()
 
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME check_backend_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_backend_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(check_backend_test PROPERTIES TIMEOUT 120)
+    add_test(NAME lsp_semantic_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/lsp_semantic_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(lsp_semantic_test PROPERTIES TIMEOUT 120)
     add_test(NAME lsp_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/lsp_test.py" "$<TARGET_FILE:ocean-c>")
     set_tests_properties(lsp_test PROPERTIES TIMEOUT 30)
@@ -152,6 +163,15 @@ if(BUILD_TESTING)
     add_test(NAME new_allocation_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/new_allocation_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(new_allocation_test PROPERTIES TIMEOUT 60)
+    add_test(NAME build_cache_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_cache_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(build_cache_test PROPERTIES TIMEOUT 120)
+    add_test(NAME reflect_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/reflect_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(reflect_test PROPERTIES TIMEOUT 120)
+    add_test(NAME runtime_array_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_array_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(runtime_array_test PROPERTIES TIMEOUT 60)
     add_test(NAME collection_types_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/collection_types_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(collection_types_test PROPERTIES TIMEOUT 60)
