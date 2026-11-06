@@ -282,3 +282,52 @@ func main() int {
         ('enum E { A } func main() { e := E.A; switch(v := e.(type)) { default: return; } }', 'type-guard switches do not support enums'),
     ]:
         rejected(body, message)
+
+    program("""enum Result<T> { value(T), error(string), }
+func (r Result<T>) unwrap() T {
+    match(r) {
+        Result.value(v) => return v;
+        Result.error(msg) => return panic msg;
+    }
+    return zero(T);
+}
+func (r Result<T>) choose<U>(other U) U { return other; }
+func (r *Result<T>) set(v T) { *r = Result<T>.value(v); }
+enum Empty { none }
+func (e Empty) number() int { return 2; }
+func main() int {
+    r := Result<int>.value(3);
+    r.set(7);
+    p := &r;
+    if (p.unwrap() != 7) return 99;
+    text := Result<string>.value("hello");
+    if (text.unwrap() != "hello") return 98;
+    return r.unwrap() + r.choose<int>(4) + Empty.none.number();
+}""", 13)
+
+    rejected("""enum Result { value(int), error(string) }
+func (r Result) value() int { return 0; }
+func main() {}""", "method name conflicts with an enum variant")
+
+    rejected("""enum Result { value{item int}, empty }
+func (r Result) item() int { return 0; }
+func main() {}""", "method name conflicts with an enum payload field")
+
+    rejected("""enum Result<T> { value(T), empty }
+func (r Result<T>) unwrap() T { return zero(T); }
+func main() {
+    r := Result<int>.value(1);
+    match(r) { Result.unwrap(v) => return; Result => return; }
+}""", "unknown enum variant")
+
+    rejected("""enum Result { value(int), empty }
+func (r Result) unwrap() int { return 0; }
+func main() {
+    r := Result.value(1);
+    match(r) { Result.unwrap => return; Result => return; }
+}""", "unknown enum variant")
+
+    rejected("""enum Result { value(int) }
+func (r Result) unwrap() int { return 0; }
+func (r Result) unwrap() int { return 1; }
+func main() {}""", "duplicate method declaration")

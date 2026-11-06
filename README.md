@@ -747,6 +747,12 @@ func main() int {
 }
 ```
 
+Enums support value and pointer receiver methods, including generic receivers
+such as `func (r Result<T>) unwrap() T`. Receiver type parameters bind from the
+enum's type arguments. Method names must not collide with any variant name or
+named payload field. Call methods on enum values; `Result.unwrap(v)` is not a
+variant constructor or a valid match pattern.
+
 In extraction and match patterns, `Result.value` infers its specialization from
 the source value. An explicit `Result<int>.value` must match that source's type
 arguments. Generic functions can construct `Result<T>.value(item)` and return

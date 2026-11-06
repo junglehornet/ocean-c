@@ -987,10 +987,20 @@ static void function(Context *c, struct stmt_func *f) {
                          : record ? record->name : (token){0};
         if (definition.filename && sourcePackage(c, definition.filename) != sourcePackage(c, f->name.filename))
             error(c, base.tokens[0], "cannot define a method on a type from another package");
-        if (!record && !definedType(receiverOwner)) error(c, base.tokens[0], "method receiver must name a struct or defined type");
+        if (!record && !definedType(receiverOwner)) error(c, base.tokens[0], "method receiver must name a struct, enum, or defined type");
         else if ((definedType(receiverOwner) ? 0 : record->nTypeParams) != f->nReceiverTypeParams)
             error(c, base.tokens[0], "receiver type parameter count mismatch");
         if (record || definedType(receiverOwner)) findMethod(c, receiverOwner, f->name.lexeme);
+        if (receiverOwner->enumeration) {
+            struct stmt_enum *enumeration = receiverOwner->enumeration;
+            for (size_t i = 0; i < enumeration->nMembers; i++) {
+                if (!strcmp(enumeration->names[i].lexeme, f->name.lexeme))
+                    error(c, f->name, "method name conflicts with an enum variant");
+                for (size_t j = 0; j < enumeration->payloads[i].nFields; j++)
+                    if (!strcmp(enumeration->payloads[i].fieldNames[j].lexeme, f->name.lexeme))
+                        error(c, f->name, "method name conflicts with an enum payload field");
+            }
+        }
         if (record) {
             for (size_t i = 0; i < record->nFields; i++)
                 if (!strcmp(record->fieldNames[i].lexeme, f->name.lexeme))
@@ -2060,7 +2070,18 @@ static Type *expression(Context *c, expr *e) {
             if (base->type == EXPR_TYPE_INSTANTIATION) base = &((struct expr_instantiation *)base->underlying)->parent;
             Symbol *symbol = base->type == EXPR_TYPE_IDENTIFIER ? lookup(c, ((struct expr_identifier *)base->underlying)->lexeme.lexeme) : NULL;
             token member = ((struct expr_identifier *)v->field.underlying)->lexeme;
-            if (!symbol || !symbol->isType) { error(c, member, "extract a concrete enum variant before accessing its payload"); return &unknown; }
+            if (!symbol || !symbol->isType) {
+                struct stmt_func *method = findMethod(c, t, member.lexeme);
+                if (!method) { error(c, member, "extract a concrete enum variant before accessing its payload"); return &unknown; }
+                if (!exportedName(method->name.lexeme) && sourcePackage(c, at.filename) != sourcePackage(c, method->name.filename)) {
+                    error(c, member, "method is not exported by its package"); return &unknown;
+                }
+                Type *callable = allocate(c, sizeof(*callable));
+                callable->name = "function"; callable->function = method; callable->receiver = t;
+                Symbol *reference = allocate(c, sizeof(*reference)); reference->name = method->name; reference->type = callable;
+                indexReference(c, member, reference);
+                return callable;
+            }
             Type *variant = enumMemberType(c, t, member);
             if (variant == &unknown) return variant;
             *e = specializedEnumExpr(ENUM_VARIANT, variant, variant->enumMember - 1, (expr){0}, at);

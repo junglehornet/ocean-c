@@ -169,8 +169,16 @@ Control flow includes `if`/`else`, `for`, range loops, `switch`, `break`,
 not the element. Type switches use `switch (v := value.(type)) { case int: ... }`.
 Labels and `goto` are function-local and cannot enter nested scopes or skip
 in-scope declarations. `panic "message";` terminates with a diagnostic and call
-trace. `return panic "message";` reports at the caller; `forward panic statement`
-(or a block) forwards that location through wrapper calls.
+trace. `return panic "message";` reports at the caller. Use
+`forward panic return helper();` for a single statement, or
+`forward panic { first(); second(); }` for a block, to forward returned panics
+from those calls to the current function's caller. Only failures originating
+from `return panic` participate: `forward panic { panic "hi"; }` still reports
+at `panic "hi"`. Consecutive forwarding callers move the location outward;
+nested forwarding blocks in one function do not skip extra frames. Successful
+calls behave normally; messages and full traces are preserved. A wrapped
+declaration remains visible in its enclosing scope. Forwarding does not catch
+panics or allow execution to continue.
 
 ## Collections and ownership
 
@@ -251,7 +259,7 @@ type ID = UserID;                // alias, same identity
 Generic arguments use `<...>`; supply explicit function/method arguments:
 `identity<int>(42)`, `box.Pair<bool>(true)`. Type inference for generic calls is
 unsupported. Missing constraints default to `any`; receiver type parameters
-bind from the struct. Value receivers copy; pointer receivers borrow addressable
+bind from the struct or enum. Value receivers copy; pointer receivers borrow addressable
 values automatically. Struct value parameters are immutable fields preceding
 ordinary fields, initialized once in literals such as `Matrix{2, 3}`.
 
@@ -281,6 +289,10 @@ record (`Click{x, y int}`), and fixed payload variants. Payloads are immutable;
 wrong-variant extraction traps. Use `match`, not enum type-guard switches;
 `EnumName => statement;` is the default arm. Generic constructors require type
 arguments; patterns can infer them from the subject.
+Enums support value and pointer receiver methods, including generic receivers
+(`func (r Result<T>) unwrap() T`). Method names cannot collide with variant
+names or named payload fields. Methods are called on values; `Result.unwrap(v)`
+is not a variant constructor or match pattern.
 
 ## Native calls and current limits
 
