@@ -105,6 +105,26 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
           'return sizeof(math.Box<int>) + sizeof(*math.Box<int>) + b.value; }')
     invoke("run", ".", status=16)
 
+    # Receivers must belong to this package, including through alias chains.
+    receivers = base / "receivers"
+    write(receivers / "ocean.mod", 'module example.com/receivers\nocean 0.1\n')
+    write(receivers / "lib/types.oc", 'package lib; struct Box<T> { value T; } '
+          'type Count int; type Alias = Count;')
+    for owner in ('Box<T>', '*Box<T>', 'Box<T>*', 'Count', 'Alias', 'Local'):
+        write(receivers / "main.oc", 'package main; import . "lib"; '
+              'type Local = Alias; func (value ' + owner + ') Extra() {} func main() {}')
+        invoke('build', '--check', receivers, status=1,
+               contains='cannot define a method on a type from another package')
+    write(receivers / "main.oc", 'package main; import "lib"; '
+          'type Local = lib.Count; func (value Local) Extra() {} func main() {}')
+    invoke('build', '--check', receivers, status=1,
+           contains='cannot define a method on a type from another package')
+    # A distinct local definition and receivers in sibling files remain legal.
+    write(receivers / "main.oc", 'package main; import "lib"; type Local lib.Count; '
+          'func main() int { value := 7->Local; return value.Extra(); }')
+    write(receivers / "methods.oc", 'package main; func (value Local) Extra() int { return value->int; }')
+    invoke('run', receivers, status=7)
+
     # Global scope and package initialization are shared across files.
     write(root / "math/value.oc", 'package math; Counter: int = 4; '
           'func Answer() int { return Counter; } func Bump() { Counter++; }')
@@ -302,7 +322,9 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
     invoke('build', base / 'missing.oc', status=1, contains='does not exist')
     write(root / 'main.oc', 'package main; func main() {}')
     invoke('build', '.', '-o', root / 'helper.oc', status=1, contains='overwrite')
+    invoke('run', '-o', base / 'bad', '.', status=1, contains='incompatible')
     invoke('run', '.', '-o', base / 'bad', status=1, contains='incompatible')
+    assert not (base / 'bad').exists()
 
     # stdin/stdout and signal status are preserved; hidden executables are removed.
     write(root / 'main.oc', 'package main; extern i32 getchar(); '
@@ -403,14 +425,14 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
           'enum Choice { First, second }')
     write(visibility / 'main.oc', 'package main; import "lib"; '
           'func accept<T lib.Constraint>(value T) {} '
-          'func main() { value: lib.Alias = 1; choice := lib.First; accept<int>(value); }')
-    # Enum lowering remains unsupported; --check must now report that backend gap.
-    invoke('build', '--check', visibility, status=1, contains='backend error')
+          'func main() { value: lib.Alias = 1; choice := lib.Choice.First; accept<int>(value); }')
+    # Enum variants are namespaced under the exported enum type.
+    invoke('build', '--check', visibility)
     for type_name in ('privateAlias', 'privateConstraint'):
         write(visibility / 'main.oc', 'package main; import "lib"; '
               'func use(value lib.' + type_name + ') {} func main() {}')
         invoke('build', '--check', visibility, status=1, contains='not exported')
-    write(visibility / 'main.oc', 'package main; import "lib"; func main() { value := lib.second; }')
+    write(visibility / 'main.oc', 'package main; import "lib"; func main() { value := lib.Choice.second; }')
     invoke('build', '--check', visibility, status=1, contains='not exported')
 
 print(f'{checks} package/module build and run checks passed, including Git cache and cleanup')

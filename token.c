@@ -110,6 +110,8 @@ char *getTokenTypeStr(enum tokenType t) {
             return "COLON";
         case PLUS:
             return "PLUS";
+        case MATCH: return "MATCH";
+        case FAT_ARROW: return "FAT_ARROW";
         case ARROW:
             return "ARROW";
         case MINUS:

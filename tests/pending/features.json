@@ -351,26 +351,6 @@
       ]
     },
     {
-      "id": "enum_values",
-      "stage": "semantic",
-      "reason": "Implicit enumeration values are stored as NULL rather than assigned.",
-      "syntax": "existing",
-      "cases": [
-        {
-          "id": "implicit_and_explicit",
-          "source": "enum Color { RED, GREEN = 4, BLUE, }",
-          "expected": {
-            "ok": true,
-            "facts": {
-              "RED": 0,
-              "GREEN": 4,
-              "BLUE": 5
-            }
-          }
-        }
-      ]
-    },
-    {
       "id": "return_checking",
       "stage": "semantic",
       "reason": "Return count/types and missing required returns are unchecked.",

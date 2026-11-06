@@ -19,6 +19,9 @@ struct Type {
     Type *receiver;
     struct stmt_func *function;
     struct stmt_struct *record;
+    struct stmt_enum *enumeration;
+    typeTokens *enumArguments; // Source spelling retained for constructor monomorphization.
+    size_t enumMember; // Nonzero only for a variant selector/type (index + 1).
     struct stmt_interface *interface;
     struct Context *context;
     int mixed;
@@ -139,9 +142,32 @@ static Type *representation(Type *t) {
     return canonical(t);
 }
 // Type arguments are constraints, not numeric assignment conversions.
+static int matchesTypeConstraint(Type *, Type *);
+/* An explicit any argument is concrete storage; abstract type parameters remain flexible. */
+static int enumAnyArgumentsFit(Type *a, Type *b) {
+    if (a->semanticBase == &any || b->semanticBase == &any) return 1;
+    if (a == &any || b == &any) return a == b;
+    if (definedType(a) || definedType(b)) return 1;
+    if (a->element && b->element && !enumAnyArgumentsFit(a->element, b->element)) return 0;
+    if (a->nArguments == b->nArguments)
+        for (size_t i = 0; i < a->nArguments; i++)
+            if (!enumAnyArgumentsFit(a->arguments[i], b->arguments[i])) return 0;
+    return 1;
+}
+static int enumArgumentsFit(Type *a, Type *b) {
+    for (size_t i = 0; i < a->nArguments; i++)
+        if (!enumAnyArgumentsFit(a->arguments[i], b->arguments[i]) ||
+            !matchesTypeConstraint(a->arguments[i], b->arguments[i]) ||
+            !matchesTypeConstraint(b->arguments[i], a->arguments[i])) return 0;
+    return 1;
+}
 static int matchesTypeConstraint(Type *expected, Type *actual) {
     if (canonical(expected) == &any || (canonical(actual) == &any && !definedType(expected)) || expected == &unknown || actual == &unknown) return 1;
     if (expected == actual) return 1;
+    if (expected->enumeration || actual->enumeration)
+        return expected->enumeration && expected->enumeration == actual->enumeration &&
+               ((!expected->nArguments && !actual->nArguments) ||
+                (expected->nArguments == actual->nArguments && enumArgumentsFit(expected, actual)));
     if (definedType(expected)) return definedType(actual) && expected->declaration == actual->declaration;
     if (expected->interface) return interfaceFits(expected->context, expected, actual, 0);
     if (definedType(actual)) return 0;
@@ -217,6 +243,9 @@ static int compatibleTypes(Type *a, Type *b) {
                     : a->count == b->count);
     if (a->function || b->function)
         return a->function == b->function;
+    if (a->enumeration || b->enumeration)
+        return a->enumeration && a->enumeration == b->enumeration &&
+               a->nArguments == b->nArguments && enumArgumentsFit(a, b);
     if (a->record || b->record) {
         if (a->record != b->record)
             return 0;
@@ -276,10 +305,22 @@ static Type *parameter(Context *, Type *, typeTokens);
 static void check(Context *, Type *, Type *, token);
 static void checkConstraint(Context *, Type *, typeTokens, Type *, token);
 static Type *resolveDeclaredType(Context *, Type *);
+static Type *enumMemberType(Context *, Type *, token);
+static Type *enumType(Context *, struct stmt_enum *);
+static void prepareEnum(struct stmt_enum *);
 static Type *typeOf(Context *c, typeTokens span) {
     if (!span.nTokens)
         return &unknown;
     token t = span.tokens[0];
+    if (span.nTokens > 2 && t.type == IDENTIFIER && span.tokens[1].type == LEFT_BRACKET &&
+        span.tokens[2].type != RIGHT_BRACKET) {
+        Symbol *symbol = lookup(c, t.lexeme);
+        Type *named = symbol && symbol->isType ? symbol->type : NULL;
+        if (named && named->declaration) named = resolveDeclaredType(c, named);
+        if (named && named->enumeration && named->enumeration->nTypeParams) {
+            error(c, span.tokens[1], "Enum type arguments require angle brackets <...>"); return &unknown;
+        }
+    }
     if (span.nTokens > 1 && span.tokens[span.nTokens - 1].type == STAR) {
         Type *pointer = allocate(c, sizeof(*pointer));
         pointer->name = "pointer";
@@ -381,6 +422,11 @@ static Type *typeOf(Context *c, typeTokens span) {
             v->element = &unknown;
         return v;
     }
+    if (span.nTokens >= 3 && span.tokens[span.nTokens - 2].type == DOT) {
+        Type *parent = typeOf(c, (typeTokens){span.nTokens - 2, span.tokens});
+        if (parent->enumeration) return enumMemberType(c, parent, span.tokens[span.nTokens - 1]);
+        error(c, t, "type has no enum variants"); return &unknown;
+    }
     const char *n = t.lexeme ? t.lexeme : "any";
     Symbol *s = lookup(c, n);
     if (s) {
@@ -389,6 +435,8 @@ static Type *typeOf(Context *c, typeTokens span) {
             error(c, t, "expected a type");
             return &unknown;
         }
+        if (s->type->enumeration && span.nTokens == 3 && span.tokens[1].type == DOT)
+            return enumMemberType(c, s->type, span.tokens[2]);
         if (s->type->declaration) {
             Type *resolved = resolveDeclaredType(c, s->type);
             if (resolved == &unknown) return resolved;
@@ -413,6 +461,7 @@ static Type *typeOf(Context *c, typeTokens span) {
             *instance = *s->type;
             instance->nArguments = count;
             instance->arguments = allocate(c, sizeof(Type *) * count);
+            if (instance->enumeration) instance->enumArguments = allocate(c, sizeof(typeTokens) * count);
             if (count != instance->record->nTypeParams)
                 error(c, t, "type argument count mismatch");
             for (size_t i = 0; i < count; i++) {
@@ -421,6 +470,7 @@ static Type *typeOf(Context *c, typeTokens span) {
                                        allocate(c, sizeof(token) * arguments[i].nTokens)};
                 memcpy(retained.tokens, arguments[i].tokens, sizeof(token) * retained.nTokens);
                 instance->arguments[i] = typeOf(c, retained);
+                if (instance->enumeration) instance->enumArguments[i] = retained;
                 free(arguments[i].tokens);
             }
             free(arguments);
@@ -613,6 +663,10 @@ static void formatType(FILE *out, Type *t, unsigned depth) {
     }
 }
 static void check(Context *c, Type *expected, Type *actual, token at) {
+    if (actual->enumeration && actual->enumMember &&
+        (actual->enumeration->forms[actual->enumMember - 1] == 1 || actual->enumeration->forms[actual->enumMember - 1] == 2)) {
+        error(c, at, "enum payload variant requires construction"); return;
+    }
     if (compatible(expected, actual))
         return;
     at = diagnosticLocation(c, at);
@@ -628,6 +682,9 @@ static Type *parameter(Context *, Type *, typeTokens);
 static Type *expectedExpression(Context *, Type *, expr *, token);
 static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
     struct expr_composite *v = e->underlying;
+    if (target->enumeration) {
+        error(c, at, "construct an enum through a qualified variant"); return &unknown;
+    }
     if (v->location.filename)
         at = v->location;
     if (!strcmp(target->name, "fixed-array") && target->bufferFamily == 2) {
@@ -756,6 +813,8 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
                 return (TypeList){items, 2};
             }
         }
+        if (t->enumeration && t->nArguments != t->enumeration->nTypeParams)
+            error(c, at, "generic enum value requires explicit type arguments");
         if (!strcmp(t->name, "tuple")) {
             if (count == 1)
                 return (TypeList){t->arguments, t->nArguments};
@@ -911,6 +970,7 @@ static int functionFallsThrough(Context *c, struct stmt_func *function) {
     return 0;
 }
 
+static size_t sourcePackage(Context *c, const char *filename);
 static void function(Context *c, struct stmt_func *f) {
     Scope scope = {c->scope, NULL, f->body.open, f->body.close};
     c->scope = &scope;
@@ -923,6 +983,10 @@ static void function(Context *c, struct stmt_func *f) {
         Symbol *owner = lookup(c, base.tokens[0].lexeme);
         struct stmt_struct *record = owner && owner->isType ? owner->type->record : NULL;
         Type *receiverOwner = owner && owner->isType ? owner->type : &unknown;
+        token definition = definedType(receiverOwner) ? receiverOwner->declaration->name
+                         : record ? record->name : (token){0};
+        if (definition.filename && sourcePackage(c, definition.filename) != sourcePackage(c, f->name.filename))
+            error(c, base.tokens[0], "cannot define a method on a type from another package");
         if (!record && !definedType(receiverOwner)) error(c, base.tokens[0], "method receiver must name a struct or defined type");
         else if ((definedType(receiverOwner) ? 0 : record->nTypeParams) != f->nReceiverTypeParams)
             error(c, base.tokens[0], "receiver type parameter count mismatch");
@@ -1340,6 +1404,8 @@ static size_t sourcePackage(Context *c, const char *filename) {
             return c->program->sources[i].packageId;
     return 0;
 }
+#include "semantic_enum.inc"
+
 static Type *expression(Context *c, expr *e) {
     token at = e ? e->location : (token){0};
     if (!e || !e->underlying)
@@ -1458,6 +1524,9 @@ static Type *expression(Context *c, expr *e) {
             }
         }
         Type *base = expression(c, &v->parent), *t = allocate(c, sizeof(*t));
+        if (base->enumeration && v->location.type == LEFT_BRACKET) {
+            error(c, v->location, "Enum type arguments require angle brackets <...>"); return &unknown;
+        }
         *t = *base;
         if (!base->function && !base->record)
             error(c, at, "value cannot be instantiated");
@@ -1468,6 +1537,7 @@ static Type *expression(Context *c, expr *e) {
             error(c, at, "type argument count mismatch");
         t->nArguments = v->nTypeArguments;
         t->arguments = allocate(c, sizeof(Type *) * t->nArguments);
+        if (base->enumeration) t->enumArguments = v->typeArguments;
         for (size_t i = 0; i < t->nArguments; i++)
             t->arguments[i] = typeOf(c, v->typeArguments[i]);
         typeTokens *constraints = base->function ? base->function->typeParamConstraints
@@ -1545,6 +1615,20 @@ static Type *expression(Context *c, expr *e) {
     }
     case EXPR_TYPE_CALL: {
         struct expr_call *v = e->underlying;
+        if (enumSelector(c, &v->func)) {
+            Type *variant = expression(c, &v->func);
+            if (variant->enumeration && variant->enumMember) {
+                struct stmt_enum *decl = variant->enumeration; size_t i = variant->enumMember - 1;
+                if (variant->nArguments != decl->nTypeParams) { error(c, at, "generic enum constructor requires explicit type arguments"); return &unknown; }
+                if (decl->forms[i] != 1) { error(c, at, "only tuple enum variants use call construction"); return &unknown; }
+                if (v->spread || v->nParams != decl->payloads[i].nFields) error(c, at, "enum constructor argument count mismatch");
+                struct expr_composite *payload = calloc(1, sizeof(*payload));
+                payload->nEntries = v->nParams; payload->values = v->params; payload->keys = calloc(v->nParams + 1, sizeof(expr));
+                expr literal = {.type = EXPR_TYPE_COMPOSITE, .underlying = payload, .location = at};
+                checkComposite(c, enumPayloadType(c, variant, i), &literal, at);
+                *e = specializedEnumExpr(ENUM_CONSTRUCT, variant, i, literal, at); return enumValueType(c, variant);
+            }
+        }
         if (v->func.type == EXPR_TYPE_IDENTIFIER) {
             const char *name = ((struct expr_identifier *)v->func.underlying)->lexeme.lexeme;
             int fields = !strcmp(name, "compilerReflectFields"), predicate = !strcmp(name, "compilerReflectIsStruct");
@@ -1755,7 +1839,17 @@ static Type *expression(Context *c, expr *e) {
             }
             for (size_t i = 0; i < m; i++)
                 rhs[i] = *commaItem(&v->right, i);
+            if (m == 1) {
+                token *names = allocate(c, sizeof(token) * n);
+                for (size_t i = 0; i < n; i++) {
+                    expr *target = commaItem(&v->left, i);
+                    if (target->type == EXPR_TYPE_IDENTIFIER) names[i] = ((struct expr_identifier *)target->underlying)->lexeme;
+                    else names[i].lexeme = "_";
+                }
+                orderEnumExtraction(c, &rhs[0], names, n);
+            }
             TypeList values = valueTypes(c, rhs, m, targets, n, at, 1);
+            for (size_t i = 0; i < m; i++) *commaItem(&v->right, i) = rhs[i];
             if (values.count != n)
                 error(c, at, "assignment count mismatch");
             for (size_t i = 0; i < n && i < values.count; i++)
@@ -1768,6 +1862,16 @@ static Type *expression(Context *c, expr *e) {
         Type *b = v->operation == EXPR_ASSIGNMENT ? expectedExpression(c, a, &v->right, at)
                                                   : expression(c, &v->right);
         if (recreated) recreated->freed = 0;
+        if ((v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) && (a->enumeration || b->enumeration)) {
+            if (a->enumeration != b->enumeration) error(c, at, "cannot compare variants from different enum types");
+            if (a->enumeration == b->enumeration && a->nArguments && b->nArguments && !compatibleTypes(a, b))
+                error(c, at, "cannot compare different enum specializations");
+            if (!a->enumMember && !b->enumMember) error(c, at, "enum comparison requires a variant selector");
+            v->left = a->enumMember ? enumInteger(a->enumMember - 1, at) : enumExpr(ENUM_TAG, a->enumeration, 0, v->left, at);
+            v->right = b->enumMember ? enumInteger(b->enumMember - 1, at) : enumExpr(ENUM_TAG, b->enumeration, 0, v->right, at);
+            return &boolean;
+        }
+
         if (v->operation == EXPR_COMMA)
             return b;
         if ((v->operation == EXPR_ADD || v->operation == EXPR_ADD_EQUALS) &&
@@ -1917,14 +2021,51 @@ static Type *expression(Context *c, expr *e) {
             error(c, at, "invalid conversion");
         return b;
     }
+    case EXPR_TYPE_ENUM: {
+        struct expr_enum *v = e->underlying;
+        if (v->operation == ENUM_TAG) return &integer;
+        if (v->operation == ENUM_EXTRACT) return enumExtractionType(c, v, at);
+        Type *t = enumNodeType(c, v);
+        if (v->operation == ENUM_VARIANT) t->enumMember = v->member + 1;
+        return t;
+    }
     case EXPR_TYPE_ASSERTION: {
         struct expr_assertion *v = e->underlying;
-        expression(c, &v->child);
-        return v->isTypeGuard ? &any : typeOf(c, v->type);
+        Type *source = expression(c, &v->child);
+        if (v->isTypeGuard) {
+            if (source->enumeration) error(c, at, "type-guard switches do not support enums; use match");
+            return &any;
+        }
+        Type *target = typeOf(c, v->type);
+        if (target->enumeration && (source->enumeration || target->enumMember)) {
+            if (!target->enumMember) { error(c, at, "enum extraction requires a concrete variant"); return &unknown; }
+            if (source->enumeration == target->enumeration && target->nArguments && !compatibleTypes(target, source))
+                error(c, at, "enum extraction type arguments do not match the source");
+            expr result = enumExpr(ENUM_EXTRACT, target->enumeration, target->enumMember - 1, v->child, at);
+            if (v->pattern) {
+                token *names; size_t *fields;
+                size_t count = enumPattern(c, target->enumeration, target->enumMember - 1, v->pattern, &names, &fields);
+                struct expr_enum *node = result.underlying; node->fields = fields; node->nFields = count;
+                free(names);
+            }
+            *e = result; return enumExtractionType(c, result.underlying, at);
+        }
+        return target;
     }
     case EXPR_TYPE_DOT: {
         struct expr_dot *v = e->underlying;
         Type *t = recordReceiver(expression(c, &v->parent));
+        if (t->enumeration) {
+            expr *base = &v->parent;
+            if (base->type == EXPR_TYPE_INSTANTIATION) base = &((struct expr_instantiation *)base->underlying)->parent;
+            Symbol *symbol = base->type == EXPR_TYPE_IDENTIFIER ? lookup(c, ((struct expr_identifier *)base->underlying)->lexeme.lexeme) : NULL;
+            token member = ((struct expr_identifier *)v->field.underlying)->lexeme;
+            if (!symbol || !symbol->isType) { error(c, member, "extract a concrete enum variant before accessing its payload"); return &unknown; }
+            Type *variant = enumMemberType(c, t, member);
+            if (variant == &unknown) return variant;
+            *e = specializedEnumExpr(ENUM_VARIANT, variant, variant->enumMember - 1, (expr){0}, at);
+            return variant;
+        }
         if (t == &nullValue)
             error(c, at, "null needs a typed pointer before member access");
         token field = ((struct expr_identifier *)v->field.underlying)->lexeme;
@@ -1965,7 +2106,7 @@ static Type *expression(Context *c, expr *e) {
         if (!strcmp(t->name, "buffer"))
             error(c, field, "buffer has no members");
         if (t->record) {
-            if (genericFamily(t)) {
+            if (genericFamily(t) && !t->record->enumPayload) {
                 error(c, field, "narrow a generic family to concrete type arguments before member access");
                 return &unknown;
             }
@@ -1996,6 +2137,18 @@ static Type *expression(Context *c, expr *e) {
         return &unknown;
     }
     case EXPR_TYPE_COMPOSITE: {
+        struct expr_composite *literal = e->underlying;
+        if (enumSelector(c, &literal->type)) {
+            Type *variant = expression(c, &literal->type);
+            if (variant->enumeration && variant->enumMember) {
+                struct stmt_enum *decl = variant->enumeration; size_t i = variant->enumMember - 1;
+                if (variant->nArguments != decl->nTypeParams) { error(c, at, "generic enum constructor requires explicit type arguments"); return &unknown; }
+                if (decl->forms[i] != 2) { error(c, at, "only record enum variants use brace construction"); return &unknown; }
+                literal->type = (expr){0};
+                checkComposite(c, enumPayloadType(c, variant, i), e, at);
+                expr payload = *e; *e = specializedEnumExpr(ENUM_CONSTRUCT, variant, i, payload, at); return enumValueType(c, variant);
+            }
+        }
         struct expr_composite *v = e->underlying;
         if (!v->type.type) {
             return checkComposite(c, &unknown, e, v->location);
@@ -2058,9 +2211,7 @@ static void predeclare(Context *c, stmt *s) {
     case STMT_ENUM: {
         struct stmt_enum *v = s->value;
         if (!strcmp(v->name.lexeme, "array")) error(c, v->name, "array is a reserved type name");
-        declare(c, v->name, &integer, 1);
-        for (size_t i = 0; i < v->nMembers; i++)
-            declare(c, v->names[i], &integer, 0);
+        declare(c, v->name, enumType(c, v), 1);
         break;
     }
     case STMT_INTERFACE: {
@@ -2077,11 +2228,33 @@ static void predeclare(Context *c, stmt *s) {
 static void statement(Context *c, stmt *s) {
     token at = s->location;
     switch (s->type) {
+    case STMT_ENUM: {
+        struct stmt_enum *v = s->value;
+        Scope scope = {.parent = c->scope}; c->scope = &scope;
+        for (size_t i = 0; i < v->nTypeParams; i++) {
+            Type *bound = allocate(c, sizeof(*bound)); *bound = any;
+            bound->semanticBase = &any;
+            declare(c, v->typeParamNames[i], bound, 1);
+        }
+        for (size_t i = 0; i < v->nMembers; i++) {
+            for (size_t j = 0; j < v->payloads[i].nFields; j++) {
+                Type *field = typeOf(c, v->payloads[i].fieldTypes[j]);
+                if (field == &nothing) error(c, v->names[i], "void is not an enum payload type");
+            }
+            if (v->values[i]) {
+                Type *t = v->valueTypes[i].nTokens ? typeOf(c, v->valueTypes[i]) : NULL;
+                Type *actual = t ? expectedExpression(c, t, v->values[i], v->names[i]) : expression(c, v->values[i]);
+                if (t) check(c, t, actual, v->names[i]);
+            }
+        }
+        c->scope = scope.parent;
+        break;
+    }
     case STMT_VAR: {
         struct stmt_var *v = s->value;
         Type *declared = v->type.nTokens ? typeOf(c, v->type) : NULL;
         if (declared == &nothing) error(c, at, "void is not a variable storage type");
-        if (declared && declared->record && declared->record->nVarParams && !v->nInitValues)
+        if (declared && !declared->enumeration && declared->record && declared->record->nVarParams && !v->nInitValues)
             error(c, v->vars[0], "struct with parameters requires an initializer");
         if (declared && !strcmp(declared->name, "fixed-array")) {
             checkBufferDimension(c, declared, v->vars[0]);
@@ -2100,12 +2273,18 @@ static void statement(Context *c, stmt *s) {
         Type **expected = allocate(c, sizeof(Type *) * v->nVars);
         for (size_t i = 0; i < v->nVars; i++)
             expected[i] = declared ? declared : &unknown;
+        if (v->nInitValues == 1) orderEnumExtraction(c, &v->initValues[0], v->vars, v->nVars);
         TypeList values =
             valueTypes(c, v->initValues, v->nInitValues, expected, v->nVars, v->vars[0], 1);
         if (v->nInitValues && values.count != v->nVars)
             error(c, v->vars[0], "initializer count mismatch");
         for (size_t i = 0; i < v->nVars; i++) {
             Type *a = i < values.count ? values.items[i] : &unknown;
+            if (a->enumeration && a->enumMember) {
+                unsigned char form = a->enumeration->forms[a->enumMember - 1];
+                if (form == 1 || form == 2) error(c, v->vars[i], "enum payload variant requires construction");
+                a = enumValueType(c, a);
+            }
             if (!declared && a == &nullValue)
                 error(c, v->vars[i], "null requires an explicit pointer type");
             if (declared)
@@ -2241,6 +2420,7 @@ static void statement(Context *c, stmt *s) {
         struct stmt_switch *v = s->value;
         Scope scope = {c->scope, NULL};
         c->scope = &scope;
+        if (v->isMatch) lowerMatch(c, v, expression(c, v->value), at);
         statement(c, &v->initializer);
         Type *t = v->value ? expression(c, v->value) : &boolean;
         for (size_t i = 0; i < v->nCases; i++) {

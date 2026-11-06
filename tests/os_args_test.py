@@ -45,9 +45,25 @@ func Count() int { return count; }
             assert result.returncode == len(arguments) + 1, result
             assert result.stdout.splitlines() == [str(native), *arguments], result
         # The run command forwards the same argument stream.
-        result = run([compiler, 'run', str(source), '--', 'a', '', 'b c'], env)
-        assert result.returncode == 4, result
-        assert result.stdout.splitlines()[1:] == ['a', '', 'b c'], result
+        for location in [str(source), str(project), '.', 'project']:
+            for arguments in [['arg1', 'arg2'],
+                              ['--verbose', '-x', '', 'b c'],
+                              ['--', '-o', '--emit-llvm', '--check', '--help'],
+                              ['--', 'a', '', 'b c']]:
+                result = subprocess.run(
+                    [compiler, 'run', location, *arguments], env=env,
+                    cwd=root if location == 'project' else project,
+                    text=True, capture_output=True, timeout=30)
+                forwarded = arguments[1:] if arguments[0] == '--' else arguments
+                assert result.returncode == len(forwarded) + 1, result
+                assert result.stdout.splitlines()[1:] == forwarded, result
+    # Compiler flags remain compiler options even after program arguments.
+    for option in [['-o', str(root / 'bad')], ['--emit-llvm'], ['--check']]:
+        for prefix in [[], ['arg1', '--verbose']]:
+            result = run([compiler, 'run', str(project), *prefix, *option], env)
+            assert result.returncode == 1 and 'incompatible' in result.stderr, result
+    result = run([compiler, 'run', str(project), 'arg1', '-o'], env)
+    assert result.returncode == 1 and 'requires an output path' in result.stderr, result
     # Exercise the actual library implementation as well as the ABI probe.
     library = Path(__file__).resolve().parents[2] / 'ocean-src' / 'os' / 'args.oc'
     if library.exists():

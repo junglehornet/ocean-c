@@ -1,13 +1,13 @@
 # Pending acceptance tests
 
 This inventory covers the incomplete compiler features documented in
-[the test README](../README.md). It defines **63 contracts across 21
+[the test README](../README.md). It defines **57 contracts across 18
 feature areas**, separate from the regression suites for implemented behavior.
 Completed parser contracts are covered by `parser_extensions_test` and the
 other parser regression suites.
 
-There are **11 executable probes** of current scanner/printer behavior
-and **52 semantic/ownership fixtures** awaiting test drivers. The latter are
+There are **6 executable probes** of current scanner/printer behavior
+and **51 semantic/ownership fixtures** awaiting test drivers. The latter are
 acceptance specifications, not claims that missing compiler stages have been
 executed or tested successfully. Each fixture has a concrete source and expected
 acceptance, diagnostic category, and/or resolved facts.
@@ -72,7 +72,6 @@ CMake configure dependency, so changing cases refreshes test registration.
 | `generic_function_values` | semantic | 1 | existing |
 | `type_dimension_resolution` | semantic | 3 | existing |
 | `constant_evaluation` | semantic | 3 | existing |
-| `enum_values` | semantic | 1 | existing |
 | `return_checking` | semantic | 4 | existing |
 | `label_resolution` | semantic | 5 | existing |
 | `extern_linkage` | semantic | 2 | existing |

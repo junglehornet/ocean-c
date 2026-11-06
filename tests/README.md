@@ -93,7 +93,7 @@ import ("io", _ "side-effects");
 type Count int;
 type Alias = []int;
 struct Point { x, y int; }
-enum Color { RED, GREEN = 2, BLUE, }
+enum Color { Red, Green := 2, Blue(int), }
 interface Reader { Read(buffer []byte) (int, error); }
 extern int write([]byte bytes);
 func (self *Point) Move(x int) int { return x; }
@@ -432,8 +432,8 @@ printing, and incorrect command-line success statuses on errors.
 
 ## Pending incomplete features
 
-The [pending inventory](pending/README.md) defines 63 future acceptance
-contracts across 21 incomplete feature areas. CTest lists them individually
+The [pending inventory](pending/README.md) defines 57 future acceptance
+contracts across 18 incomplete feature areas. CTest lists them individually
 under the `pending` label. Unmet contracts are reported as skipped/XFAIL;
 unexpected successes fail so they can be promoted to regression tests.
 Twelve cases probe current APIs; 52 semantic/cleanup fixtures explicitly
@@ -797,3 +797,11 @@ references, binding-aware rename, imported symbols, incomplete member completion
 function-result completion, unsaved buffers, and UTF-16 positions. The build cache
 suite counts native compiler invocations to verify per-package object reuse,
 content invalidation, corruption recovery, and concurrent publication.
+
+`enums_test.py` exercises tagged enums at `-O0` and `-O2`: unit, tuple,
+record and fixed payload variants; checked extraction; tuple discards; named
+record patterns; exhaustive/default matches; nominal identity; imports;
+generic and boxed transport; immutable record fields; and payload ownership.
+It also covers generic enum parameters and constraints, nested and distinct
+specializations, aliases, imported generic enums, generic functions, and concrete
+`any` payloads. It compiles and runs the examples in `testcode/enums.oc`.

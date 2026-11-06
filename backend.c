@@ -158,7 +158,7 @@ typedef struct {
     TypeBinding *typeBindings;
     MethodInstance *methods, *lastMethod, *method;
     unsigned nMethods;
-    unsigned recordDepth, interfaceDepth;
+    unsigned recordDepth, interfaceDepth, enumDepth;
     parseResult *program;
     FILE *out, *body, *slots, *globalOutput;
     int initializingGlobals;
@@ -539,12 +539,24 @@ static struct stmt_struct *findRecord(Backend *b, const char *name) {
         if (!scope->declarations) continue;
         for (size_t i = 0; i < scope->declarations->nStmts; i++) {
             stmt *s = &scope->declarations->stmts[i];
+            if (s->type == STMT_ENUM) {
+                struct stmt_enum *v = s->value;
+                if (!strcmp(v->name.lexeme, name)) return &v->storage;
+                for (size_t j = 0; j < v->nMembers; j++)
+                    if (!strcmp(v->payloads[j].name.lexeme, name)) return &v->payloads[j];
+            }
             if (s->type == STMT_STRUCT && !strcmp(((struct stmt_struct *)s->value)->name.lexeme, name))
                 return s->value;
         }
     }
     for (size_t i = 0; i < b->program->nStatements; i++) {
         stmt *s = &b->program->statements[i];
+        if (s->type == STMT_ENUM) {
+            struct stmt_enum *v = s->value;
+            if (!strcmp(v->name.lexeme, name)) return &v->storage;
+            for (size_t j = 0; j < v->nMembers; j++)
+                if (!strcmp(v->payloads[j].name.lexeme, name)) return &v->payloads[j];
+        }
         if (s->type == STMT_STRUCT && !strcmp(((struct stmt_struct *)s->value)->name.lexeme, name))
             return s->value;
     }
@@ -940,7 +952,7 @@ static Kind type(Backend *b, typeTokens t) {
             free(spans[i].tokens);
         }
         free(spans);
-        Kind result = erased ? SCALAR_ANY : recordKind(b, record, arguments, count);
+        Kind result = erased && !record->enumStorage ? SCALAR_ANY : recordKind(b, record, arguments, count);
         free(arguments);
         return result;
     }
@@ -1825,10 +1837,14 @@ static Kind arrayAdditionKind(Backend *b, Kind left, Kind right) {
     return BAD;
 }
 /* sizeof inspects storage types without evaluating its operand. */
+static Kind expressionKind(Backend *, expr *);
+#include "backend_enum.inc"
+
 static Kind expressionKind(Backend *b, expr *e) {
     if (!e || !e->underlying)
         return BAD;
     switch (e->type) {
+    case EXPR_TYPE_ENUM: return enumExpressionKind(b, e->underlying);
     case EXPR_TYPE_MAKE:
     case EXPR_TYPE_ZERO:
         return type(b, ((struct expr_zero *)e->underlying)->type);
@@ -3356,6 +3372,55 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
 }
 
 static Value expressionImpl(Backend *, expr *);
+static Value enumExpression(Backend *b, struct expr_enum *v) {
+    struct stmt_enum *decl = v->declaration;
+    if (v->operation == ENUM_TAG) return extract(b, expression(b, &v->child), 0);
+    if (v->operation == ENUM_EXTRACT) {
+        Value source = expression(b, &v->child);
+        Value tag = extract(b, source, 0);
+        Value valid = binary(b, EXPR_EQUALITY, tag, value(b, INT, "%zu", v->member));
+        unsigned good = ++b->label, bad = ++b->label;
+        branch(b, valid, good, bad); label(b, bad);
+        fputs("  call void @llvm.trap()\n  unreachable\n", b->body);
+        b->nullChecksUsed = 1; b->terminated = 1; label(b, good);
+        Kind payloadKind = enumPayloadKind(b, decl, v->member, source.kind);
+        Value boxed = extract(b, source, 1);
+        Value payload = payloadKind == SCALAR_ANY ? boxed : unboxValue(b, boxed, payloadKind);
+        if (decl->forms[v->member] == 3 || (!v->fields && decl->forms[v->member] == 2)) return payload;
+        BufferKind *record = bufferKind(b, payload.kind);
+        size_t count = v->fields ? v->nFields : record->count;
+        if (count == 1) return extract(b, payload, v->fields ? v->fields[0] : 0);
+        Value result = emptyValue(b, enumExpressionKind(b, v));
+        for (size_t i = 0; i < count; i++) result = insert(b, result, extract(b, payload, v->fields ? v->fields[i] : i), i);
+        return result;
+    }
+    Kind owner = enumStorageKind(b, v);
+    Value result = emptyValue(b, owner);
+    result = insert(b, result, value(b, INT, "%zu", v->member), 0);
+    if (decl->forms[v->member]) {
+        Kind kind = enumPayloadKind(b, decl, v->member, owner);
+        Value payload;
+        if (decl->forms[v->member] == 3) {
+            if (b->enumDepth >= 64) { fail(b, "cyclic or excessively nested fixed enum value"); return result; }
+            b->enumDepth++;
+            BufferKind *storage = bufferKind(b, owner);
+            TypeBinding *previous = b->typeBindings;
+            TypeBinding *bindings = checked((storage->nArguments + 1) * sizeof(TypeBinding));
+            for (size_t i = 0; i < storage->nArguments; i++) {
+                bindings[i] = (TypeBinding){decl->typeParamNames[i].lexeme, storage->arguments[i], b->typeBindings};
+                b->typeBindings = &bindings[i];
+            }
+            payload = expectedValue(b, decl->values[v->member], kind);
+            b->typeBindings = previous; free(bindings);
+            b->enumDepth--;
+        }
+        else if (v->operation == ENUM_CONSTRUCT) payload = constructComposite(b, &v->child, kind);
+        else { fail(b, "enum payload variant requires construction"); return result; }
+        result = insert(b, result, boxScalar(b, coerce(b, payload, kind), 1), 1);
+    }
+    return result;
+}
+
 static Value expression(Backend *b, expr *e) {
     token previous = b->location;
     if (e && e->location.line > 0) b->location = e->location;
@@ -3369,6 +3434,7 @@ static Value expressionImpl(Backend *b, expr *e) {
         return value(b, BAD, "0");
     }
     switch (e->type) {
+    case EXPR_TYPE_ENUM: return enumExpression(b, e->underlying);
     case EXPR_TYPE_MAKE:
     case EXPR_TYPE_ZERO: {
         Kind k = type(b, ((struct expr_zero *)e->underlying)->type);
@@ -4292,6 +4358,7 @@ static void statementImpl(Backend *b, stmt *s) {
     case STMT_NULL:
     case STMT_TYPE:
     case STMT_INTERFACE:
+    case STMT_ENUM:
     case STMT_STRUCT:
         break;
     case STMT_BLOCK:
@@ -5245,7 +5312,7 @@ static void emitReflection(Backend *b) {
         // named types and structs only encountered while reflecting a field.
         for (AnyType *a = b->anyTypes; a; a = a->next) {
             BufferKind *record = bufferKind(b, a->kind);
-            if (!record || record->shape != 5 || !record->record) continue;
+            if (!record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
             Value matches = temp(b, BOOL);
             fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)a->kind);
             unsigned body = ++b->label, next = ++b->label;
@@ -5287,7 +5354,7 @@ static void emitReflection(Backend *b) {
     unsigned count = 0;
     for (AnyType *a = b->anyTypes; a; a = a->next) {
         BufferKind *record = bufferKind(b, a->kind);
-        if (!record || record->shape != 5 || !record->record) continue;
+        if (!record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
         fprintf(b->out, "  %%m%u = icmp eq ptr %%tag, @__ocean.any.type.%u\n", count, (unsigned)a->kind);
         if (count) fprintf(b->out, "  %%r%u = or i1 %s%u, %%m%u\n", count, count == 1 ? "%m" : "%r", count - 1, count);
         count++;
@@ -5563,7 +5630,7 @@ int emitLLVM(parseResult *program, FILE *output) {
     emitGlobals(&b, output);
     for (size_t i = 0; i < program->nStatements; i++) {
         stmt *s = &program->statements[i];
-        if (s->type == STMT_PACKAGE || s->type == STMT_NULL || s->type == STMT_STRUCT || s->type == STMT_INTERFACE || s->type == STMT_TYPE || s->type == STMT_VAR)
+        if (s->type == STMT_PACKAGE || s->type == STMT_NULL || s->type == STMT_STRUCT || s->type == STMT_INTERFACE || s->type == STMT_TYPE || s->type == STMT_ENUM || s->type == STMT_VAR)
             continue;
         if (s->type != STMT_FUNC) {
             fail(&b, "unsupported declaration at file scope");

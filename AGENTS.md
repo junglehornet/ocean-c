@@ -1,0 +1,3 @@
+After every change, review the website code at ~/coding/oceanlang-website and decide if any changes need to be made to the website to ensure its accuracy to the lateest version of the compiler. If any changes need to be made, make them in a temp folder and then request to apply the changes to the website.
+
+When changes are made to the Ocean language, update `skills/ocean/SKILL.md` in the same change so its syntax, supported features, tooling, and package/build guidance remain accurate. Review the skill for compiler CLI, module/package, build-system, and standard-library integration changes as well.

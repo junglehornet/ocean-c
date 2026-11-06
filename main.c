@@ -65,20 +65,24 @@ static int nativeBuild(buildCache *cache, parseResult *program, const char *irPa
     freeLLVMPackages(&units);return failed;
 }
 static int packageMain(int argc, char **argv) {
-    int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, argumentStart = argc;
+    int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, argumentStart = argc, programArgumentCount = 0;
     const char *location = NULL, *output = NULL;
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--")) { argumentStart = i + 1; break; }
+        if (!strcmp(argv[i], "--")) {
+            argumentStart = i + 1;
+            if (run) for (int j = i + 1; j < argc; j++) argv[2 + programArgumentCount++] = argv[j];
+            break;
+        }
         if (!strcmp(argv[i], "-o")) {
             if (++i >= argc) { fprintf(stderr, "ocean: -o requires an output path\n"); return 1; }
             output = argv[i];
         } else if (!strcmp(argv[i], "--emit-llvm")) emit = 1;
         else if (!strcmp(argv[i], "--check")) check = 1;
         else if (argv[i][0] == '-') {
-            if (run && location) { argumentStart = i; break; }
+            if (run && location) { argv[2 + programArgumentCount++] = argv[i]; continue; }
             fprintf(stderr, "ocean: unknown option: %s\n", argv[i]); return 1;
         } else if (!location) location = argv[i];
-        else if (run) { argumentStart = i; break; }
+        else if (run) argv[2 + programArgumentCount++] = argv[i];
         else { fprintf(stderr, "ocean build accepts one package location\n"); return 1; }
     }
     if ((run && (output || emit || check)) || (check && (output || emit)) || (!run && argumentStart != argc)) {
@@ -159,11 +163,11 @@ static int packageMain(int argc, char **argv) {
     freePackage(build);
     int status = failed ? 1 : 0;
     if (run && !failed && !interrupted) {
-        char **arguments = calloc((size_t)(argc - argumentStart) + 2, sizeof(*arguments));
+        char **arguments = calloc((size_t)programArgumentCount + 2, sizeof(*arguments));
         if (!arguments) status = 1;
         else {
             arguments[0] = temporaryExecutable;
-            for (int i = argumentStart; i < argc; i++) arguments[i - argumentStart + 1] = argv[i];
+            for (int i = 0; i < programArgumentCount; i++) arguments[i + 1] = argv[i + 2];
             sigset_t blocked, previous;
             sigemptyset(&blocked);
             sigaddset(&blocked, SIGINT); sigaddset(&blocked, SIGTERM); sigaddset(&blocked, SIGHUP);
@@ -260,14 +264,14 @@ int main(int argc, char **argv) {
     if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "run"))) {
         if (argc == 3 && !strcmp(argv[2], "--help")) {
             printf("Usage: ocean build [--check | --emit-llvm] [-o output] [location]\n"
-                   "       ocean run [location] [-- program-arguments]\n");
+                   "       ocean run [location] [program-arguments...] [-- program-arguments...]\n");
             return 0;
         }
         return packageMain(argc, argv);
     }
     if (argc == 1 || (argc == 2 && (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")))) {
         printf("Usage: ocean build [--check | --emit-llvm] [-o output] [location]\n"
-               "       ocean run [location] [-- program-arguments]\n"
+               "       ocean run [location] [program-arguments...] [-- program-arguments...]\n"
                "       ocean check [location]\n"
                "       ocean check --lsp\n"
                "       ocean mod init [name]\n"

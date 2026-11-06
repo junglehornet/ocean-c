@@ -1,0 +1,75 @@
+// ocean enums are like a combination of an enum and a union from C. this is similar to rust's system.
+// enum fields come in 3 forms:
+enum GuiEvent {
+    GuiLoad, // carries no data. similar to a C enum
+    KeyPress(i8), // carries tuple data. this is ordered and named in the reciever.
+    Click{x i8, y i8} // carries struct data. this is unordered and named in the enum definition. note this could also be Click{x, y i8}
+} // trailing comma optional
+// IMPORTANT NOTE: any data is defined when the value is constructed, and it is immutable.
+
+// to access enum data you can do the following:
+// enum fields are essentially treated as separate types, with the enum itself being kind of like an interface including all of the fields
+// therefore, to access data from an enum value you must cast it to a concrete enum type:
+func handleEvent(event GuiEvent) {
+    if (event == GuiEvent.GuiLoad) io.Println("GUI loaded.");
+    if (event == GuiEvent.KeyPress) {
+        key := event.(GuiEvent.KeyPress); // this assigns the first tuple value to the variable key
+        // if you had more than one value in the tuple, use multiple assignment in order with val1, val2 :=
+        io.Printfln("Keypress detected: {}", key); 
+    }
+    if (event == GuiEvent.Click) {
+        click := event.(GuiEvent.Click); // because GuiEvent.Click is a struct type that already has named fields, we don't have to set
+        // a name like with a tuple type. you could also unpack the struct like so:
+        // x, y := event.(GuiEvent.Click{x, y}); // in this syntax variable names must match struct names. you could also do:
+        // clickX, clickY := event.(GuiEvent.Click{clickY = y, clickX = x}) // notice that order doesn't matter because structs aren't ordered.
+        // this also goes for the first example, x, y := event.(GuiEvent.Click{y, x}); is still valid
+        io.Printfln("Click at ({}, {})", click.x, click.y);
+    }
+}
+
+// you can also use a match statement, a shortcut to do the above.
+// type guards with a switch statment do not work on enums.
+func matchEvent(event GuiEvent) {
+    match (event) { // a match statment will emit a warning if not all cases are handled. use GuiEvent => <statement>; to handle a default case
+        GuiEvent.GuiLoad => io.Println("GUI loaded.");
+        GuiEvent.KeyPress(key) => { // because this is a tuple, order matters!
+            if (key == 'q') return;
+            io.Printfln("Key pressed: {}", key);
+        }
+        GuiEvent.Click{x, y} => io.Printfln("Click at ({}, {})", x, y);
+        // or, GuiEvent.Click{clickX = x, clickY = y} // notice the lack of := as we are assigning, not declaring.
+   }
+}
+
+/* extra notes:
+when unpacking a struct enum value, you can omit fields since the fields are named.
+when unpacking a tuple enum value, if you want to omit a field you must assign it to _ like so:
+given enum Color that has a field RGB that is a tuple type with 3 i8s (r, g, and b):
+_, green, _ = myColor.(Color.RGB);
+match (myColor) {
+    Color.RGB(_, green, _) => io.Printfln("Green value: {}", green);
+    Color => io.Println("Unknown color type");
+}
+
+for RGB colors:
+struct RGB {
+    r, g, b i8;
+}
+
+enum Color {
+    Red: RGB = {255, 0, 0},
+    Green: RGB = {0, 255, 0},
+    Blue := RGB{0, 0, 255},
+    Other(RGB),
+}
+
+you could do this:
+enum Number {
+    One := 1,
+    Two := 2,
+    Other(int),
+}
+
+on the backend:
+each enum values carry two tags
+*/

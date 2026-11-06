@@ -31,7 +31,7 @@ const enum tokenType keyword_types[] = {
     /*F32, STRING,*/ TYPE, STRUCT, FUNC, IMPORT,
     ANY, MIXED, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
     SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
-    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC,
+    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC, MATCH,
 };
 
 const char *keywords[] = {
@@ -39,7 +39,7 @@ const char *keywords[] = {
     /*"f32", "string",*/ "type", "struct", "func", "import",
     "any", "mixed", "interface", "continue", "break", "enum", "if", "defer",
     "switch", "fallthrough", "extern", "for", "goto", "as",
-    "package", "else", "range", "return", "case", "default", "null", "panic",
+    "package", "else", "range", "return", "case", "default", "null", "panic", "match",
 };
 
 unsigned long hashes[NKEYWORDS] = {};
@@ -191,7 +191,15 @@ tokenlist *scanTokens(char *source, char *filename) {
                     push_tokenlist(list, (token){.type = tokenType, .lexeme = operator, .line = state.thisLine, .column = state.thisColumn, .filename = filename});\
                 }\
                 break;
-            COMPOUNDABLE_SIMPLE_OPERATOR("=", EQUALS)
+            case '=':
+                if (peek(&state) == '>') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = FAT_ARROW, .lexeme = "=>", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else if (peek(&state) == '=') {
+                    next_char(&state);
+                    push_tokenlist(list, (token){.type = EQUALS_EQUALS, .lexeme = "==", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                } else push_tokenlist(list, (token){.type = EQUALS, .lexeme = "=", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
+                break;
             COMPOUNDABLE_SIMPLE_OPERATOR("*", STAR)
             COMPOUNDABLE_SIMPLE_OPERATOR("%", MODULO)
             COMPOUNDABLE_SIMPLE_OPERATOR("^", XOR)

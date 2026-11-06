@@ -82,6 +82,8 @@ struct stmt_var {
 
 struct stmt_struct {
     token name;
+    char enumPayload; // Private payload layout; explicit any arguments remain concrete.
+    char enumStorage; // Private enum representation, excluded from struct reflection.
     token indexField; // Field delegated to by []; EOF_TOKEN if none is designated.
     size_t nTypeParams;
     typeTokens *typeParamConstraints;
@@ -106,9 +108,17 @@ struct stmt_type {
 
 struct stmt_enum {
     token name;
+    size_t nTypeParams;
+    token *typeParamNames;
+    typeTokens *typeParamConstraints;
     size_t nMembers;
     token *names;
-    expr **values; // NULL entries use the language's implicit enumeration value.
+    expr **values; // Optional fixed payloads.
+    typeTokens *valueTypes;
+    unsigned char *forms; // 0: unit, 1: tuple, 2: record, 3: fixed value.
+    struct stmt_struct *payloads;
+    struct stmt_struct storage; // Private {variant tag, boxed payload} representation.
+    char prepared;
 };
 
 struct stmt_branch {
@@ -135,6 +145,7 @@ struct switch_case {
 struct stmt_switch {
     stmt initializer; // STMT_NULL when absent.
     char isTypeSwitch;
+    char isMatch;
     token binding; // EOF_TOKEN when the type guard has no binding.
     expr *value; // NULL for a condition-only switch.
     size_t nCases;
@@ -238,7 +249,7 @@ enum exprType {
     EXPR_TYPE_ARRAY_NEW,
     EXPR_TYPE_ZERO,
     EXPR_TYPE_TYPE_NAME,
-    EXPR_TYPE_MAKE, EXPR_TYPE_NEW,
+    EXPR_TYPE_MAKE, EXPR_TYPE_NEW, EXPR_TYPE_ENUM,
 };
 
 struct expr {
@@ -325,6 +336,7 @@ struct expr_assertion {
     expr child;
     typeTokens type; // Empty for .(type), which is restricted to switch guards.
     char isTypeGuard;
+    expr *pattern; // Optional named record extraction pattern.
 };
 
 struct expr_index {
@@ -342,6 +354,18 @@ struct expr_composite {
     size_t nEntries;
     expr *keys; // EXPR_TYPE_NULL entries for positional values.
     expr *values;
+};
+
+enum enumOperation { ENUM_CONSTRUCT, ENUM_VARIANT, ENUM_EXTRACT, ENUM_TAG };
+struct expr_enum {
+    enum enumOperation operation;
+    struct stmt_enum *declaration;
+    size_t member;
+    size_t nTypeArguments;
+    typeTokens *typeArguments; // Constructor specialization, resolved again by native monomorphization.
+    expr child; // Extraction/tag source or constructor payload.
+    size_t nFields;
+    size_t *fields; // Selected record fields in binding order; NULL means full payload.
 };
 
 // print an AST to the terminal in (operator operands...) notation (eg. (PLUS 2 2) is 2 + 2)

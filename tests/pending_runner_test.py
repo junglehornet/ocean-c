@@ -38,7 +38,7 @@ class PendingRunnerTests(unittest.TestCase):
         expected = {"debug_printer",
                     "imports", "module_discovery", "symbol_binding", "type_checking",
                     "generic_instantiation", "ambiguous_calls", "generic_function_values",
-                    "type_dimension_resolution", "constant_evaluation", "enum_values",
+                    "type_dimension_resolution", "constant_evaluation",
                     "return_checking", "label_resolution", "extern_linkage", "struct_value_application",
                     "operator_resolution", "custom_constraints", "index_delegation", "cleanup"}
         self.assertEqual({feature["id"] for feature in self.manifest["features"]}, expected)

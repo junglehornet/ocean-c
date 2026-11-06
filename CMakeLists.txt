@@ -181,4 +181,7 @@ if(BUILD_TESTING)
     add_test(NAME array_values_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/array_values_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(array_values_test PROPERTIES TIMEOUT 60)
+    add_test(NAME enums_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/enums_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(enums_test PROPERTIES TIMEOUT 90)
 endif()

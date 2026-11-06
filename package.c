@@ -531,7 +531,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
             else if (s->type == STMT_ENUM) {
                 struct stmt_enum *e = s->value;
                 addSymbol(b, p, s, e->name);
-                for (size_t k = 0; k < e->nMembers; k++) addSymbol(b, p, s, e->names[k]);
+
             }
         }
     }
@@ -635,7 +635,7 @@ static void rewriteType(Rewrite *r, Local *scope, typeTokens *type) {
         if (!(name.type == IDENTIFIER && !strcmp(name.lexeme, "array") &&
               (i == 0 || type->tokens[i - 1].type == LESS_THAN ||
                type->tokens[i - 1].type == STAR || type->tokens[i - 1].type == BITWISE_OR)))
-            rewriteToken(r, scope, &name);
+            if (!i || type->tokens[i - 1].type != DOT) rewriteToken(r, scope, &name);
         tokens[count++] = name;
     }
     *type = (typeTokens){count, tokens};
@@ -808,9 +808,13 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
     case STMT_ENUM: {
         struct stmt_enum *v = s->value;
         if (top) rewriteToken(r, NULL, &v->name); else scope = bindLocal(r, scope, v->name);
+        Local *inner = scope;
+        for (size_t i = 0; i < v->nTypeParams; i++) inner = bindLocal(r, inner, v->typeParamNames[i]);
+        for (size_t i = 0; i < v->nTypeParams; i++) rewriteType(r, inner, &v->typeParamConstraints[i]);
         for (size_t i = 0; i < v->nMembers; i++) {
-            rewriteExpr(r, scope, v->values[i]);
-            if (top) rewriteToken(r, NULL, &v->names[i]); else scope = bindLocal(r, scope, v->names[i]);
+            rewriteExpr(r, inner, v->values[i]);
+            rewriteType(r, inner, &v->valueTypes[i]);
+            for (size_t j = 0; j < v->payloads[i].nFields; j++) rewriteType(r, inner, &v->payloads[i].fieldTypes[j]);
         }
         break;
     }
@@ -831,9 +835,25 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
         rewriteExpr(r, inner, v->value);
         if (v->isTypeSwitch) inner = bindLocal(r, inner, v->binding);
         for (size_t i = 0; i < v->nCases; i++) {
-            for (size_t j = 0; j < v->cases[i].nValues; j++) rewriteExpr(r, inner, &v->cases[i].values[j]);
+            Local *branch = inner;
+            for (size_t j = 0; j < v->cases[i].nValues; j++) {
+                expr *pattern = &v->cases[i].values[j];
+                if (!v->isMatch) { rewriteExpr(r, inner, pattern); continue; }
+                expr *head = pattern, *items = NULL; size_t count = 0;
+                if (pattern->type == EXPR_TYPE_CALL) {
+                    struct expr_call *p = pattern->underlying; head = &p->func; items = p->params; count = p->nParams;
+                } else if (pattern->type == EXPR_TYPE_COMPOSITE) {
+                    struct expr_composite *p = pattern->underlying; head = &p->type; items = p->values; count = p->nEntries;
+                }
+                rewriteExpr(r, inner, head);
+                for (size_t k = 0; k < count; k++) {
+                    expr *binding = &items[k];
+                    if (binding->type == EXPR_TYPE_BINARY) binding = &((struct expr_binary *)binding->underlying)->left;
+                    if (binding->type == EXPR_TYPE_IDENTIFIER) branch = bindLocal(r, branch, ((struct expr_identifier *)binding->underlying)->lexeme);
+                }
+            }
             for (size_t j = 0; j < v->cases[i].nTypes; j++) rewriteType(r, inner, &v->cases[i].types[j]);
-            rewriteBlock(r, inner, &v->cases[i].body);
+            rewriteBlock(r, branch, &v->cases[i].body);
         }
         break;
     }

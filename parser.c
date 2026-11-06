@@ -375,6 +375,14 @@ static expr primary(parserState *state) {
                         assertion.type = copySignatureSpan(state, start, state->tokenIndex);
                         SET_TOK;
                     }
+                    if (currentToken(state).type == LEFT_CURLY_BRACE) {
+                        expr pattern = parseComposite(state, (expr){0});
+                        if (state->isSynchronizing) return (expr){0};
+                        assertion.pattern = malloc(sizeof(expr));
+                        CHECK_MALLOC(assertion.pattern);
+                        *assertion.pattern = pattern;
+                        SET_TOK;
+                    }
                     expect(RIGHT_PAREN, "Expected closing type assertion parenthesis", expr);
                     advance(state);
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_ASSERTION, assertion, result);
@@ -1500,8 +1508,12 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
         tok = advance(state);
     }
     // Generic type arguments and Ocean's suffix array notation.
-    while (tok.type == LEFT_BRACKET || tok.type == LESS_THAN) {
-        if (tok.type == LESS_THAN) {
+    while (tok.type == LEFT_BRACKET || tok.type == LESS_THAN || tok.type == DOT) {
+        if (tok.type == DOT) {
+            tok = advance(state);
+            if (tok.type != IDENTIFIER) return signatureError(state, "Expected type member after dot");
+            advance(state);
+        } else if (tok.type == LESS_THAN) {
             if (!parseAngleTypes(state, depth + 1)) return 0;
         } else if (!parseTypeBrackets(state, depth + 1, 0)) return 0;
         SET_TOK;
@@ -1539,7 +1551,7 @@ static char tryCallTypeArguments(parserState *state, struct expr_instantiation *
         if (tok.type != LEFT_PAREN && tok.type != LEFT_CURLY_BRACE && tok.type != LEFT_BRACKET &&
             tok.type != SEMICOLON && tok.type != COMMA && tok.type != RIGHT_PAREN &&
             tok.type != RIGHT_BRACKET && tok.type != RIGHT_CURLY_BRACE &&
-            tok.type != DOT && tok.type != EOF_TOKEN) goto notTypes;
+            tok.type != DOT && tok.type != FAT_ARROW && tok.type != EOF_TOKEN) goto notTypes;
     } else {
         if (tok.type != RIGHT_BRACKET) goto notTypes;
         advance(&trial);
@@ -2461,6 +2473,14 @@ static stmt parseEnum(parserState *state) {
     }
     struct stmt_enum node = {.name = tok};
     tok = advance(state);
+    signatureFields typeParams = {0};
+    if (tok.type == LEFT_BRACKET) {
+        signatureError(state, "Enum type parameters require angle brackets <...>"); goto invalid;
+    }
+    if (tok.type == LESS_THAN && !parseTypeParameters(state, &typeParams)) goto invalid;
+    node.nTypeParams = typeParams.count; node.typeParamNames = typeParams.names;
+    node.typeParamConstraints = typeParams.types;
+    SET_TOK;
     expect(LEFT_CURLY_BRACE, "Expected enum body", stmt);
     tok = advance(state);
     while (tok.type != RIGHT_CURLY_BRACE) {
@@ -2477,15 +2497,62 @@ static stmt parseEnum(parserState *state) {
         token name = tok;
         tok = advance(state);
         expr *value = nullptr;
-        if (tok.type == EQUALS) {
+        typeTokens valueType = {0};
+        signatureFields fields = {0};
+        unsigned char form = 0;
+        if (tok.type == LEFT_PAREN) {
+            form = 1;
+            if (!parseSignatureFields(state, &fields, 0, 0)) goto invalid;
+            SET_TOK;
+            for (size_t i = 0; i < fields.count; i++) {
+                char text[48]; snprintf(text, sizeof(text), "__tuple%zu", i);
+                fields.names[i] = name; fields.names[i].lexeme = strdup(text);
+            }
+        } else if (tok.type == LEFT_CURLY_BRACE) {
+            form = 2;
+            tok = advance(state);
+            token index = {.type = EOF_TOKEN};
+            while (tok.type != RIGHT_CURLY_BRACE) {
+                if (!parseStructFields(state, &fields, NULL, &index, 0, 0)) goto invalid;
+                SET_TOK;
+                if (tok.type == RIGHT_CURLY_BRACE) break;
+                if (tok.type != COMMA && tok.type != SEMICOLON) {
+                    signatureError(state, "Expected comma between enum fields"); goto invalid;
+                }
+                tok = advance(state);
+            }
+            tok = advance(state);
+        } else if (tok.type == COLON && peek(state).type != EQUALS) {
+            advance(state);
+            size_t start = state->tokenIndex;
+            if (!parseSignatureType(state, 0)) goto invalid;
+            valueType = copySignatureSpan(state, start, state->tokenIndex);
+            SET_TOK;
+            if (tok.type != EQUALS) { signatureError(state, "Expected fixed enum value"); goto invalid; }
+        }
+        if (tok.type == EQUALS || tok.type == COLON) {
+            if (form) { signatureError(state, "Payload variants cannot have fixed values"); goto invalid; }
+            form = 3;
+            if (tok.type == COLON) {
+                tok = advance(state);
+                if (tok.type != EQUALS) { signatureError(state, "Expected := before enum value"); goto invalid; }
+            }
             advance(state);
             expr parsed = assignment(state);
             if (state->isSynchronizing) goto invalid;
-            value = malloc(sizeof(expr));
-            CHECK_MALLOC(value);
-            *value = parsed;
+            value = malloc(sizeof(expr)); CHECK_MALLOC(value); *value = parsed;
             SET_TOK;
         }
+        size_t next = node.nMembers + 1;
+        node.forms = realloc(node.forms, next);
+        node.payloads = realloc(node.payloads, next * sizeof(*node.payloads));
+        node.valueTypes = realloc(node.valueTypes, next * sizeof(*node.valueTypes));
+        CHECK_MALLOC(node.forms); CHECK_MALLOC(node.payloads); CHECK_MALLOC(node.valueTypes);
+        node.forms[node.nMembers] = form;
+        node.valueTypes[node.nMembers] = valueType;
+        node.payloads[node.nMembers] = (struct stmt_struct){.name = name,
+            .indexField = {.type = EOF_TOKEN}, .nFields = fields.count,
+            .nVarParams = fields.count, .fieldNames = fields.names, .fieldTypes = fields.types};
         token *names = realloc(node.names, (node.nMembers + 1) * sizeof(token));
         CHECK_MALLOC(names);
         node.names = names;
@@ -2513,6 +2580,38 @@ invalid:
     free(node.values);
     state->hasError = state->isSynchronizing = 1;
     return (stmt){0};
+}
+
+static stmt parseMatch(parserState *state) {
+    advance(state);
+    if (currentToken(state).type != LEFT_PAREN) { signatureError(state, "Expected match subject in parentheses"); return (stmt){0}; }
+    advance(state);
+    struct stmt_switch *node = calloc(1, sizeof(*node)); CHECK_MALLOC(node);
+    node->isMatch = 1; node->binding.type = EOF_TOKEN;
+    node->value = malloc(sizeof(expr)); CHECK_MALLOC(node->value);
+    *node->value = assignment(state);
+    if (state->isSynchronizing) return (stmt){0};
+    if (currentToken(state).type != RIGHT_PAREN) { signatureError(state, "Expected closing match parenthesis"); return (stmt){0}; }
+    advance(state);
+    if (currentToken(state).type != LEFT_CURLY_BRACE) { signatureError(state, "Expected match body"); return (stmt){0}; }
+    advance(state);
+    while (currentToken(state).type != RIGHT_CURLY_BRACE) {
+        expr pattern = assignment(state);
+        if (state->isSynchronizing) return (stmt){0};
+        if (currentToken(state).type != FAT_ARROW) { signatureError(state, "Expected => after match pattern"); return (stmt){0}; }
+        advance(state);
+        stmt body = parseStatement(state);
+        if (state->isSynchronizing) return (stmt){0};
+        struct switch_case branch = {.nValues = 1};
+        branch.values = malloc(sizeof(expr)); CHECK_MALLOC(branch.values); *branch.values = pattern;
+        if (body.type == STMT_BLOCK) branch.body = *(struct stmt_block *)body.value;
+        else { branch.body.nStmts = 1; branch.body.stmts = malloc(sizeof(stmt)); CHECK_MALLOC(branch.body.stmts); *branch.body.stmts = body; }
+        node->cases = realloc(node->cases, (node->nCases + 1) * sizeof(*node->cases)); CHECK_MALLOC(node->cases);
+        node->cases[node->nCases++] = branch;
+        if (currentToken(state).type == SEMICOLON) advance(state);
+    }
+    advance(state);
+    return (stmt){.type = STMT_SWITCH, .value = node};
 }
 
 static stmt parseSwitch(parserState *state) {
@@ -2715,6 +2814,8 @@ static stmt parseStatementImpl(parserState *state) {
             return parseInterface(state);
         case SWITCH:
             return parseSwitch(state);
+        case MATCH:
+            return parseMatch(state);
         case EXTERN:
             if (peek(state).type != DOT) return parseExtern(state);
             goto expressionStatement;

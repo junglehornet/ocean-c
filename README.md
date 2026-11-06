@@ -17,7 +17,8 @@ Build or run a package directory (requires `clang` on `PATH`):
 ```sh
 build/ocean build . -o hello
 ./hello
-build/ocean run .
+build/ocean run . arg1 arg2
+build/ocean run subdir arg1 arg2
 build/ocean build ./mySubPackage/
 build/ocean run ./main.oc
 ```
@@ -38,8 +39,16 @@ preserve previous output and cannot overwrite a source file in the package graph
 `ocean run` builds in a private hidden temporary directory, executes with the
 current directory and inherited standard streams, and deletes the executable
 and temporary directory afterward, including on runtime failures and handled
-interrupts. The program's exit status is returned. Arguments after the location
-or `--` are forwarded to the executable.
+interrupts. The program's exit status is returned. Normal arguments and unrecognized
+flags after the location are forwarded to the executable. Ocean compiler flags
+(`-o`, `--emit-llvm`, and `--check`) are parsed by Ocean anywhere before `--`;
+these build-only options remain incompatible with `run`. Use `--` to pass all
+remaining arguments literally, including names that match compiler flags:
+
+```sh
+build/ocean run . arg1 --verbose
+build/ocean run subdir arg1 -- -o output --check
+```
 
 ```sh
 build/ocean build --emit-llvm . -o hello.ll
@@ -121,7 +130,7 @@ package declarations are visible across all files. Only types, functions, and gl
 variables whose names start with a capital letter are exported to other packages.
 For example, `helper.Answer()` is accessible to importers, while `helper.answer()`
 is private to its package. The rule also applies to receiver methods, aliases,
-interfaces, and enum constants. Dot imports introduce only exported names;
+interfaces, and enum types. Dot imports introduce only exported names;
 lowercase declarations remain accessible across files in their own package.
 Extern declarations are file-scoped and are not exposed through package imports. Import cycles,
 conflicting declarations, and mixed package names in a directory are errors.
@@ -678,8 +687,74 @@ Ungrouped casts accept `value->buffer<T>` as well as `value->Name`. Pointer,
 qualified, and other compound targets retain the grouped syntax, such as
 `value->(*UserID)` or `value->(pkg.UserID)`.
 
+Enums are nominal tagged values with unit, tuple, named record, or fixed payload
+variants. Variant names belong to the enum, so different enums can reuse names.
+
+```Ocean
+enum GuiEvent { GuiLoad, KeyPress(i8), Click{x, y i8} }
+
+func handle(event GuiEvent) int {
+    if (event == GuiEvent.KeyPress) {
+        key := event.(GuiEvent.KeyPress);
+        return key->int;
+    }
+    match (event) {
+        GuiEvent.GuiLoad => return 0;
+        GuiEvent.KeyPress(_) => return 1;
+        GuiEvent.Click{clickX = x, clickY = y} => return clickX->int + clickY->int;
+    }
+    return 0;
+}
+```
+
+Construct values with `GuiEvent.GuiLoad`, `GuiEvent.KeyPress(65)`, or
+`GuiEvent.Click{x: 2, y: 3}`. Payload fields are immutable. Extract a tuple with
+`a, b := value.(Enum.Tuple)` and use `_` for omitted positions. Record extraction
+returns an immutable record; named extraction such as
+`x, y := value.(GuiEvent.Click{y, x})` binds by name, with optional aliases.
+An extraction traps if the value holds a different variant.
+
+`match` evaluates its subject once, gives each arm its own binding scope, and
+warns about missing variants. Use `GuiEvent => statement;` as a default arm.
+Enum type-guard switches are rejected; use `match` for enum dispatch. Fixed
+payloads use `One := 1` or `Red: RGB = {255, 0, 0}` inside the enum body; they
+remain distinct variants rather than implicit C-style integer constants.
+The backend stores a variant tag and a boxed payload with its concrete type tag.
+
+Enums accept the same type parameters and constraints as structs. Specify type
+arguments when constructing a generic enum; tuple and record payloads substitute
+those arguments. Specializations such as `Result<int>` and `Result<string>` are
+distinct types, including when stored in `any`.
+
+```Ocean
+enum Result<T> {
+    value(T),
+    error(string),
+}
+
+func unwrap<T>(result Result<T>, fallback T) T {
+    match (result) {
+        Result.value(v) => return v;
+        Result.error(_) => return fallback;
+    }
+    return fallback;
+}
+
+func main() int {
+    result := Result<int>.value(42);
+    value := result.(Result<int>.value);
+    return unwrap<int>(result, 0);
+}
+```
+
+In extraction and match patterns, `Result.value` infers its specialization from
+the source value. An explicit `Result<int>.value` must match that source's type
+arguments. Generic functions can construct `Result<T>.value(item)` and return
+`Result<T>`. Enum type parameters and arguments require angle brackets;
+`Result[int]` is rejected.
+
 Unsupported backend features produce an error: calls through interface methods,
-enums, other collection types, operator dispatch, closures,
+other collection types, operator dispatch, closures,
 function values, and defer statements.
 The parser accepts more syntax than the backend currently implements.
 
