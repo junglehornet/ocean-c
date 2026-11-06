@@ -2773,6 +2773,54 @@ static char colonStartsDeclaration(parserState *state) {
     return tok.type == SEMICOLON || tok.type == EQUALS;
 }
 
+// Bind ${name} outside assembler strings/comments to scalar memory operands.
+static char parseAsmOperands(parserState *state, struct stmt_asm *node) {
+    const char *body = node->assembly;
+    int quote = 0, lineComment = 0, blockComment = 0;
+    int hashComment = strcmp(node->architecture.lexeme, "aarch64") != 0;
+    for (size_t i=0; body[i]; i++) {
+        char c = body[i], next = body[i+1];
+        if (lineComment) { if (c == '\n') lineComment = 0; continue; }
+        if (blockComment) { if (c == '*' && next == '/') { i++; blockComment = 0; } continue; }
+        if (quote) { if (c == '\\' && next) i++; else if (c == quote) quote = 0; continue; }
+        if (c == '/' && next == '/') { lineComment = 1; i++; continue; }
+        if (c == '/' && next == '*') { blockComment = 1; i++; continue; }
+        if (c == '#' && hashComment) { lineComment = 1; continue; }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c != '$' || next != '{') continue;
+        size_t begin = i, nameStart = i + 2, end = nameStart;
+        uint32_t code;
+        size_t bytes = unicodeDecode(body+end, &code);
+        if (!bytes || !unicodeStart(code)) return signatureError(state, "Expected variable name in asm ${name} operand");
+        end += bytes;
+        while ((bytes = unicodeDecode(body+end, &code)) && unicodeContinue(code)) end += bytes;
+        if (body[end] != '}') return signatureError(state, "Expected '}' after asm operand name");
+        char *name = strndup(body+nameStart, end-nameStart);
+        CHECK_MALLOC(name);
+        size_t operand = 0;
+        while (operand < node->nOperands && strcmp(node->operands[operand].lexeme, name)) operand++;
+        if (operand == node->nOperands) {
+            node->operands = realloc(node->operands, (operand+1)*sizeof(*node->operands));
+            CHECK_MALLOC(node->operands);
+            token at = node->architecture;
+            at.lexeme = name;
+            // The raw body begins immediately after its opening brace.
+            at.line = currentToken(state).line; at.column = currentToken(state).column + 1;
+            for (size_t j=0; j<nameStart; j++) {
+                if (body[j] == '\n') { at.line++; at.column = 1; } else at.column++;
+            }
+            node->operands[node->nOperands++] = at;
+        } else free(name);
+        node->references = realloc(node->references, (node->nReferences+1)*sizeof(*node->references));
+        CHECK_MALLOC(node->references);
+        node->references[node->nReferences++] = (struct asm_reference){begin, end-begin+1, operand};
+        i = end;
+    }
+    if (strcmp(node->architecture.lexeme, "x86_64") && node->nOperands > 4)
+        return signatureError(state, "AArch64 and RISC-V asm blocks support at most four distinct scalar operands");
+    return 1;
+}
+
 static stmt parseStatementImpl(parserState *state);
 static stmt parseStatement(parserState *state) {
     if (state->syntaxDepth >= PARSER_MAX_RECURSION_DEPTH) {
@@ -2804,6 +2852,38 @@ static stmt parseStatementImpl(parserState *state) {
         return result;
     }
     switch (tok.type) {
+        case ASM: {
+            if (!state->functionDepth) {
+                signatureError(state, "asm blocks are only allowed inside functions");
+                return (stmt){0};
+            }
+            tok = advance(state);
+            expect(IDENTIFIER, "Expected asm architecture (x86_64, aarch64, riscv64)", stmt);
+            token architecture = tok, platform = {.type=EOF_TOKEN};
+            if (strcmp(tok.lexeme, "x86_64") && strcmp(tok.lexeme, "aarch64") && strcmp(tok.lexeme, "riscv64")) {
+                signatureError(state, "Unknown asm architecture; expected x86_64, aarch64, or riscv64");
+                return (stmt){0};
+            }
+            tok = advance(state);
+            if (tok.type == SLASH) {
+                tok = advance(state);
+                expect(IDENTIFIER, "Expected asm platform after '/'", stmt);
+                platform = tok;
+                if (strcmp(tok.lexeme, "linux") && strcmp(tok.lexeme, "macos") && strcmp(tok.lexeme, "windows")) {
+                    signatureError(state, "Unknown asm platform; expected linux, macos, or windows");
+                    return (stmt){0};
+                }
+                tok = advance(state);
+            }
+            expect(ASM_BODY, "Expected required '{ ... }' asm block", stmt);
+            struct stmt_asm *node = malloc(sizeof(*node));
+            CHECK_MALLOC(node);
+            *node = (struct stmt_asm){.architecture=architecture, .platform=platform, .assembly=tok.lexeme};
+            if (!parseAsmOperands(state, node)) return (stmt){0};
+            advance(state);
+            if (currentToken(state).type == SEMICOLON) advance(state);
+            return (stmt){.type=STMT_ASM, .value=node};
+        }
         case TYPE:
             return parseTypeDeclaration(state);
         case STRUCT:

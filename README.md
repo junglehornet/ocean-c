@@ -1220,3 +1220,88 @@ accept signed `e`/`E` exponents. Integer scanning preserves magnitudes through
 `UINT64_MAX`, with larger literals rejected. Unsigned integers use unsigned division,
 remainder, comparisons, and logical right shifts. Mixed integer operations use
 64-bit unsigned arithmetic when either operand is unsigned.
+
+## Inline assembly
+
+Inside a function, write `asm architecture[/platform] { assembly }`. The
+architecture is required: `x86_64`, `aarch64`, or `riscv64`. An optional `/linux`,
+`/macos`, or `/windows` restricts the block to that host platform. Braces are
+required; a trailing semicolon is optional. Unknown selectors are errors.
+
+```ocean
+func main() {
+    asm x86_64/linux {
+        mov rax, 39
+        syscall
+    }
+    asm aarch64 {
+        nop
+    }
+}
+```
+
+Ocean currently builds for the host through Clang. Nonmatching blocks are omitted
+without assembling their bodies; selectors do not enable cross-compilation.
+Every matching block executes in source order. x86-64 uses Intel syntax;
+AArch64 and RISC-V use their standard LLVM assembler syntax. Bodies are raw
+assembly, including newlines, directives, and literal `$` characters, with balanced
+braces outside quoted strings and comments. Use `#` line comments on x86-64 and
+RISC-V, and `//` on AArch64; `/* ... */` comments are also recognized.
+
+Use `${name}` outside assembly strings/comments to read or write a mutable
+scalar variable or pointer. Each placeholder is a memory operand, not its value
+or an address register; use an instruction of the variable's storage width.
+Initialize variables before the block. Operand limits differ by architecture:
+
+| Architecture | Distinct operand names per block |
+| --- | --- |
+| `x86_64` | No compiler-imposed count limit; more than four are supported |
+| `aarch64` | At most four |
+| `riscv64` | At most four |
+
+AArch64 and RISC-V currently reserve registers to address operands, which limits
+how many distinct variables a block can reference. x86-64 can address stack
+variables directly and does not have this four-operand restriction. Repeated
+references to `${name}` share one operand: reading and then writing `${value}`
+counts as one distinct variable, regardless of architecture. Collections,
+structs, constants, and arbitrary Ocean expressions are not operands.
+
+```ocean
+value := 7;
+asm x86_64 {
+    mov rax, ${value}
+    add rax, 3
+    mov ${value}, rax
+}
+// value is now 10 on x86-64.
+```
+
+Ordinary integer and vector/floating-point registers are conservatively
+clobbered, with read/write effects for operands, a memory barrier, and condition
+codes where applicable. Preserve frame pointers, reserved registers, and special
+machine state: x86-64 `rbp`; AArch64 `x18`/`x29`; RISC-V `gp`/`tp`/`s0`.
+When operands are present, also preserve AArch64 `x9`–`x15` and RISC-V
+`t3`–`t6`: the compiler uses them to address operands. Native calls may overwrite
+these address registers, so save and restore them around calls.
+
+Blocks enter with an aligned stack. Functions containing matching asm use no
+red zone and are not inlined. Stack use and native calls must follow the platform
+ABI, restore the stack pointer exactly, preserve operand-address registers, and
+provide any required call space. Access operands before changing the stack and
+after restoring it. Do not return, branch out of the block, or unwind through
+it. Numeric local labels avoid collisions when blocks are repeated.
+
+Instructions must be supported by the host's default Clang target; there is no
+CPU-feature selection. Native `check`/build reports assembler errors through
+Clang; `--emit-llvm` alone does not assemble instructions.
+
+The standard-library `io` package has no `extern` declarations. Output uses
+assembly system calls on Linux (x86-64, AArch64, RISC-V64) and macOS (x86-64,
+AArch64). Windows x86-64/AArch64 assembly calls `GetStdHandle` and `WriteFile`;
+native Windows executable links include `kernel32` (use `-lkernel32` when linking
+saved IR manually). Other architecture/platform combinations report unsupported
+output. Writes handle partial results and retry Unix interruptions; other output
+failures panic. Float formatting is portable Ocean code with exact binary64
+conversion and round-to-nearest, ties-to-even, independent of the C locale.
+Default printed floats retain two decimal places. Compiler runtime and boxed
+values still use native libraries/libffi; this does not make executables freestanding.

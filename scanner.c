@@ -31,7 +31,7 @@ const enum tokenType keyword_types[] = {
     /*F32, STRING,*/ TYPE, STRUCT, FUNC, IMPORT,
     ANY, MIXED, INTERFACE, CONTINUE, BREAK, ENUM, IF, DEFER,
     SWITCH, FALLTHROUGH, EXTERN, FOR, GOTO, AS,
-    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC, MATCH,
+    PACKAGE, ELSE, RANGE, RETURN, CASE, DEFAULT, NULL_KEYWORD, PANIC, MATCH, ASM,
 };
 
 const char *keywords[] = {
@@ -39,7 +39,7 @@ const char *keywords[] = {
     /*"f32", "string",*/ "type", "struct", "func", "import",
     "any", "mixed", "interface", "continue", "break", "enum", "if", "defer",
     "switch", "fallthrough", "extern", "for", "goto", "as",
-    "package", "else", "range", "return", "case", "default", "null", "panic", "match",
+    "package", "else", "range", "return", "case", "default", "null", "panic", "match", "asm",
 };
 
 unsigned long hashes[NKEYWORDS] = {};
@@ -121,6 +121,55 @@ static uint32_t scan_literal_char(struct scannerState *state);
 static void scan_literal_number(struct scannerState *state);
 static void multiline_comment(struct scannerState *state);
 
+// Assembly is opaque to the Ocean lexer, including foreign-target blocks.
+static int asmHeader(tokenlist *list) {
+    size_t n = list->top;
+    if (n >= 2 && get_tokenlist(list, n-2).type == ASM &&
+        get_tokenlist(list, n-1).type == IDENTIFIER) return 1;
+    return n >= 4 && get_tokenlist(list, n-4).type == ASM &&
+        get_tokenlist(list, n-3).type == IDENTIFIER &&
+        get_tokenlist(list, n-2).type == SLASH &&
+        get_tokenlist(list, n-1).type == IDENTIFIER;
+}
+
+static void scanAssembly(struct scannerState *state) {
+    size_t start = state->offset + 1;
+    int depth = 1, quote = 0, lineComment = 0, blockComment = 0;
+    size_t n = state->list->top;
+    token arch = get_tokenlist(state->list, n - (get_tokenlist(state->list, n-2).type == SLASH ? 3 : 1));
+    int hashComment = strcmp(arch.lexeme, "aarch64") != 0;
+    while (next_char(state)) {
+        char c = state->source[state->offset], next = peek(state);
+        if (lineComment) { if (c == '\n') lineComment = 0; continue; }
+        if (blockComment) {
+            if (c == '*' && next == '/') { next_char(state); blockComment = 0; }
+            continue;
+        }
+        if (quote) {
+            if (c == '\\' && next) next_char(state);
+            else if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '/' && next == '/') { lineComment = 1; next_char(state); }
+        else if (c == '/' && next == '*') { blockComment = 1; next_char(state); }
+        else if (c == '#' && hashComment) lineComment = 1;
+        else if (c == '"' || c == '\'') quote = c;
+        else if (c == '{') depth++;
+        else if (c == '}' && !--depth) {
+            size_t length = state->offset - start;
+            char *body = malloc(length + 1);
+            assert(body);
+            memcpy(body, state->source + start, length); body[length] = 0;
+            push_tokenlist(state->list, (token){.type=ASM_BODY, .lexeme=body,
+                .line=state->thisLine, .column=state->thisColumn, .filename=state->filename});
+            return;
+        }
+    }
+    diagnostic(state->source, (token){.filename=state->filename,
+        .line=state->thisLine, .column=state->thisColumn}, "scanner", "error", "Unterminated asm block");
+    scanning_error = 1;
+}
+
 tokenlist *scanTokens(char *source, char *filename) {
     scanning_error = 0;
     populate_keyword_hashes();
@@ -151,6 +200,11 @@ tokenlist *scanTokens(char *source, char *filename) {
                 push_tokenlist(list, (token){.type = EOF_TOKEN, .lexeme = "EOF", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 goto end_loop;
             case '{':
+                if (asmHeader(list)) {
+                    scanAssembly(&state);
+                    if (!state.source[state.offset]) goto end_loop;
+                    break;
+                }
                 push_tokenlist(list, (token){.type = LEFT_CURLY_BRACE, .lexeme = "{", .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 break;
             case '}':

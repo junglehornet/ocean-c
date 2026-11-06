@@ -212,8 +212,6 @@ func main() int {
     for name in ('io', 'reflect'):
         (standard / name).mkdir(parents=True)
         (standard / name / (name + '.oc')).write_text((fixtures / (name + '.oc')).read_text())
-    with (standard / 'io/io.oc').open('a') as out:
-        out.write('\nfunc Printfln(format string, items ...any) { Println(Sprintf(format, items...)); }\n')
     environment['OCEAN_SRC'] = str(standard)
     spec = Path(__file__).resolve().parents[1].joinpath('testcode/enums.oc').read_text()
     program('import "io";\n' + spec + '''

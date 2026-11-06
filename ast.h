@@ -9,6 +9,15 @@ typedef struct typeTokens {
     token *tokens;
 } typeTokens;
 
+struct asm_reference { size_t offset, length, operand; };
+struct stmt_asm {
+    token architecture, platform;
+    char *assembly;
+    size_t nOperands, nReferences;
+    token *operands;
+    struct asm_reference *references;
+};
+
 enum binaryExprType {
     EXPR_NULL = 0,
     // operators
@@ -40,7 +49,7 @@ enum stmtType {
     STMT_PACKAGE, STMT_IMPORT, STMT_VAR, STMT_STRUCT, STMT_INTERFACE,
     STMT_FUNC, STMT_IF, STMT_EXPR, STMT_BLOCK, STMT_FOR, STMT_RETURN, STMT_PANIC, STMT_RETURN_PANIC,
     STMT_TYPE, STMT_ENUM, STMT_BREAK, STMT_CONTINUE, STMT_GOTO,
-    STMT_LABEL, STMT_DEFER, STMT_SWITCH, STMT_FALLTHROUGH,
+    STMT_LABEL, STMT_DEFER, STMT_SWITCH, STMT_FALLTHROUGH, STMT_ASM,
 };
 
 typedef struct stmt {

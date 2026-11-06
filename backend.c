@@ -12,6 +12,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// Windows stdout assembly calls the stable Win32 API instead of OS-versioned syscalls.
+#if defined(_WIN32)
+#define OCEAN_SYSTEM_LINK_LIBRARIES "-lkernel32",
+#else
+#define OCEAN_SYSTEM_LINK_LIBRARIES
+#endif
+
 typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER } Kind;
 typedef struct {
     Kind kind;
@@ -168,6 +175,7 @@ typedef struct {
     unsigned next, label, strings;
     unsigned breakLabel, continueLabel;
     int terminated, errors;
+    int functionHasAsm;
     int forwardPanic; // Lexical forwarding context for call trace frames.
     token location;
     BackendDiagnostic *diagnostics;
@@ -4334,10 +4342,84 @@ static void statement(Backend *b, stmt *s) {
     b->location = previous;
     b->forwardPanic = previousForward;
 }
+static void emitAssembly(Backend *b, struct stmt_asm *v, const char *architecture) {
+    int x86 = !strcmp(architecture, "x86_64");
+    b->functionHasAsm = 1;
+    Value *operands = checked(sizeof(*operands) * (v->nOperands + 1));
+    for (size_t i=0; i<v->nOperands; i++) operands[i] = find(b, v->operands[i].lexeme);
+    fprintf(b->body, "  call void asm sideeffect alignstack%s \"", x86 ? " inteldialect" : "");
+    // Escape LLVM string bytes and LLVM's operand-template dollar marker.
+    size_t reference = 0;
+    for (size_t i=0; v->assembly[i]; i++) {
+        if (reference < v->nReferences && i == v->references[reference].offset) {
+            struct asm_reference ref = v->references[reference++];
+            fprintf(b->body, "$%zu", ref.operand);
+            i += ref.length - 1;
+            continue;
+        }
+        unsigned char byte = v->assembly[i];
+        if (byte == '$') fputs("$$", b->body);
+        else if (byte < 32 || byte >= 127 || byte == '"' || byte == '\\') fprintf(b->body, "\\%02X", byte);
+        else fputc(byte, b->body);
+    }
+    fputs("\\0A\", \"", b->body);
+    // Every named memory slot is both an input and an output. Separate indirect
+    // constraints express read/write effects without LLVM's unsupported '+' form.
+    for (size_t i=0; i<v->nOperands; i++) fputs("=*m,", b->body);
+    for (size_t i=0; i<v->nOperands; i++) fputs("*m,", b->body);
+    fputs("~{memory}", b->body);
+    // Conservatively spill ordinary integer/vector registers across each block.
+    // Stack/frame pointers and platform-reserved registers must be preserved.
+    if (x86) {
+        const char *registers[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+        for (size_t i=0; i<sizeof(registers)/sizeof(*registers); i++) fprintf(b->body, ",~{%s}", registers[i]);
+        for (int i=0; i<16; i++) fprintf(b->body, ",~{xmm%d}", i);
+        fputs(",~{dirflag},~{fpsr},~{flags}", b->body);
+    } else if (!strcmp(architecture, "aarch64")) {
+        for (int i=0; i<=30; i++) if (i != 18 && i != 29 && !(v->nOperands && i >= 9 && i <= 15)) fprintf(b->body, ",~{x%d}", i);
+        for (int i=0; i<32; i++) fprintf(b->body, ",~{v%d}", i);
+        fputs(",~{cc}", b->body);
+    } else {
+        for (int i=1; i<32; i++) if (i != 2 && i != 3 && i != 4 && i != 8 && !(v->nOperands && i >= 28)) fprintf(b->body, ",~{x%d}", i);
+        for (int i=0; i<32; i++) fprintf(b->body, ",~{f%d}", i);
+    }
+    fputs("\"(", b->body);
+    for (size_t i=0; i<v->nOperands*2; i++) {
+        Value slot = operands[i % v->nOperands];
+        fprintf(b->body, "%sptr elementtype(%s) %s", i ? ", " : "", irType(b, slot.kind), slot.operand);
+    }
+    fputs(")\n", b->body);
+    free(operands);
+}
+
+// The native driver invokes host Clang; selectors follow that same host.
+static void assemblyStatement(Backend *b, struct stmt_asm *v) {
+    const char *architecture = "", *platform = "";
+#if defined(__x86_64__) || defined(_M_X64)
+    architecture = "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    architecture = "aarch64";
+#elif defined(__riscv) && __riscv_xlen == 64
+    architecture = "riscv64";
+#endif
+#if defined(__linux__)
+    platform = "linux";
+#elif defined(__APPLE__) && defined(__MACH__)
+    platform = "macos";
+#elif defined(_WIN32)
+    platform = "windows";
+#endif
+    if (strcmp(v->architecture.lexeme, architecture) ||
+        (v->platform.type != EOF_TOKEN && strcmp(v->platform.lexeme, platform))) return;
+    emitAssembly(b, v, architecture);
+}
+
 static void statementImpl(Backend *b, stmt *s) {
     if (!s || (b->terminated && s->type != STMT_LABEL))
         return;
     switch (s->type) {
+    case STMT_ASM: assemblyStatement(b, s->value); break;
     case STMT_LABEL: {
         struct stmt_label *node = s->value;
         JumpTarget *target = jumpTarget(b->jumps, node->name.lexeme);
@@ -4961,6 +5043,7 @@ static int validateLayout(Backend *b, BufferKind *t) {
     return valid;
 }
 static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
+    b->functionHasAsm = 0;
     b->boxRegion = (Value){0};
     b->body = tmpfile();
     b->slots = tmpfile();
@@ -5032,6 +5115,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         if (f->name.filename && !strcmp(f->name.filename,b->program->sources[i].filename)) packageId=b->program->sources[i].packageId;
     fprintf(output,"; ocean-package: %zu\n",packageId);
     signature(b, f, output);
+    if (b->functionHasAsm) fputs(" noinline noredzone", output);
     fprintf(output, " {\nentry:\n");
     if (copy(b->slots, output) || copy(b->body, output))
         fail(b, "could not write function IR");
@@ -5846,14 +5930,14 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     }
     if (!child) {
         if (objectPath) {
-            if (needsFFI) execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, "-lffi", (char *)NULL);
-            else execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, (char *)NULL);
+            if (needsFFI) execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES "-lffi", (char *)NULL);
+            else execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES (char *)NULL);
         } else if (object)
             execlp("clang", "clang", "-Wno-override-module", "-c", "-x", "ir", irPath, "-o", staged, (char *)NULL);
         else if (needsFFI)
-            execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, "-lffi", (char *)NULL);
+            execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES "-lffi", (char *)NULL);
         else
-            execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, (char *)NULL);
+            execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES (char *)NULL);
         perror("could not execute clang (install clang and add it to PATH)");
         _exit(127);
     }
@@ -5910,7 +5994,11 @@ int linkLLVMObjects(const char **objects, size_t count, const char *irPath, cons
     args[n++]="clang";args[n++]="-Wno-override-module";
     if(library){args[n++]="-r";args[n++]="-nostdlib";args[n++]="-no-pie";}
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
-    args[n++]="-o";args[n++]=staged;if(ffi&&!library)args[n++]="-lffi";args[n]=NULL;
+    args[n++]="-o";args[n++]=staged;if(ffi&&!library)args[n++]="-lffi";
+#if defined(_WIN32)
+    if(!library)args[n++]="-lkernel32";
+#endif
+    args[n]=NULL;
     pid_t child=fork();if(!child){execvp(args[0],args);perror("could not execute clang");_exit(127);}
     int status=0,failed=child<0;
     if(child>0){while(waitpid(child,&status,0)<0)if(errno!=EINTR){failed=1;break;}if(!WIFEXITED(status)||WEXITSTATUS(status))failed=1;}

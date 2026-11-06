@@ -1,21 +1,27 @@
 package io;
 import "reflect";
-extern int write(i32 fd, buffer<i8>[] data, int count);
-extern i32 snprintf(buffer<i8>[] out, int size, buffer<i8>[] format, ...);
 
-func cStrOf(oceanString string) string {
+func appendNull(oceanString string) string {
 	oceanString += "\0";
 	return oceanString;
 }
 
 func Print(items ...any) {
 	totalString := Sprint(items...);
-	extern.write(1, totalString.data, len(totalString));
+	writeStdout(totalString);
 }
 
 func Println(items ...any) {
 	Print(items...);
-	extern.write(1, "\n".data, 1);
+	writeStdout("\n");
+}
+
+func Printf(format string, items ...any) {
+	Print(Sprintf(format, items...));
+}
+
+func Printfln(format string, items ...any) {
+	Printf(format + "\n", items...);
 }
 
 func Sprint(items ...any) string {
@@ -138,27 +144,233 @@ func sprintInt(x int) string {
     return negative ? "-" + str : str;
 }
 
-// -1 selects enough significant digits to round-trip a float.
+// Round a positive decimal integer after dropping decimal places, ties to even.
+func roundDecimal(digits string, drop int) string {
+    if (drop <= 0) {
+        for (i := 0; i < -drop; i++) digits += "0";
+        return digits;
+    }
+    keep := len(digits) - drop;
+    result := "";
+    for (i := 0; i < keep; i++) result += digits[i];
+    roundUp := false;
+    if (keep >= 0 && keep < len(digits)) {
+        next := digits[keep] - 48;
+        nonzero := false;
+        for (i := keep + 1; i < len(digits); i++) {
+            if (digits[i] != 48) nonzero = true;
+        }
+        odd := keep > 0 && (digits[keep - 1] - 48) % 2 != 0;
+        roundUp = next > 5 || (next == 5 && (nonzero || odd));
+    }
+    if (len(result) == 0) result = "0";
+    if (!roundUp) return result;
+    carry := true;
+    rounded := "";
+    for (i := len(result) - 1; i >= 0; i--) {
+        digit := (result[i] - 48)->int;
+        if (carry) {
+            digit++;
+            carry = digit == 10;
+            if (carry) digit = 0;
+        }
+        rounded = digitToChar(digit) + rounded;
+    }
+    return carry ? "1" + rounded : rounded;
+}
+
+// Convert IEEE binary64 exactly to a decimal integer and decimal scale.
+func exactFloat(mantissa uint, exponent int) (string, int) {
+    digits := int[]{};
+    for (; mantissa > 0; mantissa /= 10) digits.append((mantissa % 10)->int);
+    if (len(digits) == 0) digits.append(0);
+    factor := exponent < 0 ? 5 : 2;
+    steps := exponent < 0 ? -exponent : exponent;
+    for (i := 0; i < steps; i++) {
+        carry := 0;
+        for (j := 0; j < len(digits); j++) {
+            product := digits[j] * factor + carry;
+            digits[j] = product % 10;
+            carry = product / 10;
+        }
+        if (carry > 0) digits.append(carry);
+    }
+    result := "";
+    for (i := len(digits) - 1; i >= 0; i--) result += digitToChar(digits[i]);
+    return result, exponent < 0 ? -exponent : 0;
+}
+
+// -1 selects 17 significant digits, sufficient to round-trip every binary64.
+// Formatting uses round-to-nearest, ties-to-even, independently of libc/locale.
 func sprintFloat(x float, decimals int) string {
-    if (decimals < -1) return panic "invalid decimal count";
-    format := cStrOf(decimals == -1 ? "%.17g" : "%.*f");
-    scratch := i8[1];
-    size := decimals == -1 ? extern.snprintf(scratch.data, 0, format.data, x)
-                          : extern.snprintf(scratch.data, 0, format.data, decimals->i32, x);
-    if (size < 0) return panic "float formatting failed";
-    bytes := i8[(size->int) + 1];
-    if (decimals == -1) {
-        extern.snprintf(bytes.data, len(bytes), format.data, x);
-    } else {
-        extern.snprintf(bytes.data, len(bytes), format.data, decimals->i32, x);
+    if (decimals < -1 || decimals > 2147483647) return panic "invalid decimal count";
+    raw := &x;
+    bits := *((raw -> (*void)) -> (*uint));
+    negative := (bits >> 63) != 0;
+    sign := negative ? "-" : "";
+    exponent := ((bits >> 52) & 2047)->int;
+    mantissa := bits & 4503599627370495;
+    if (exponent == 2047) return sign + (mantissa == 0 ? "inf" : "nan");
+    if (exponent == 0 && mantissa == 0) {
+        result := sign + "0";
+        if (decimals != 0) result += ".";
+        count := decimals == -1 ? 1 : decimals;
+        for (i := 0; i < count; i++) result += "0";
+        return result;
     }
-    str := "";
-    hasPoint := false;
-    for (i := 0; i < size; i++) {
-        c := bytes[i];
-        str += c;
-        if (c == '.' || c == 'e' || c == 'E') hasPoint = true;
+    binaryExponent := exponent == 0 ? -1074 : exponent - 1075;
+    if (exponent != 0) mantissa |= 4503599627370496;
+    digits, scale := exactFloat(mantissa, binaryExponent);
+    if (decimals >= 0) {
+        rounded := roundDecimal(digits, scale - decimals);
+        result := "";
+        for (i := 0; i < decimals + 1 - len(rounded); i++) result += "0";
+        result += rounded;
+        out := sign;
+        for (i := 0; i < len(result); i++) {
+            if (decimals > 0 && i == len(result) - decimals) out += ".";
+            out += result[i];
+        }
+        return out;
     }
-    if (decimals == -1 && !hasPoint && x == x && x - x == 0.0) str += ".0";
-    return str;
+    decimalExponent := len(digits) - scale - 1;
+    rounded := roundDecimal(digits, len(digits) - 17);
+    if (len(rounded) > 17) {
+        decimalExponent++;
+        shorter := "";
+        for (i := 0; i < 17; i++) shorter += rounded[i];
+        rounded = shorter;
+    }
+    significant := len(rounded);
+    for (; significant > 1 && rounded[significant - 1] == 48; significant--) {}
+    out := sign;
+    if (decimalExponent < -4 || decimalExponent >= 17) {
+        out += rounded[0];
+        if (significant > 1) out += ".";
+        for (i := 1; i < significant; i++) out += rounded[i];
+        magnitude := decimalExponent < 0 ? -decimalExponent : decimalExponent;
+        out += decimalExponent < 0 ? "e-" : "e+";
+        if (magnitude < 10) out += "0";
+        return out + sprintInt(magnitude);
+    }
+    for (i := 0; i < -decimalExponent; i++) {
+        if (i == 0) out += "0.";
+        else out += "0";
+    }
+    for (i := 0; i < significant || i <= decimalExponent; i++) {
+        if (decimalExponent >= 0 && i == decimalExponent + 1) out += ".";
+        out += i < significant ? rounded[i] : '0';
+    }
+    if (decimalExponent >= 0 && significant <= decimalExponent + 1) out += ".0";
+    return out;
+}
+
+// Write all bytes, retrying interrupted Unix writes and handling partial writes.
+func writeStdout(text string) {
+    bytes := text -> i8[];
+    offset := 0;
+    for (; offset < len(bytes);) {
+        data: *void = &bytes[offset];
+        count := len(bytes) - offset;
+        if (count > 2147483647) count = 2147483647;
+        written := -4096;
+        asm x86_64/linux {
+            mov eax, 1
+            mov edi, 1
+            mov rsi, ${data}
+            mov rdx, ${count}
+            syscall
+            mov ${written}, rax
+        }
+        asm aarch64/linux {
+            mov x0, #1
+            ldr x1, ${data}
+            ldr x2, ${count}
+            mov x8, #64
+            svc #0
+            str x0, ${written}
+        }
+        asm riscv64/linux {
+            li a0, 1
+            ld a1, ${data}
+            ld a2, ${count}
+            li a7, 64
+            ecall
+            sd a0, ${written}
+        }
+        asm x86_64/macos {
+            mov eax, 0x2000004
+            mov edi, 1
+            mov rsi, ${data}
+            mov rdx, ${count}
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${written}, rax
+        }
+        asm aarch64/macos {
+            mov x0, #1
+            ldr x1, ${data}
+            ldr x2, ${count}
+            mov x16, #4
+            svc #0x80
+            cneg x0, x0, cs
+            str x0, ${written}
+        }
+        asm x86_64/windows {
+            mov r12, ${data}
+            mov r13, ${count}
+            sub rsp, 48
+            mov ecx, -11
+            call GetStdHandle
+            mov rcx, rax
+            mov rdx, r12
+            mov r8d, r13d
+            lea r9, [rsp + 40]
+            mov dword ptr [rsp + 40], 0
+            mov qword ptr [rsp + 32], 0
+            call WriteFile
+            test eax, eax
+            jz 1f
+            mov eax, dword ptr [rsp + 40]
+            jmp 2f
+            1: mov rax, -1
+            2:
+            add rsp, 48
+            mov ${written}, rax
+        }
+        asm aarch64/windows {
+            ldr x19, ${data}
+            ldr x20, ${count}
+            sub sp, sp, #80
+            // Native calls may overwrite registers holding operand addresses.
+            stp x9, x10, [sp]
+            stp x11, x12, [sp, #16]
+            stp x13, x14, [sp, #32]
+            str x15, [sp, #48]
+            mov w0, #-11
+            bl GetStdHandle
+            mov x1, x19
+            mov w2, w20
+            add x3, sp, #64
+            str wzr, [x3]
+            mov x4, #0
+            bl WriteFile
+            ldr w21, [sp, #64]
+            cmp w0, #0
+            mov x22, #-1
+            csel x21, x21, x22, ne
+            ldp x9, x10, [sp]
+            ldp x11, x12, [sp, #16]
+            ldp x13, x14, [sp, #32]
+            ldr x15, [sp, #48]
+            add sp, sp, #80
+            str x21, ${written}
+        }
+        if (written == -4096) return panic "stdout is unsupported on this architecture/platform";
+        if (written == -4) continue;
+        if (written <= 0 || written > count) return panic "stdout write failed";
+        offset += written;
+    }
 }

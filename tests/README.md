@@ -805,3 +805,15 @@ generic and boxed transport; immutable record fields; and payload ownership.
 It also covers generic enum parameters and constraints, nested and distinct
 specializations, aliases, imported generic enums, generic functions, and concrete
 `any` payloads. It compiles and runs the examples in `testcode/enums.oc`.
+
+## Standard-library assembly
+
+`inline_asm_test.py` checks selectors, raw assembly text, scalar `${name}`
+read/write operands, name qualification and diagnostics, and native execution at
+O0/O2. `standard_library_asm_test.py` uses `asm_backend_probe` to pass real parsed
+standard-library blocks through the backend emitter and cross-assemble all seven
+supported OS/architecture combinations at O0/O2. It compares edge cases and seeded
+binary64 inputs against `snprintf` and runs the Windows x64 call sequence against
+native `ms_abi` test shims on Linux. Foreign objects are assembled, not executed;
+macOS/Windows and foreign-architecture behavior still needs native CI coverage.
+The `io.oc` fixture mirrors the standard-library implementation without externs.

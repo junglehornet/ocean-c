@@ -111,6 +111,8 @@ char *getTokenTypeStr(enum tokenType t) {
         case PLUS:
             return "PLUS";
         case MATCH: return "MATCH";
+        case ASM: return "ASM";
+        case ASM_BODY: return "ASM_BODY";
         case FAT_ARROW: return "FAT_ARROW";
         case ARROW:
             return "ARROW";

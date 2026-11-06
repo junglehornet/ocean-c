@@ -2455,6 +2455,24 @@ static void statement(Context *c, stmt *s) {
         c->scope = scope.parent;
         break;
     }
+    case STMT_ASM: {
+        struct stmt_asm *v = s->value;
+        for (size_t i=0; i<v->nOperands; i++) {
+            token name = v->operands[i];
+            Symbol *symbol = lookup(c, name.lexeme);
+            if (!symbol) { error(c, name, "unresolved asm operand"); continue; }
+            indexReference(c, name, symbol);
+            Type *t = representation(symbol->type);
+            const char *kind = t->name;
+            if (symbol->isType || symbol->immutable || symbol->freed ||
+                (strcmp(kind, "pointer") && strcmp(kind, "int") && strcmp(kind, "uint") &&
+                 strcmp(kind, "i32") && strcmp(kind, "u32") && strcmp(kind, "i16") &&
+                 strcmp(kind, "u16") && strcmp(kind, "i8") && strcmp(kind, "u8") &&
+                 strcmp(kind, "float") && strcmp(kind, "f32") && strcmp(kind, "bool")))
+                error(c, name, "asm operands require mutable scalar variables or pointers");
+        }
+        break;
+    }
     case STMT_DEFER:
         expression(c, ((struct stmt_defer *)s->value)->call);
         break;

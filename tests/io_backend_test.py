@@ -43,7 +43,7 @@ func main() int {
     Println(Sprint(mixed any[]{1, "two", true}));
     Println(Sprint(string[]{"a", "b"}));
     Println(Sprint(int[][]{{1, 2}, {3}}));
-    c := cStrOf("hello"); if (len(c) != 6 || c[5] != 0) return 1;
+    c := appendNull("hello"); if (len(c) != 6 || c[5] != 0) return 1;
     return 0;
 }
 ''', 'ab\n\nx12yQz\na{b\\q{c\\d\n0 12345 -987 -9223372036854775808\n7 -8 9 1.25\n2.00 -0.125\n2.0 1.25 2\n[1 3]\n[1 two true]\n[a b]\n[[1 2] [3]]\n', library=True)

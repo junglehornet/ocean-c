@@ -150,7 +150,7 @@ static int identifierName(const char *name) {
             return 0;
         p += n;
     }
-    const char *reserved[] = {"type",      "struct",      "func",   "import", "any",  "mixed",
+    const char *reserved[] = {"asm", "type",      "struct",      "func",   "import", "any",  "mixed",
                               "interface", "continue",    "break",  "enum",   "if",   "defer",
                               "switch",    "fallthrough", "extern", "for",    "goto", "as",
                               "package",   "else",        "range",  "return", "case", "default",

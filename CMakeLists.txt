@@ -115,6 +115,17 @@ if(BUILD_TESTING)
     set_tests_properties(pending_inventory pending_runner_test PROPERTIES TIMEOUT 30)
 
     find_program(OCEAN_CLANG_EXECUTABLE clang REQUIRED)
+    add_executable(asm_backend_probe tests/asm_backend_probe.c ast.c dynarray.c
+        token.c scanner.c parser.c build_cache.c llvm_packages.c)
+    target_include_directories(asm_backend_probe PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
+    if(UNIX)
+        target_link_libraries(asm_backend_probe PRIVATE m)
+    endif()
+    add_test(NAME standard_library_asm_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/standard_library_asm_test.py"
+        "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE:asm_backend_probe>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(standard_library_asm_test PROPERTIES TIMEOUT 120)
+
     add_test(NAME fallthrough_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fallthrough_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(fallthrough_test PROPERTIES TIMEOUT 60)
@@ -145,6 +156,9 @@ if(BUILD_TESTING)
     add_test(NAME os_args_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/os_args_test.py" "$<TARGET_FILE:ocean-c>")
     set_tests_properties(os_args_test PROPERTIES TIMEOUT 60)
+    add_test(NAME inline_asm_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/inline_asm_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(inline_asm_test PROPERTIES TIMEOUT 60)
     add_test(NAME goto_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/goto_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(goto_test PROPERTIES TIMEOUT 60)

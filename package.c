@@ -804,6 +804,11 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
         rewriteStmt(r, inner, v->body, 0); break;
     }
     case STMT_LABEL: scope = rewriteStmt(r, scope, ((struct stmt_label *)s->value)->body, 0); break;
+    case STMT_ASM: {
+        struct stmt_asm *v = s->value;
+        for (size_t i=0; i<v->nOperands; i++) rewriteToken(r, scope, &v->operands[i]);
+        break;
+    }
     case STMT_DEFER: rewriteExpr(r, scope, ((struct stmt_defer *)s->value)->call); break;
     case STMT_ENUM: {
         struct stmt_enum *v = s->value;
