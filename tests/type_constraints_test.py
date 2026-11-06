@@ -123,3 +123,24 @@ with tempfile.TemporaryDirectory(prefix="ocean constraints ") as directory:
     rejected(box + "func use(x Box) int { return x.value; }", "narrow")
     rejected("func main() { x := 1; switch (x.(type)) { case Missing: break; } }", "unresolved type")
     rejected(box + "func main() { x := Box<int>{1}; switch (x.(type)) { case Box<int>(4): break; } }", "Expected function signature type")
+
+    # Contextual conversion accepts literal syntax, never arbitrary int values.
+    program("""
+        func identity(x float) float { return x; }
+        func result() float { return -3; }
+        func main() int {
+            x: float = 0;
+            x = 2;
+            x += 1;
+            if (x != 3 || 3 != x || x < 0 || 4 <= x) { return 1; }
+            if (identity(2) != 2.0 || identity(-2) != -2.0) { return 2; }
+            if (result() != -3.0 || x + 2 != 5.0 || 2 + x != 5.0) { return 3; }
+            y: f32 = 2;
+            if (y != 2) { return 4; }
+            return 0;
+        }
+    """, 0)
+    rejected("func main() { n := 0; x: float = n; }", "type mismatch")
+    rejected("func f(x float) {} func main() { n := 0; f(n); }", "type mismatch")
+    rejected("func main() { x: float = 0.0; n := 0; if (x == n) {} }", "type mismatch")
+    rejected("func f(x float) {} func main() { f(1 + 2); }", "type mismatch")

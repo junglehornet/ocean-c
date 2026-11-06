@@ -152,6 +152,11 @@ not C `int`. Strings are immutable bytes; indexing reads a signed byte and `len`
 counts bytes. Character literals decode Unicode scalars. Identifiers support
 Unicode; exported names begin with Unicode uppercase letters.
 
+Integer literals (including negative literals) automatically convert in float contexts,
+including typed initializers, assignments, arguments, returns, arithmetic, and
+comparisons such as `myFloat == 0`. Integer variables and integer expressions
+require an explicit cast; `value := 0` still infers `int`.
+
 Use `value -> Type` for casts and parentheses for compound targets, such as
 `raw -> (*Point)` or `value -> (pkg.Type)`. Arithmetic, bit operations,
 comparisons, compound assignments, `++`, `--`, short-circuit `&&`/`||`, and

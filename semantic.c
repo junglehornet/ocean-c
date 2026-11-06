@@ -764,7 +764,31 @@ static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
     error(c, at, "literal requires an array, buffer, or struct assignment destination");
     return &unknown;
 }
+// Only literal syntax (including a negated literal) participates in implicit
+// integer-to-float conversion. Rewrite it so backend inference sees the float too.
+static int coerceFloatLiteral(Type *expected, expr *e) {
+    if (definedType(expected) || canonical(expected) != &floating) return 0;
+    if (e->type == EXPR_TYPE_UNARY &&
+        ((struct expr_unary *)e->underlying)->operation == UNARY_NEGATE) {
+        expr *child = &((struct expr_unary *)e->underlying)->child;
+        if (child->type == EXPR_TYPE_LITERAL) return coerceFloatLiteral(expected, child);
+        return 0;
+    }
+    if (e->type != EXPR_TYPE_LITERAL) return 0;
+    struct expr_literal *literal = e->underlying;
+    if (literal->type != LITERAL_TYPE_INT) return 0;
+    double *number = malloc(sizeof(*number));
+    if (!number) exit(1);
+    *number = literal->unsignedLiteral ? (double)*(unsigned long *)literal->value
+                                      : (double)*(long *)literal->value;
+    free(literal->value);
+    literal->value = number;
+    literal->type = LITERAL_TYPE_FLOAT;
+    literal->unsignedLiteral = 0;
+    return 1;
+}
 static Type *expectedExpression(Context *c, Type *expected, expr *e, token at) {
+    coerceFloatLiteral(expected, e);
     if (e->type == EXPR_TYPE_COMPOSITE && !((struct expr_composite *)e->underlying)->type.type)
         return checkComposite(c, expected, e, at);
     return expression(c, e);
@@ -800,6 +824,7 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
                            size_t nExpected, token at, int assignmentContext) {
     TypeList list = {.items = allocate(c, sizeof(Type *) * (count + 1)), .count = count};
     for (size_t i = 0; i < count; i++) {
+        if (i < nExpected) coerceFloatLiteral(expected[i], &values[i]);
         Type *t = assignmentContext && i < nExpected
                       ? expectedExpression(c, expected[i], &values[i], at)
                       : expression(c, &values[i]);
@@ -1871,6 +1896,8 @@ static Type *expression(Context *c, expr *e) {
         Type *a = recreated && recreated->freed ? recreated->type : expression(c, &v->left);
         Type *b = v->operation == EXPR_ASSIGNMENT ? expectedExpression(c, a, &v->right, at)
                                                   : expression(c, &v->right);
+        if (coerceFloatLiteral(a, &v->right)) b = expression(c, &v->right);
+        if (coerceFloatLiteral(b, &v->left)) a = expression(c, &v->left);
         if (recreated) recreated->freed = 0;
         if ((v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) && (a->enumeration || b->enumeration)) {
             if (a->enumeration != b->enumeration) error(c, at, "cannot compare variants from different enum types");
