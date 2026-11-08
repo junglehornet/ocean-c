@@ -28,7 +28,7 @@ static void prepareEnum(struct stmt_enum *v) {
 static Type *enumType(Context *c, struct stmt_enum *v) {
     prepareEnum(v);
     Type *t = allocate(c, sizeof(*t));
-    t->name = v->name.lexeme; t->enumeration = v; t->record = &v->storage;
+    t->name = v->isBuiltin ? "Result" : v->name.lexeme; t->enumeration = v; t->record = &v->storage;
     return t;
 }
 static Type *enumPayloadType(Context *c, Type *owner, size_t i) {
@@ -48,7 +48,7 @@ static Type *enumPayloadType(Context *c, Type *owner, size_t i) {
 }
 static Type *enumMemberType(Context *c, Type *parent, token name) {
     struct stmt_enum *v = parent->enumeration;
-    if (!exportedName(name.lexeme) && sourcePackage(c, name.filename) != sourcePackage(c, v->name.filename)) {
+    if (!v->isBuiltin && !exportedName(name.lexeme) && sourcePackage(c, name.filename) != sourcePackage(c, v->name.filename)) {
         error(c, name, "enum variant is not exported by its package"); return &unknown;
     }
     for (size_t i = 0; i < v->nMembers; i++) if (!strcmp(v->names[i].lexeme, name.lexeme)) {

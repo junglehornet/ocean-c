@@ -115,6 +115,16 @@ if(BUILD_TESTING)
     set_tests_properties(pending_inventory pending_runner_test PROPERTIES TIMEOUT 30)
 
     find_program(OCEAN_CLANG_EXECUTABLE clang REQUIRED)
+    add_test(NAME result_parse_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/result_parse_test.py"
+        "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(result_parse_test PROPERTIES TIMEOUT 120)
+    add_test(NAME recoverable_io_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/recoverable_io_test.py"
+        "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(recoverable_io_test PROPERTIES TIMEOUT 180)
+
+
     add_executable(asm_backend_probe tests/asm_backend_probe.c ast.c dynarray.c
         token.c scanner.c parser.c build_cache.c llvm_packages.c)
     target_include_directories(asm_backend_probe PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
@@ -144,6 +154,11 @@ if(BUILD_TESTING)
     add_test(NAME io_backend_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/io_backend_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(io_backend_test PROPERTIES TIMEOUT 60)
+    add_test(NAME io_scanner_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/io_scanner_test.py" "$<TARGET_FILE:ocean-c>"
+        "${OCEAN_CLANG_EXECUTABLE}" "$<TARGET_FILE:asm_backend_probe>")
+    set_tests_properties(io_scanner_test PROPERTIES TIMEOUT 180)
+
     add_test(NAME range_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/range_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(range_test PROPERTIES TIMEOUT 60)

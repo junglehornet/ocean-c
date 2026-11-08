@@ -326,7 +326,7 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
                     completionItem(out, &comma, s->name, s->type, s->kind);
             }
             const char *builtins[] = {"uint", "u64", "u32", "u16", "u8", "int",    "i8",  "i16",  "i32",    "i64", "float",
-                                      "f32",    "f64", "bool", "string", "any", "array",
+                                      "f32",    "f64", "bool", "string", "any", "array", "Result",
                                       "buffer", "len", "new",  "free"};
             for (i = 0; i < sizeof(builtins) / sizeof(*builtins); i++)
                 if (!strncmp(builtins[i], prefix, prefixLength))
@@ -356,9 +356,12 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
             fputc('[', out);
             token target = !strcmp(method, "textDocument/typeDefinition") ? s->typeDeclaration
                                                                           : s->declaration;
-            if (target.filename)
+            if (target.filename && strcmp(target.filename, OCEAN_BUILTIN_RESULT_FILE))
                 locationJSON(out, program, target);
             fputc(']', out);
+        } else if (!strcmp(method, "textDocument/prepareRename") &&
+                   s->declaration.filename && !strcmp(s->declaration.filename, OCEAN_BUILTIN_RESULT_FILE)) {
+            fputs("null", out);
         } else if (!strcmp(method, "textDocument/prepareRename")) {
             fputs("{\"range\":", out);
             rangeJSON(out, doc->text, reference ? reference->use : s->declaration);
@@ -369,12 +372,14 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
             int comma = 0;
             Json *include = member(member(params, "context"), "includeDeclaration");
             fputc('[', out);
-            if (include && include->kind == 't') {
+            if (include && include->kind == 't' && s->declaration.filename &&
+                strcmp(s->declaration.filename, OCEAN_BUILTIN_RESULT_FILE)) {
                 locationJSON(out, program, s->declaration);
                 comma = 1;
             }
             for (i = 0; i < index.nReferences; i++)
-                if (index.references[i].symbol == binding) {
+                if (index.references[i].symbol == binding &&
+                    strcmp(index.references[i].use.filename, OCEAN_BUILTIN_RESULT_FILE)) {
                     if (comma++)
                         fputc(',', out);
                     locationJSON(out, program, index.references[i].use);
@@ -382,7 +387,8 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
             fputc(']', out);
         } else if (!strcmp(method, "textDocument/rename")) {
             const char *newName = string(member(params, "newName"));
-            int conflict = !identifierName(newName);
+            int conflict = !identifierName(newName) ||
+                           (s->declaration.filename && !strcmp(s->declaration.filename, OCEAN_BUILTIN_RESULT_FILE));
             for (i = 0; !conflict && i < index.nSymbols; i++) {
                 semanticSymbol *other = &index.symbols[i];
                 if (i == binding || strcmp(other->name, newName) ||

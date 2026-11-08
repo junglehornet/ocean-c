@@ -603,6 +603,8 @@ static void rewriteToken(Rewrite *r, Local *scope, token *name) {
     if (name->type != IDENTIFIER || !name->lexeme) return;
     Symbol *s = resolveName(r, scope, name->lexeme);
     if (s) name->lexeme = s->qualified;
+    else if (!local(scope, name->lexeme) && !strcmp(name->lexeme, "Result"))
+        name->lexeme = OCEAN_BUILTIN_RESULT_NAME;
 }
 static void rewriteType(Rewrite *r, Local *scope, typeTokens *type) {
     if (!type->nTokens) return;
@@ -895,7 +897,8 @@ packageBuild *loadPackageWithSources(const char *location, const packageSource *
     size_t statements = 0, sourceCount = 0;
     for (Package *p = b->packages; p; p = p->next)
         for (File *file = p->files; file; file = file->next) { statements += file->ast.nStatements; sourceCount++; }
-    b->program.statements = alloc(b, sizeof(stmt) * statements);
+    b->program.statementsCapacity = statements + 4;
+    b->program.statements = alloc(b, sizeof(stmt) * b->program.statementsCapacity);
     b->program.sources = alloc(b, sizeof(sourceFile) * sourceCount);
     for (size_t order = 0; order < b->nPackages; order++)
       for (Package *p = b->packages; p; p = p->next) {

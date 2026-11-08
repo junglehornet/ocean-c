@@ -817,3 +817,37 @@ binary64 inputs against `snprintf` and runs the Windows x64 call sequence agains
 native `ms_abi` test shims on Linux. Foreign objects are assembled, not executed;
 macOS/Windows and foreign-architecture behavior still needs native CI coverage.
 The `io.oc` fixture mirrors the standard-library implementation without externs.
+
+## Scanners and native files
+
+`io_scanner_test.py` installs the IO, OS, and reflection fixtures into a temporary
+standard-library tree. It runs delimiter scans, partial/fixed-size reads, EOF,
+leading whitespace, binary data, long-line compaction, all FileMode values, Unicode
+paths, shared Close state, permission checks, and native failures at O0/O2.
+Live pipes remain open during readiness tests so a blocking HasNext call fails
+with a timeout. All platform assembly blocks cross-assemble using the real parser
+and backend probe. Windows x64 calls additionally run against ms_abi file/pipe
+shims, with deliberately short native reads and writes. Foreign OS/architecture
+objects and Windows console input still require native platform CI coverage.
+
+The file suite also checks Binary mode rejection by NewScanner, all byte values
+including 0xFF, static array return types, n-slot zero padding, whole-file reads
+that preserve cursor/EOF state, inclusive seek bounds, shared EOF observations,
+and scanner buffer invalidation after Setpos. The Windows shims cover
+GetFileSizeEx and SetFilePointerEx; all native seek blocks cross-assemble.
+
+## Built-in Result and numeric parsing
+
+`result_parse_test.py` exercises the compiler-owned Result enum without imports,
+all three unwrap methods, caller-attributed panics, generic/managed payloads,
+local shadowing, integer overflow, strict parsing syntax, and exact binary64
+conversion at O0/O2. Seeded finite floats and exact neighboring-value midpoints
+are checked bit-for-bit against Python, including signed zero and subnormals.
+The semantic LSP suite checks builtin completion/hover and prevents renaming or
+navigating to nonexistent builtin source files. `io_parsing.oc` mirrors the
+standard-library parser source and contains no native parsing dependency.
+
+`recoverable_io_test.py` checks Result-based file, scanner, formatting and output
+errors at O0/O2, including native failures, short EOF payloads, stdout write
+errors, and Windows read/seek fault injection. Close and Setpos failures remain
+panics; Readall restores cursor and EOF state on recoverable read failures.

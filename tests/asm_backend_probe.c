@@ -16,19 +16,28 @@ int main(int argc, char **argv) {
     struct stmt_func *function = program.statements[0].value;
     if (function->body.nStmts != 1 || function->body.stmts[0].type != STMT_ASM) return 2;
     struct stmt_asm *node = function->body.stmts[0].value;
-    const char *names[] = {"data", "count", "written"};
-    Binding bindings[3] = {0};
-    Scope scope = {.bindings=bindings};
+    Binding *bindings = calloc(node->nOperands + 1, sizeof(*bindings));
+    if (!bindings) return 2;
+    Scope scope = {.bindings=node->nOperands ? bindings : NULL};
     Backend backend = {.body=stdout, .scope=&scope, .program=&program};
-    for (size_t i=0; i<3; i++) {
-        bindings[i].name = names[i];
-        bindings[i].address = value(&backend, i == 0 ? RAW_POINTER : INT, "%%%s", names[i]);
-        bindings[i].next = i < 2 ? &bindings[i+1] : NULL;
-    }
     puts("define i64 @sample(ptr %p, i64 %n) noinline noredzone {");
-    puts("%data = alloca ptr\n%count = alloca i64\n%written = alloca i64");
-    puts("store ptr %p, ptr %data\nstore i64 %n, ptr %count\nstore i64 -4096, ptr %written");
+    const char *resultSlot = NULL;
+    for (size_t i=0; i<node->nOperands; i++) {
+        const char *name = node->operands[i].lexeme;
+        int pointer = !strcmp(name, "data") || !strcmp(name, "timeout");
+        bindings[i].name = name;
+        bindings[i].address = value(&backend, pointer ? RAW_POINTER : INT, "%%operand%zu", i);
+        bindings[i].next = i + 1 < node->nOperands ? &bindings[i+1] : NULL;
+        fprintf(stdout, "%%operand%zu = alloca %s\n", i, pointer ? "ptr" : "i64");
+        if (pointer) fprintf(stdout, "store ptr %%p, ptr %%operand%zu\n", i);
+        else fprintf(stdout, "store i64 %s, ptr %%operand%zu\n",
+                     !strcmp(name, "count") ? "%n" :
+                     (!strcmp(name, "written") || !strcmp(name, "result")) ? "-4096" : "0", i);
+        if (!strcmp(name, "written") || !strcmp(name, "result")) resultSlot = bindings[i].address.operand;
+    }
     emitAssembly(&backend, node, node->architecture.lexeme);
-    puts("%result = load i64, ptr %written\nret i64 %result\n}");
+    if (resultSlot) fprintf(stdout, "%%answer = load i64, ptr %s\nret i64 %%answer\n}\n", resultSlot);
+    else puts("ret i64 0\n}");
+    free(bindings);
     return backend.errors != 0;
 }

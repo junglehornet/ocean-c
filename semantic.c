@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "semantic.h"
+#include "scanner.h"
 #include "diagnostic.h"
 #include "array_type.h"
 #include "buffer_type.h"
@@ -435,6 +436,8 @@ static Type *typeOf(Context *c, typeTokens span) {
             error(c, t, "expected a type");
             return &unknown;
         }
+        if (s->type->enumeration && s->type->enumeration->isBuiltin)
+            span.tokens[0].lexeme = OCEAN_BUILTIN_RESULT_NAME;
         if (s->type->enumeration && span.nTokens == 3 && span.tokens[1].type == DOT)
             return enumMemberType(c, s->type, span.tokens[2]);
         if (s->type->declaration) {
@@ -578,7 +581,8 @@ static void formatTypeSpan(FILE *out, typeTokens span, Type *callable, unsigned 
                     }
         }
         if (!substituted)
-            fputs(t.lexeme ? t.lexeme : getTokenTypeStr(t.type), out);
+            fputs(t.lexeme && !strcmp(t.lexeme, OCEAN_BUILTIN_RESULT_NAME) ? "Result" :
+                  t.lexeme ? t.lexeme : getTokenTypeStr(t.type), out);
     }
 }
 static void formatType(FILE *out, Type *t, unsigned depth) {
@@ -1494,6 +1498,8 @@ static Type *expression(Context *c, expr *e) {
             return &unknown;
         }
         indexReference(c,t,s);
+        if (s->isType && s->type->enumeration && s->type->enumeration->isBuiltin)
+            identifier->lexeme.lexeme = OCEAN_BUILTIN_RESULT_NAME;
         if (s->freed) error(c, t, "dynamic array has been freed; re-create it before use");
         return s->type;
     }
@@ -2100,7 +2106,7 @@ static Type *expression(Context *c, expr *e) {
             if (!symbol || !symbol->isType) {
                 struct stmt_func *method = findMethod(c, t, member.lexeme);
                 if (!method) { error(c, member, "extract a concrete enum variant before accessing its payload"); return &unknown; }
-                if (!exportedName(method->name.lexeme) && sourcePackage(c, at.filename) != sourcePackage(c, method->name.filename)) {
+                if (!method->isBuiltin && !exportedName(method->name.lexeme) && sourcePackage(c, at.filename) != sourcePackage(c, method->name.filename)) {
                     error(c, member, "method is not exported by its package"); return &unknown;
                 }
                 Type *callable = allocate(c, sizeof(*callable));
@@ -2128,7 +2134,7 @@ static Type *expression(Context *c, expr *e) {
         if (definedType(t)) {
             struct stmt_func *method = findMethod(c, t, field.lexeme);
             if (method) {
-                if (!exportedName(method->name.lexeme) && sourcePackage(c, at.filename) != sourcePackage(c, method->name.filename)) {
+                if (!method->isBuiltin && !exportedName(method->name.lexeme) && sourcePackage(c, at.filename) != sourcePackage(c, method->name.filename)) {
                     error(c, field, "method is not exported by its package"); return &unknown;
                 }
                 Type *callable = allocate(c, sizeof(*callable));
@@ -2167,7 +2173,7 @@ static Type *expression(Context *c, expr *e) {
                 }
             struct stmt_func *method = findMethod(c, t, field.lexeme);
             if (method) {
-                if (!exportedName(method->name.lexeme) &&
+                if (!method->isBuiltin && !exportedName(method->name.lexeme) &&
                     sourcePackage(c, at.filename) != sourcePackage(c, method->name.filename)) {
                     error(c, field, "method is not exported by its package");
                     return &unknown;
@@ -2519,9 +2525,49 @@ static void statement(Context *c, stmt *s) {
     }
 }
 static void finishIndex(Context *c);
+// Install compiler-owned definitions after package qualification, so a package's
+// own Result declaration shadows the builtin without changing other packages.
+static void prepareBuiltinResult(parseResult *program) {
+    if (program->builtinsPrepared) return;
+    program->builtinsPrepared = 1;
+    for (size_t i=0; i<program->nStatements; i++) {
+        stmt *s = &program->statements[i];
+        token name = {0};
+        if (s->type == STMT_ENUM) name = ((struct stmt_enum *)s->value)->name;
+        if (s->type == STMT_STRUCT) name = ((struct stmt_struct *)s->value)->name;
+        if (s->type == STMT_TYPE) name = ((struct stmt_type *)s->value)->name;
+        if (s->type == STMT_INTERFACE) name = ((struct stmt_interface *)s->value)->name;
+        if (s->type == STMT_FUNC && !((struct stmt_func *)s->value)->receiverType.nTokens)
+            name = ((struct stmt_func *)s->value)->name;
+        if (name.lexeme && !strcmp(name.lexeme, "Result")) return;
+    }
+    const char *source = oceanBuiltinResultSource();
+    tokenlist *tokens = scanTokens((char *)source, OCEAN_BUILTIN_RESULT_FILE);
+    for (size_t i=0; i<tokens->top; i++) {
+        token *name = &tokens->arr[i];
+        if (name->type == IDENTIFIER && !strcmp(name->lexeme, "Result")) name->lexeme = OCEAN_BUILTIN_RESULT_NAME;
+    }
+    parseResult builtin = parseTokensWithSource(tokens, source);
+    free(tokens);
+    if (builtin.hasError || builtin.nStatements != 4) abort();
+    if (program->statementsCapacity < program->nStatements + builtin.nStatements) {
+        program->statementsCapacity = program->nStatements + builtin.nStatements;
+        program->statements = realloc(program->statements, sizeof(stmt) * program->statementsCapacity);
+        if (!program->statements) abort();
+    }
+    for (size_t i=0; i<builtin.nStatements; i++) {
+        stmt node = builtin.statements[i];
+        if (node.type == STMT_ENUM) ((struct stmt_enum *)node.value)->isBuiltin = 1;
+        if (node.type == STMT_FUNC) ((struct stmt_func *)node.value)->isBuiltin = 1;
+        program->statements[program->nStatements++] = node;
+    }
+    free(builtin.statements);
+}
+
 static semanticResult analyzeIndexed(parseResult *program, semanticIndex *index) {
     if (!program || program->hasError)
         return (semanticResult){1};
+    prepareBuiltinResult(program);
     Scope root = {0};
     Context c = {.scope = &root, .program = program};
     // Give extern declarations private semantic names while retaining C linkage.
@@ -2540,6 +2586,11 @@ static semanticResult analyzeIndexed(parseResult *program, semanticIndex *index)
     }
     for (size_t i = 0; i < program->nStatements; i++)
         predeclare(&c, &program->statements[i]);
+    Symbol *builtinResult = lookup(&c, OCEAN_BUILTIN_RESULT_NAME);
+    if (builtinResult && !lookup(&c, "Result")) {
+        token alias = builtinResult->name; alias.lexeme = "Result";
+        declare(&c, alias, builtinResult->type, 1);
+    }
     for (size_t i = 0; i < program->nStatements; i++)
         if (program->statements[i].type == STMT_TYPE) {
             struct stmt_type *declaration = program->statements[i].value;
@@ -2639,7 +2690,7 @@ static void finishIndex(Context *c){
         for(size_t j=0;j<c->program->nStatements;j++)if(c->program->statements[j].type==STMT_FUNC){
             struct stmt_func *f=c->program->statements[j].value;
             if(!f->receiverType.nTokens||findMethod(c,original,f->name.lexeme)!=f)continue;
-            if(!exportedName(f->name.lexeme)&&sourcePackage(c,f->name.filename)!=sourcePackage(c,group.use.filename))continue;
+            if(!f->isBuiltin&&!exportedName(f->name.lexeme)&&sourcePackage(c,f->name.filename)!=sourcePackage(c,group.use.filename))continue;
             Type *callable=allocate(c,sizeof(*callable));callable->name="function";callable->function=f;callable->receiver=original;
             Symbol *member=allocate(c,sizeof(*member));member->name=f->name;member->type=callable;
             size_t id=indexSymbol(c,member);index->symbols[id].member=1;index->symbols[id].owner=t->record?t->record->name:t->declaration?t->declaration->name:(token){0};

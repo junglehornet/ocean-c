@@ -1,0 +1,205 @@
+package os;
+
+enum FileMode {
+    Read, Write, ReadWrite, Append, ReadAppend,
+    Binary, BinaryWrite, BinaryReadWrite, BinaryAppend, BinaryReadAppend
+}
+
+func nativeWindows() bool {
+    result := 0;
+    asm x86_64/windows {
+        mov qword ptr ${result}, 1
+    }
+    asm aarch64/windows {
+        mov x0, #1
+        str x0, ${result}
+    }
+    return result != 0;
+}
+
+// Convert a UTF-8 path to a NUL-terminated little-endian UTF-16 byte array.
+func widePath(path string) Result<i8[]> {
+    result := i8[]{};
+    for (i := 0; i < len(path);) {
+        first := (path[i]->u8)->int;
+        code := first;
+        width := 1;
+        if (first >= 192 && first < 224) { width = 2; code = first & 31; }
+        else if (first >= 224 && first < 240) { width = 3; code = first & 15; }
+        else if (first >= 240 && first < 248) { width = 4; code = first & 7; }
+        else if (first >= 128) return Result<i8[]>.error("invalid UTF-8 file path");
+        if (width > len(path) - i) return Result<i8[]>.error("invalid UTF-8 file path");
+        for (j := 1; j < width; j++) {
+            byte := (path[i + j]->u8)->int;
+            if (byte < 128 || byte > 191) return Result<i8[]>.error("invalid UTF-8 file path");
+            code = (code << 6) | (byte & 63);
+        }
+        if ((width == 2 && code < 128) || (width == 3 && code < 2048) ||
+            (width == 4 && code < 65536) || code > 1114111 || (code >= 55296 && code <= 57343))
+            return Result<i8[]>.error("invalid UTF-8 file path");
+        if (code > 65535) {
+            code -= 65536;
+            high := 55296 + (code >> 10);
+            result.append((high & 255)->i8);
+            result.append((high >> 8)->i8);
+            code = 56320 + (code & 1023);
+        }
+        result.append((code & 255)->i8);
+        result.append((code >> 8)->i8);
+        i += width;
+    }
+    result.append(0);
+    result.append(0);
+    return Result<i8[]>.value(result);
+}
+
+// Write truncates, ReadWrite creates without truncating, and append modes create.
+func Open(path string, mode FileMode) Result<File> {
+    binary := false;
+    if (mode == FileMode.Binary) { mode = FileMode.Read; binary = true; }
+    else if (mode == FileMode.BinaryWrite) { mode = FileMode.Write; binary = true; }
+    else if (mode == FileMode.BinaryReadWrite) { mode = FileMode.ReadWrite; binary = true; }
+    else if (mode == FileMode.BinaryAppend) { mode = FileMode.Append; binary = true; }
+    else if (mode == FileMode.BinaryReadAppend) { mode = FileMode.ReadAppend; binary = true; }
+    for (i := 0; i < len(path); i++) {
+        if (path[i] == 0) return Result<File>.error("file path contains NUL");
+    }
+    readable := false;
+    writable := false;
+    linuxFlags := 524288; // O_CLOEXEC
+    darwinFlags := 16777216; // O_CLOEXEC
+    access := 0;
+    creation := 3; // OPEN_EXISTING
+    if (mode == FileMode.Read) {
+        readable = true;
+        access = 2147483648; // GENERIC_READ
+    } else if (mode == FileMode.Write) {
+        writable = true;
+        linuxFlags |= 577;
+        darwinFlags |= 1537;
+        access = 1073741824; // GENERIC_WRITE
+        creation = 2; // CREATE_ALWAYS
+    } else if (mode == FileMode.ReadWrite) {
+        readable = true;
+        writable = true;
+        linuxFlags |= 66;
+        darwinFlags |= 514;
+        access = 3221225472;
+        creation = 4; // OPEN_ALWAYS
+    } else if (mode == FileMode.Append || mode == FileMode.ReadAppend) {
+        readable = mode == FileMode.ReadAppend;
+        writable = true;
+        linuxFlags |= readable ? 1090 : 1089;
+        darwinFlags |= readable ? 522 : 521;
+        access = readable ? 2147483652 : 1048580; // FILE_APPEND_DATA; synchronous access
+        creation = 4;
+    } else return Result<File>.error("invalid file mode");
+    access |= 128; // FILE_READ_ATTRIBUTES permits Size() on writable Windows handles.
+    bytes := path -> i8[];
+    if (nativeWindows()) {
+        converted := widePath(path);
+        if (converted == Result<i8[]>.error) return Result<File>.error(converted.(Result<i8[]>.error));
+        bytes = converted.unwrap();
+    }
+    else bytes.append(0);
+    data: *void = bytes.data;
+    result := -4096;
+    for (;;) {
+        asm x86_64/linux {
+            mov eax, 257
+            mov rdi, -100
+            mov rsi, ${data}
+            mov rdx, ${linuxFlags}
+            mov r10d, 438
+            syscall
+            mov ${result}, rax
+        }
+        asm aarch64/linux {
+            mov x0, #-100
+            ldr x1, ${data}
+            ldr x2, ${linuxFlags}
+            mov x3, #438
+            mov x8, #56
+            svc #0
+            str x0, ${result}
+        }
+        asm riscv64/linux {
+            li a0, -100
+            ld a1, ${data}
+            ld a2, ${linuxFlags}
+            li a3, 438
+            li a7, 56
+            ecall
+            sd a0, ${result}
+        }
+        asm x86_64/macos {
+            mov eax, 33554437
+            mov rdi, ${data}
+            mov rsi, ${darwinFlags}
+            mov edx, 438
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${result}, rax
+        }
+        asm aarch64/macos {
+            ldr x0, ${data}
+            ldr x1, ${darwinFlags}
+            mov x2, #438
+            mov x16, #5
+            svc #128
+            cneg x0, x0, cs
+            str x0, ${result}
+        }
+    asm x86_64/windows {
+        mov r12, ${data}
+        mov r13, ${access}
+        mov r14, ${creation}
+        sub rsp, 64
+        mov rcx, r12
+        mov edx, r13d
+        mov r8d, 7
+        xor r9d, r9d
+        mov dword ptr [rsp + 32], r14d
+        mov dword ptr [rsp + 40], 128
+        mov qword ptr [rsp + 48], 0
+        call CreateFileW
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${data}
+        ldr x20, ${access}
+        ldr x21, ${creation}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov w1, w20
+        mov x2, #7
+        mov x3, #0
+        mov w4, w21
+        mov x5, #128
+        mov x6, #0
+        bl CreateFileW
+        mov x22, x0
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+        if (result == -4) continue;
+        break;
+    }
+    if (result == -4096) return Result<File>.error("opening is unsupported on this architecture/platform");
+    if (result < 0) return Result<File>.error("could not open file");
+    file := registerFile(result, readable, writable);
+    index := file.slot;
+    files[index].binary = binary;
+    return Result<File>.value(file);
+}

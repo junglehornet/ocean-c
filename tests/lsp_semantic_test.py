@@ -89,6 +89,19 @@ func main() int {
         edited='package main;\nfunc main() { defer main(); }\n'
         send('textDocument/didChange',{'textDocument':{'uri':source.as_uri(),'version':9},'contentChanges':[{'text':edited}]})
         r=recv();assert any('backend error' in x['message'] for x in r['params']['diagnostics']),r
+        edited='package main;\nfunc main() int { result := Result<int>.value(7); return result.unwrap(); }\n'
+        send('textDocument/didChange',{'textDocument':{'uri':source.as_uri(),'version':10},'contentChanges':[{'text':edited}]});r=recv()
+        assert not r['params']['diagnostics'],r
+        col=edited.splitlines()[1].index('unwrap')+1
+        r=request('textDocument/hover',1,col);assert 'int' in r['result']['contents']['value'],r
+        r=request('textDocument/definition',1,col);assert r['result']==[],r
+        r=request('textDocument/prepareRename',1,col);assert r['result'] is None,r
+        r=request('textDocument/rename',1,col,{'newName':'take'});assert r.get('error'),r
+        edited='package main;\nfunc main() { result := Result<int>.value(7); result. }\n'
+        send('textDocument/didChange',{'textDocument':{'uri':source.as_uri(),'version':11},'contentChanges':[{'text':edited}]});recv()
+        r=request('textDocument/completion',1,len('func main() { result := Result<int>.value(7); result.'))
+        labels={item['label'] for item in r['result']['items']}
+        assert {'unwrap','unwrapOrElse','unwrapOrZero'}<=labels,r
         send('shutdown',{},99);assert recv()['result'] is None;send('exit');assert server.wait(timeout=10)==0
         assert not server.stderr.read()
     finally:

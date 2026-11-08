@@ -1,0 +1,139 @@
+package io;
+import "os";
+
+struct ScanResult { Bytes i8[]; End bool; }
+struct Scanner {
+    source os.File;
+    bytes i8[];
+    position int;
+    ended bool;
+    version int;
+}
+
+func NewScanner(source os.File) Scanner {
+    if (!source.CanRead()) return panic "scanner requires a readable stream";
+    if (source.IsBinary()) return panic "scanner cannot read a binary file";
+    return Scanner{source, i8[]{}, 0, false, source.SeekVersion()};
+}
+
+func (scanner *Scanner) checkSource() string {
+    if (!scanner.source.CanRead()) return "scanner source is closed";
+    if (scanner.source.IsBinary()) return "scanner cannot read a binary file";
+    current := scanner.source.SeekVersion();
+    if (scanner.version != current) {
+        scanner.bytes = {};
+        scanner.position = 0;
+        scanner.ended = false;
+        scanner.version = current;
+    }
+    return "";
+}
+func whitespace(character i8) bool {
+    return character == 32 || (character >= 9 && character <= 13);
+}
+
+func (scanner *Scanner) refill(count int) string {
+    if (scanner.ended) return "";
+    read := scanner.source.Readchunk(count);
+    if (read == Result<i8[]>.error) return read.(Result<i8[]>.error);
+    chunk := read.unwrap();
+    if (len(chunk) == 0) { scanner.ended = true; return ""; }
+    if (scanner.position == len(scanner.bytes)) {
+        scanner.bytes = chunk; scanner.position = 0; return "";
+    }
+    if (scanner.position > 0 && scanner.position >= len(scanner.bytes) / 2) {
+        remaining := i8[]{};
+        for (i := scanner.position; i < len(scanner.bytes); i++) remaining.append(scanner.bytes[i]);
+        scanner.bytes = remaining; scanner.position = 0;
+    }
+    for (i := 0; i < len(chunk); i++) scanner.bytes.append(chunk[i]);
+    return "";
+}
+
+func (scanner *Scanner) nextByte() (i8, bool, string) {
+    if (scanner.position == len(scanner.bytes) && !scanner.ended) {
+        error := scanner.refill(4096);
+        if (error != "") return 0->i8, false, error;
+    }
+    if (scanner.position == len(scanner.bytes)) return 0->i8, false, "";
+    position := scanner.position;
+    character := scanner.bytes[position]; scanner.position++;
+    return character, true, "";
+}
+
+func (scanner *Scanner) scanUntil(delimiter i8, spaces bool) Result<string> {
+    error := scanner.checkSource();
+    if (error != "") return Result<string>.error(error);
+    result := i8[]{};
+    for (;;) {
+        character, present, failure := scanner.nextByte();
+        if (failure != "") return Result<string>.error(failure);
+        if (!present) break;
+        if ((spaces && whitespace(character)) || (!spaces && character == delimiter)) break;
+        result.append(character);
+    }
+    return Result<string>.value(result -> string);
+}
+
+func (scanner *Scanner) Scan() Result<string> { return scanner.scanUntil(0->i8, true); }
+func (scanner *Scanner) Scanln() Result<string> { return scanner.scanUntil('\n', false); }
+func (scanner *Scanner) Scanc(character i8) Result<string> { return scanner.scanUntil(character, false); }
+
+func (scanner *Scanner) Scann(n int) Result<ScanResult> {
+    if (n < 0) return panic "invalid scan size";
+    error := scanner.checkSource();
+    if (error != "") return Result<ScanResult>.error(error);
+    result := i8[]{};
+    for (i := 0; i < n; i++) {
+        character, present, failure := scanner.nextByte();
+        if (failure != "") return Result<ScanResult>.error(failure);
+        if (!present) return Result<ScanResult>.value(ScanResult{result, true});
+        result.append(character);
+    }
+    return Result<ScanResult>.value(ScanResult{result, false});
+}
+
+func (scanner *Scanner) hasDelimiter(delimiter i8, spaces bool) Result<bool> {
+    error := scanner.checkSource();
+    if (error != "") return Result<bool>.error(error);
+    checked := scanner.position;
+    for (;;) {
+        for (; checked < len(scanner.bytes); checked++) {
+            character := scanner.bytes[checked];
+            if ((spaces && whitespace(character)) || (!spaces && character == delimiter)) return Result<bool>.value(true);
+        }
+        if (scanner.ended) return Result<bool>.value(scanner.position < len(scanner.bytes));
+        ready := scanner.source.PollRead();
+        if (ready == Result<int>.error) return Result<bool>.error(ready.(Result<int>.error));
+        count := ready.unwrap();
+        if (count == 0) return Result<bool>.value(false);
+        oldPosition := scanner.position;
+        failure := scanner.refill(count);
+        if (failure != "") return Result<bool>.error(failure);
+        if (scanner.position < oldPosition) checked -= oldPosition;
+    }
+}
+func (scanner *Scanner) HasNext() Result<bool> { return scanner.hasDelimiter(0->i8, true); }
+func (scanner *Scanner) HasNextln() Result<bool> { return scanner.hasDelimiter('\n', false); }
+func (scanner *Scanner) HasNextc(character i8) Result<bool> { return scanner.hasDelimiter(character, false); }
+
+stdinScanner: Scanner;
+stdinInitialized := false;
+func stdinError() string {
+    if (!stdinInitialized) {
+        opened := os.Stdin();
+        if (opened == Result<os.File>.error) return opened.(Result<os.File>.error);
+        stdinScanner = NewScanner(opened.unwrap()); stdinInitialized = true;
+    }
+    return "";
+}
+func Scan() Result<string> {
+    error := stdinError();
+    if (error != "") return Result<string>.error(error);
+    return stdinScanner.Scan();
+}
+func Scanln() Result<string> {
+    error := stdinError();
+    if (error != "") return Result<string>.error(error);
+    return stdinScanner.Scanln();
+}

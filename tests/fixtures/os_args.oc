@@ -1,0 +1,26 @@
+package os;
+
+args: string[];
+
+func setArgs(stream buffer<i8>, argc int) {
+    arr := string[]{};
+    chars: i8[] = {};
+    count := 0;
+    c: i8;
+    for (i := 0; count < argc; i++) {
+        c = stream[i];
+        switch (c) {
+            case '\0':
+                arr.append(chars->string);
+                chars = {};
+                count++;
+            default:
+                chars.append(c);
+        }
+    }
+    args = arr;
+}
+
+func Args() array<string> {
+    return args.array();
+}

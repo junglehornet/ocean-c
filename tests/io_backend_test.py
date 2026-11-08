@@ -33,8 +33,8 @@ with tempfile.TemporaryDirectory(prefix='ocean io ') as directory:
     program(r'''
 func main() int {
     Print("a"); Println("b"); Println();
-    Println(Sprintf("x{}y{}z", 12, "Q"));
-    Println(Sprintf("a{b\\q\\{c\\\\d"));
+    Println(Sprintf("x{}y{}z", 12, "Q").unwrap());
+    Println(Sprintf("a{b\\q\\{c\\\\d").unwrap());
     Println(Sprint(0, 12345, -987, (-9223372036854775807 - 1)));
     Println(Sprint(7->i32, (-8)->i16, 9->i8, 1.25->f32));
     Println(sprintFloat(1.999, 2), " ", sprintFloat(-0.125, 3));
@@ -47,6 +47,15 @@ func main() int {
     return 0;
 }
 ''', 'ab\n\nx12yQz\na{b\\q{c\\d\n0 12345 -987 -9223372036854775808\n7 -8 9 1.25\n2.00 -0.125\n2.0 1.25 2\n[1 3]\n[1 two true]\n[a b]\n[[1 2] [3]]\n', library=True)
+
+    program(r'''func main() int {
+        Println(Sprint(0->uint, 18446744073709551615->uint));
+        Println(Sprint(18446744073709551615->u64, 4294967295->u32, 65535->u16, 255->u8));
+        Println(Sprint(0->u64, 0->u32, 0->u16, 0->u8));
+        Println(Sprintf("{} {} {} {}", 18446744073709551615->uint, 4294967295->u32, 65535->u16, 255->u8).unwrap());
+        Println(uint[]{0->uint, 18446744073709551615->uint});
+        return 0;
+    }''', '0 18446744073709551615\n18446744073709551615 4294967295 65535 255\n0 0 0 0\n18446744073709551615 4294967295 65535 255\n[0 18446744073709551615]\n', library=True)
 
     program('''func runtime(n int) array<int> {
         values: int[n]; for (i := 0; i < n; i++) values[i] = i + 1;
@@ -61,7 +70,7 @@ func main() int {
         nested: int[2][2] = {{1, 2}, {3, 4}}; Println(nested);
         mixedValues: any[3] = {true, "two", 3}; Println(mixedValues);
         dynamic: int[] = {4, 5}; Println(dynamic.array());
-        Println(Sprintf("{} / {}", false, fixed));
+        Println(Sprintf("{} / {}", false, fixed).unwrap());
         return 0;
     }''', 'true false\n[1 2 3]\n[1 2 3]\n[]\n[]\n[true false]\n[one two]\n[[1 2] [3 4]]\n[true two 3]\n[4 5]\nfalse / [1 2 3]\n', library=True)
 
@@ -76,7 +85,7 @@ func main() int {
         Println(Box<string>{"generic"});
         entries: Entry[] = {entry}; Println(entries);
         fixed: Child[2] = {child, Child{0, false}}; Println(fixed);
-        Println(Sprintf("value={}", child));
+        Println(Sprintf("value={}", child).unwrap());
         if (Sprint(entry) != "{name: Ada, child: {count: 2, active: true}, values: [3 4]}") return 1;
         if (entry.name != "Ada" || entry.child.count != 2 || entry.values[0] != 3) return 2;
         return 0;

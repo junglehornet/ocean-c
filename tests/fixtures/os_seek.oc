@@ -1,0 +1,156 @@
+package os;
+
+// Native seek operations are kept separate from Setpos's scanner invalidation.
+func seekFile(handle int, offset int, origin int) Result<int> {
+    result := -4096;
+    for (;;) {
+        asm x86_64/linux {
+            mov eax, 8
+            mov rdi, ${handle}
+            mov rsi, ${offset}
+            mov rdx, ${origin}
+            syscall
+            mov ${result}, rax
+        }
+        asm aarch64/linux {
+            ldr x0, ${handle}
+            ldr x1, ${offset}
+            ldr x2, ${origin}
+            mov x8, #62
+            svc #0
+            str x0, ${result}
+        }
+        asm riscv64/linux {
+            ld a0, ${handle}
+            ld a1, ${offset}
+            ld a2, ${origin}
+            li a7, 62
+            ecall
+            sd a0, ${result}
+        }
+        asm x86_64/macos {
+            mov eax, 33554631
+            mov rdi, ${handle}
+            mov rsi, ${offset}
+            mov rdx, ${origin}
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${result}, rax
+        }
+        asm aarch64/macos {
+            ldr x0, ${handle}
+            ldr x1, ${offset}
+            ldr x2, ${origin}
+            mov x16, #199
+            svc #128
+            cneg x0, x0, cs
+            str x0, ${result}
+        }
+    asm x86_64/windows {
+        mov r12, ${handle}
+        mov r13, ${offset}
+        mov r14, ${origin}
+        sub rsp, 64
+        mov rcx, r12
+        mov rdx, r13
+        lea r8, [rsp + 56]
+        mov r9d, r14d
+        call SetFilePointerEx
+        test eax, eax
+        jz 1f
+        mov rax, qword ptr [rsp + 56]
+        jmp 2f
+        1: mov rax, -1
+        2:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        ldr x20, ${offset}
+        ldr x21, ${origin}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, x20
+        add x2, sp, #64
+        mov w3, w21
+        bl SetFilePointerEx
+        cbz w0, 1f
+        ldr x22, [sp, #64]
+        b 2f
+        1: mov x22, #-1
+        2:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+        if (result == -4) continue;
+        break;
+    }
+    if (result == -4096) return Result<int>.error("seeking is unsupported on this architecture/platform");
+    if (result < 0) return Result<int>.error("file seek failed");
+    return Result<int>.value(result);
+}
+
+func (file File) Size() Result<int> {
+    if (!file.IsOpen()) return Result<int>.error("file is closed");
+    handle := file.NativeHandle();
+    result := -4096;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        lea rdx, [rsp + 56]
+        call GetFileSizeEx
+        test eax, eax
+        jz 1f
+        mov rax, qword ptr [rsp + 56]
+        jmp 2f
+        1: mov rax, -1
+        2:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        add x1, sp, #64
+        bl GetFileSizeEx
+        cbz w0, 1f
+        ldr x22, [sp, #64]
+        b 2f
+        1: mov x22, #-1
+        2:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+    if (result != -4096) {
+        if (result < 0) return Result<int>.error("file size check failed");
+        return Result<int>.value(result);
+    }
+    saved := seekFile(handle, 0, 1);
+    if (saved == Result<int>.error) return saved;
+    size := seekFile(handle, 0, 2);
+    restored := seekFile(handle, saved.unwrap(), 0);
+    if (restored == Result<int>.error) return restored;
+    return size;
+}

@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include "dynarray.h"
 #include "ast.h"
+#include "builtin_result.h"
+#include <string.h>
 
 #include "c-hashmap/map.h"
 
@@ -23,6 +25,8 @@ typedef struct sourceFile {
 
 struct parseResult {
     size_t nStatements;
+    size_t statementsCapacity;
+    char builtinsPrepared;
     stmt *statements;
 
     char *packageName;
@@ -37,6 +41,7 @@ struct parseResult {
 };
 
 static inline const char *programSource(parseResult *program, const char *filename) {
+    if (filename && !strcmp(filename, OCEAN_BUILTIN_RESULT_FILE)) return oceanBuiltinResultSource();
     if (filename)
         for (size_t i = 0; i < program->nSources; i++) {
             const char *a = program->sources[i].filename, *b = filename;

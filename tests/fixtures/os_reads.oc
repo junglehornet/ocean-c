@@ -1,0 +1,97 @@
+package os;
+
+struct ReadResult { Bytes array<i8>; End bool; }
+
+func (file File) IsBinary() bool {
+    if (!file.IsOpen()) return false;
+    index := file.slot;
+    return files[index].binary;
+}
+
+// Used by scanners to invalidate buffered data after an explicit Setpos.
+func (file File) SeekVersion() int {
+    file.NativeHandle();
+    index := file.slot;
+    return files[index].seekVersion;
+}
+
+func (file File) Read() Result<int> {
+    if (!file.CanRead()) return Result<int>.error("stream is not readable");
+    index := file.slot;
+    if (files[index].readEnded) return panic "read past EOF";
+    read := file.Readchunk(1);
+    if (read == Result<i8[]>.error) return Result<int>.error(read.(Result<i8[]>.error));
+    bytes := read.unwrap();
+    return Result<int>.value(len(bytes) == 0 ? -1 : (bytes[0]->u8)->int);
+}
+
+// Short EOF is a successful ReadResult with an n-slot zero-padded array.
+func (file File) Readn(n int) Result<ReadResult> {
+    if (n < 0) return panic "invalid read size";
+    if (!file.CanRead()) return Result<ReadResult>.error("stream is not readable");
+    result: i8[n];
+    position := 0;
+    for (; position < n;) {
+        count := n - position;
+        if (count > 4096) count = 4096;
+        read := file.Readchunk(count);
+        if (read == Result<i8[]>.error) return Result<ReadResult>.error(read.(Result<i8[]>.error));
+        chunk := read.unwrap();
+        if (len(chunk) == 0) return Result<ReadResult>.value(ReadResult{result, true});
+        for (i := 0; i < len(chunk); i++) result[position + i] = chunk[i];
+        position += len(chunk);
+    }
+    return Result<ReadResult>.value(ReadResult{result, false});
+}
+
+func (file File) Readend() Result<array<i8>> {
+    if (!file.CanRead()) return Result<array<i8>>.error("stream is not readable");
+    bytes := i8[]{};
+    for (;;) {
+        read := file.Readchunk(4096);
+        if (read == Result<i8[]>.error) return Result<array<i8>>.error(read.(Result<i8[]>.error));
+        chunk := read.unwrap();
+        if (len(chunk) == 0) break;
+        for (i := 0; i < len(chunk); i++) bytes.append(chunk[i]);
+    }
+    length := len(bytes);
+    result: i8[length];
+    for (i := 0; i < length; i++) result[i] = bytes[i];
+    return Result<array<i8>>.value(result);
+}
+
+func (file File) Readall() Result<array<i8>> {
+    if (!file.CanRead()) return Result<array<i8>>.error("stream is not readable");
+    handle := file.NativeHandle();
+    saved := seekFile(handle, 0, 1);
+    if (saved == Result<int>.error) return Result<array<i8>>.error(saved.(Result<int>.error));
+    index := file.slot;
+    savedEnd := files[index].readEnded;
+    start := seekFile(handle, 0, 0);
+    if (start == Result<int>.error) return Result<array<i8>>.error(start.(Result<int>.error));
+    bytes := file.Readend();
+    // Restore even if the read failed; do not leave a failed Readall at EOF.
+    restored := seekFile(handle, saved.unwrap(), 0);
+    if (restored == Result<int>.error) {
+        files[index].readEnded = false;
+        if (files[index].seekVersion == 9223372036854775807) return panic "file seek version exhausted";
+        files[index].seekVersion++;
+        return Result<array<i8>>.error("restoring file position: " + restored.(Result<int>.error));
+    }
+    files[index].readEnded = savedEnd;
+    return bytes;
+}
+
+// Bounds and native seek failures deliberately retain their panic contract.
+func (file File) Setpos(position int) {
+    if (position < 0) return panic "file position out of bounds";
+    measured := file.Size();
+    if (measured == Result<int>.error) return panic measured.(Result<int>.error);
+    if (position > measured.unwrap()) return panic "file position out of bounds";
+    moved := seekFile(file.NativeHandle(), position, 0);
+    if (moved == Result<int>.error) return panic moved.(Result<int>.error);
+    index := file.slot;
+    if (files[index].seekVersion == 9223372036854775807) return panic "file seek version exhausted";
+    files[index].seekVersion++;
+    files[index].readEnded = false;
+}

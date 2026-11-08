@@ -6,22 +6,23 @@ func appendNull(oceanString string) string {
 	return oceanString;
 }
 
-func Print(items ...any) {
-	totalString := Sprint(items...);
-	writeStdout(totalString);
+func Print(items ...any) Result<int> {
+    return writeStdout(Sprint(items...));
 }
-
-func Println(items ...any) {
-	Print(items...);
-	writeStdout("\n");
+func Println(items ...any) Result<int> {
+    written := Print(items...);
+    if (written == Result<int>.error) return written;
+    newline := writeStdout("\n");
+    if (newline == Result<int>.error) return newline;
+    return Result<int>.value(written.unwrap() + newline.unwrap());
 }
-
-func Printf(format string, items ...any) {
-	Print(Sprintf(format, items...));
+func Printf(format string, items ...any) Result<int> {
+    formatted := Sprintf(format, items...);
+    if (formatted == Result<string>.error) return Result<int>.error(formatted.(Result<string>.error));
+    return Print(formatted.unwrap());
 }
-
-func Printfln(format string, items ...any) {
-	Printf(format + "\n", items...);
+func Printfln(format string, items ...any) Result<int> {
+    return Printf(format + "\n", items...);
 }
 
 func Sprint(items ...any) string {
@@ -35,7 +36,7 @@ func Sprint(items ...any) string {
 
 // Ccean's Sprintf (and Printf) functions don't use C-style format templates.
 // rather, {} is replaced with a variable
-func Sprintf(format string, items ...any) string {
+func Sprintf(format string, items ...any) Result<string> {
 	str := "";
 	itemsIndex := 0;
 	for (i := 0; i < len(format); i++) {
@@ -48,7 +49,7 @@ func Sprintf(format string, items ...any) string {
 					if (itemsIndex < len(items)) {
 						str += sprintItem(items[itemsIndex++]);
 					} else {
-						return panic "Sprintf() called with not enough variables to insert";
+						return Result<string>.error("Sprintf() called with not enough variables to insert");
 					}
 				} else {
 					str += c;
@@ -67,8 +68,8 @@ func Sprintf(format string, items ...any) string {
 				str += c;
 		}
 	}
-	if (itemsIndex < len(items)) return panic "Sprintf() called with too many variables to insert.";
-	return str;
+	if (itemsIndex < len(items)) return Result<string>.error("Sprintf() called with too many variables to insert.");
+	return Result<string>.value(str);
 }
 
 func isString(item any) bool {
@@ -90,6 +91,14 @@ func sprintItem(item any) string {
 			return sprintInt(item.(i16)->int);
 		case i8:
 			return sprintInt(item.(i8)->int);
+		case uint:
+			return sprintUint(item.(uint));
+		case u32:
+			return sprintUint(item.(u32)->uint);
+		case u16:
+			return sprintUint(item.(u16)->uint);
+		case u8:
+			return sprintUint(item.(u8)->uint);
 		case float:
 			return sprintFloat(item.(float), 2);
 		case f32:
@@ -129,6 +138,17 @@ func digitToChar(x int) i8 {
 	if (x < 0 || x > 9) return panic "digitToChar() called with invalid value (<0 or >9)";
 	c := x->i8;
 	return c + 48;
+}
+
+// Keep arithmetic unsigned so values above INT64_MAX retain their magnitude.
+func sprintUint(x uint) string {
+    str := "";
+    for (;;) {
+        str = digitToChar((x % 10)->int) + str;
+        x /= 10;
+        if (x == 0) break;
+    }
+    return str;
 }
 
 func sprintInt(x int) string {
@@ -266,7 +286,7 @@ func sprintFloat(x float, decimals int) string {
 }
 
 // Write all bytes, retrying interrupted Unix writes and handling partial writes.
-func writeStdout(text string) {
+func writeStdout(text string) Result<int> {
     bytes := text -> i8[];
     offset := 0;
     for (; offset < len(bytes);) {
@@ -368,9 +388,10 @@ func writeStdout(text string) {
             add sp, sp, #80
             str x21, ${written}
         }
-        if (written == -4096) return panic "stdout is unsupported on this architecture/platform";
+        if (written == -4096) return Result<int>.error("stdout is unsupported on this architecture/platform");
         if (written == -4) continue;
-        if (written <= 0 || written > count) return panic "stdout write failed";
+        if (written <= 0 || written > count) return Result<int>.error("stdout write failed");
         offset += written;
     }
+    return Result<int>.value(offset);
 }

@@ -144,7 +144,7 @@ __attribute__((ms_abi,noinline)) int WriteFile(void *handle, const char *p, uint
 ''')
         for text, success in (('abcdef', True), ('!', False)):
             source.write_text(windows_io.replace('package io;', 'package main;') +
-                              f'\nfunc main() {{ Print("{text}"); }}')
+                              f'\nfunc main() {{ Print("{text}").unwrap(); }}')
             result = run([compiler, 'build', '--emit-llvm', str(source), '-o', str(ir)], env)
             assert result.returncode == 0, result.stdout + result.stderr
             for opt in ('-O0', '-O2'):

@@ -1,0 +1,788 @@
+package os;
+
+// Copies share a registry identity, so Close invalidates every copy safely.
+struct File { slot int; generation int; }
+struct fileRecord { handle int; readable bool; writable bool; closed bool; generation int; binary bool; readEnded bool; seekVersion int; }
+files: fileRecord[];
+
+func registerFile(handle int, readable bool, writable bool) File {
+    for (i := 0; i < len(files); i++) {
+        if (files[i].closed && files[i].generation < 9223372036854775807) {
+            generation := files[i].generation + 1;
+            files[i] = fileRecord{handle, readable, writable, false, generation, false, false, 0};
+            return File{i, generation};
+        }
+    }
+    files.append(fileRecord{handle, readable, writable, false, 1, false, false, 0});
+    return File{len(files) - 1, 1};
+}
+
+// Adopt an existing descriptor/handle. Close explicitly closes the native handle.
+func FromDescriptor(handle int, readable bool, writable bool) File {
+    if (handle < 0) return panic "invalid file descriptor";
+    return registerFile(handle, readable, writable);
+}
+func (file File) IsOpen() bool {
+    index := file.slot;
+    return index >= 0 && index < len(files) && !files[index].closed && files[index].generation == file.generation;
+}
+func (file File) CanRead() bool {
+    if (!file.IsOpen()) return false;
+    index := file.slot;
+    return files[index].readable;
+}
+func (file File) CanWrite() bool {
+    if (!file.IsOpen()) return false;
+    index := file.slot;
+    return files[index].writable;
+}
+func (file File) NativeHandle() int {
+    if (!file.IsOpen()) return panic "file is closed";
+    index := file.slot;
+    return files[index].handle;
+}
+
+func standardFile(number int, readable bool) Result<File> {
+    result := number;
+    selector := -10 - number;
+    asm x86_64/windows {
+        mov r12, ${selector}
+        sub rsp, 64
+        mov ecx, r12d
+        call GetStdHandle
+        test rax, rax
+        jnz 1f
+        mov rax, -1
+        1:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${selector}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov w0, w19
+        bl GetStdHandle
+        cmp x0, #0
+        mov x22, #-1
+        csel x22, x0, x22, ne
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+    if (result == -1) return Result<File>.error("standard stream is unavailable");
+    return Result<File>.value(registerFile(result, readable, !readable));
+}
+standardInput: File;
+standardOutput: File;
+standardError: File;
+inputInitialized := false;
+outputInitialized := false;
+errorInitialized := false;
+func Stdin() Result<File> {
+    if (!inputInitialized) {
+        opened := standardFile(0, true);
+        if (opened == Result<File>.error) return opened;
+        standardInput = opened.unwrap(); inputInitialized = true;
+    }
+    if (!standardInput.IsOpen()) return Result<File>.error("standard stream is closed");
+    return Result<File>.value(standardInput);
+}
+func Stdout() Result<File> {
+    if (!outputInitialized) {
+        opened := standardFile(1, false);
+        if (opened == Result<File>.error) return opened;
+        standardOutput = opened.unwrap(); outputInitialized = true;
+    }
+    if (!standardOutput.IsOpen()) return Result<File>.error("standard stream is closed");
+    return Result<File>.value(standardOutput);
+}
+func Stderr() Result<File> {
+    if (!errorInitialized) {
+        opened := standardFile(2, false);
+        if (opened == Result<File>.error) return opened;
+        standardError = opened.unwrap(); errorInitialized = true;
+    }
+    if (!standardError.IsOpen()) return Result<File>.error("standard stream is closed");
+    return Result<File>.value(standardError);
+}
+
+// Read at most n bytes. Empty success means EOF; native failures are errors.
+func (file File) Readchunk(n int) Result<i8[]> {
+    if (n < 0 || n > 2147483647) return panic "invalid read size";
+    if (!file.CanRead()) return Result<i8[]>.error("stream is not readable");
+    if (n == 0) return Result<i8[]>.value(i8[]{});
+    bytes := i8[n];
+    data: *void = bytes.data;
+    count := n;
+    handle := file.NativeHandle();
+    result := -4096;
+    for (;;) {
+        asm x86_64/linux {
+            mov eax, 0
+            mov rdi, ${handle}
+            mov rsi, ${data}
+            mov rdx, ${count}
+            syscall
+            mov ${result}, rax
+        }
+        asm aarch64/linux {
+            ldr x0, ${handle}
+            ldr x1, ${data}
+            ldr x2, ${count}
+            mov x8, #63
+            svc #0
+            str x0, ${result}
+        }
+        asm riscv64/linux {
+            ld a0, ${handle}
+            ld a1, ${data}
+            ld a2, ${count}
+            li a7, 63
+            ecall
+            sd a0, ${result}
+        }
+        asm x86_64/macos {
+            mov eax, 33554435
+            mov rdi, ${handle}
+            mov rsi, ${data}
+            mov rdx, ${count}
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${result}, rax
+        }
+        asm aarch64/macos {
+            ldr x0, ${handle}
+            ldr x1, ${data}
+            ldr x2, ${count}
+            mov x16, #3
+            svc #128
+            cneg x0, x0, cs
+            str x0, ${result}
+        }
+    asm x86_64/windows {
+        mov r12, ${handle}
+        mov r13, ${data}
+        mov r14, ${count}
+        sub rsp, 64
+        mov rcx, r12
+        mov rdx, r13
+        mov r8d, r14d
+        lea r9, [rsp + 56]
+        mov dword ptr [rsp + 56], 0
+        mov qword ptr [rsp + 32], 0
+        call ReadFile
+        test eax, eax
+        jnz 1f
+        call GetLastError
+        cmp eax, 234
+        je 1f
+        cmp eax, 109
+        je 2f
+        cmp eax, 233
+        je 2f
+        cmp eax, 38
+        je 2f
+        mov rax, -1
+        jmp 3f
+        1: mov eax, dword ptr [rsp + 56]
+        jmp 3f
+        2: xor eax, eax
+        3:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        ldr x20, ${data}
+        ldr x21, ${count}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, x20
+        mov w2, w21
+        add x3, sp, #64
+        str wzr, [x3]
+        mov x4, #0
+        bl ReadFile
+        cbnz w0, 1f
+        bl GetLastError
+        cmp w0, #234
+        b.eq 1f
+        cmp w0, #109
+        b.eq 2f
+        cmp w0, #233
+        b.eq 2f
+        cmp w0, #38
+        b.eq 2f
+        mov x22, #-1
+        b 3f
+        1: ldr w22, [sp, #64]
+        b 3f
+        2: mov x22, #0
+        3:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+        if (result == -4) continue;
+        break;
+    }
+    if (result == -4096) return Result<i8[]>.error("reading is unsupported on this architecture/platform");
+    if (result < 0 || result > n) return Result<i8[]>.error("stream read failed");
+    index := file.slot;
+    files[index].readEnded = result == 0;
+    output := i8[]{};
+    for (i := 0; i < result; i++) output.append(bytes[i]);
+    return Result<i8[]>.value(output);
+}
+
+struct pollDescriptor { descriptor i32; events i16; returned i16; }
+struct pollTimeout { seconds int; nanoseconds int; }
+
+// Zero means not ready. A positive value is a safe suggested read size.
+// EOF/hangup is also ready, so a subsequent Read can discover EOF without waiting.
+func (file File) PollRead() Result<int> {
+    if (!file.CanRead()) return Result<int>.error("stream is not readable");
+    handle := file.NativeHandle();
+    result := -1;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        call GetFileType
+        and eax, 32767
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        bl GetFileType
+        and x22, x0, #32767
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+    if (result == 1) return Result<int>.value(4096); // regular Windows file
+    if (result == 3) return pipeAvailable(handle);
+    if (result == 2) return consoleAvailable(handle);
+    if (result != -1) return Result<int>.error("unsupported Windows input handle");
+    entry := pollDescriptor{handle->i32, 1->i16, 0->i16};
+    zeroTime := pollTimeout{0, 0};
+    data: *void = &entry;
+    timeout: *void = &zeroTime;
+    result = -4096;
+    for (;;) {
+        asm x86_64/linux {
+            mov eax, 7
+            mov rdi, ${data}
+            mov esi, 1
+            xor edx, edx
+            syscall
+            mov ${result}, rax
+        }
+        asm aarch64/linux {
+            ldr x0, ${data}
+            mov x1, #1
+            ldr x2, ${timeout}
+            mov x3, #0
+            mov x4, #8
+            mov x8, #73
+            svc #0
+            str x0, ${result}
+        }
+        asm riscv64/linux {
+            ld a0, ${data}
+            li a1, 1
+            ld a2, ${timeout}
+            li a3, 0
+            li a4, 8
+            li a7, 73
+            ecall
+            sd a0, ${result}
+        }
+        asm x86_64/macos {
+            mov eax, 33554662
+            mov rdi, ${data}
+            mov esi, 1
+            xor edx, edx
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${result}, rax
+        }
+        asm aarch64/macos {
+            ldr x0, ${data}
+            mov x1, #1
+            mov x2, #0
+            mov x16, #230
+            svc #128
+            cneg x0, x0, cs
+            str x0, ${result}
+        }
+
+        if (result == -4) continue;
+        break;
+    }
+    if (result == -4096) return Result<int>.error("polling is unsupported on this architecture/platform");
+    if (result < 0 || (entry.returned & 32) != 0) return Result<int>.error("stream readiness check failed");
+    return Result<int>.value(result > 0 ? 4096 : 0);
+}
+
+func pipeAvailable(handle int) Result<int> {
+    result := -1;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        xor edx, edx
+        xor r8d, r8d
+        xor r9d, r9d
+        lea rax, [rsp + 56]
+        mov dword ptr [rax], 0
+        mov qword ptr [rsp + 32], rax
+        mov qword ptr [rsp + 40], 0
+        call PeekNamedPipe
+        test eax, eax
+        jnz 1f
+        call GetLastError
+        cmp eax, 109
+        je 2f
+        cmp eax, 233
+        je 2f
+        mov rax, -1
+        jmp 3f
+        1: mov eax, dword ptr [rsp + 56]
+        jmp 3f
+        2: mov eax, 1
+        3:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, #0
+        mov x2, #0
+        mov x3, #0
+        add x4, sp, #64
+        str wzr, [x4]
+        mov x5, #0
+        bl PeekNamedPipe
+        cbnz w0, 1f
+        bl GetLastError
+        cmp w0, #109
+        b.eq 2f
+        cmp w0, #233
+        b.eq 2f
+        mov x22, #-1
+        b 3f
+        1: ldr w22, [sp, #64]
+        b 3f
+        2: mov x22, #1
+        3:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+    if (result < 0) return Result<int>.error("pipe readiness check failed");
+    return Result<int>.value(result > 4096 ? 4096 : result);
+}
+
+func consoleEventCount(handle int) Result<int> {
+    result := -1;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        lea rdx, [rsp + 56]
+        mov dword ptr [rdx], 0
+        call GetNumberOfConsoleInputEvents
+        test eax, eax
+        jz 1f
+        mov eax, dword ptr [rsp + 56]
+        jmp 2f
+        1: mov rax, -1
+        2:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        add x1, sp, #64
+        str wzr, [x1]
+        bl GetNumberOfConsoleInputEvents
+        cbz w0, 1f
+        ldr w22, [sp, #64]
+        b 2f
+        1: mov x22, #-1
+        2:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+    if (result < 0) return Result<int>.error("console readiness check failed");
+    return Result<int>.value(result);
+}
+
+func peekConsole(handle int, data *void, count int) Result<int> {
+    result := -1;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        mov r13, ${data}
+        mov r14, ${count}
+        sub rsp, 64
+        mov rcx, r12
+        mov rdx, r13
+        mov r8d, r14d
+        lea r9, [rsp + 56]
+        mov dword ptr [r9], 0
+        call PeekConsoleInputW
+        test eax, eax
+        jz 1f
+        mov eax, dword ptr [rsp + 56]
+        jmp 2f
+        1: mov rax, -1
+        2:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        ldr x20, ${data}
+        ldr x21, ${count}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        mov x1, x20
+        mov w2, w21
+        add x3, sp, #64
+        str wzr, [x3]
+        bl PeekConsoleInputW
+        cbz w0, 1f
+        ldr w22, [sp, #64]
+        b 2f
+        1: mov x22, #-1
+        2:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+
+    if (result < 0) return Result<int>.error("console readiness check failed");
+    return Result<int>.value(result);
+}
+
+func consoleMode(handle int) Result<int> {
+    result := -1;
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        lea rdx, [rsp + 56]
+        mov dword ptr [rdx], 0
+        call GetConsoleMode
+        test eax, eax
+        jz 1f
+        mov eax, dword ptr [rsp + 56]
+        jmp 2f
+        1: mov rax, -1
+        2:
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        add x1, sp, #64
+        str wzr, [x1]
+        bl GetConsoleMode
+        cbz w0, 1f
+        ldr w22, [sp, #64]
+        b 2f
+        1: mov x22, #-1
+        2:
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+    if (result < 0) return Result<int>.error("unsupported character input handle");
+    return Result<int>.value(result);
+}
+
+func consoleAvailable(handle int) Result<int> {
+    mode := consoleMode(handle);
+    if (mode == Result<int>.error) return mode;
+    lineMode := (mode.unwrap() & 2) != 0;
+    events := consoleEventCount(handle);
+    if (events == Result<int>.error) return events;
+    count := events.unwrap();
+    if (count == 0) return Result<int>.value(0);
+    if (count > 107374182) return Result<int>.error("console input queue is too large");
+    records := i8[count * 20]; // Windows INPUT_RECORD is 20 bytes.
+    data: *void = records.data;
+    peeked := peekConsole(handle, data, count);
+    if (peeked == Result<int>.error) return peeked;
+    found := peeked.unwrap();
+    capacity := 0;
+    for (i := 0; i < found; i++) {
+        offset := i * 20;
+        if (records[offset] != 1 || records[offset + 1] != 0 || records[offset + 4] == 0) continue;
+        repeat := (records[offset + 8]->u8)->int + ((records[offset + 9]->u8)->int) * 256;
+        capacity += repeat * 4;
+        if (capacity > 2147483647) return Result<int>.error("console input line is too large");
+        character := (records[offset + 14]->u8)->int + ((records[offset + 15]->u8)->int) * 256;
+        // Cooked console reads finish on Enter, not on arbitrary control keys.
+        if (!lineMode && character != 0) return Result<int>.value(1);
+        if (lineMode && character == 13) return Result<int>.value(capacity);
+    }
+    return Result<int>.value(0);
+}
+
+// Write all bytes, retrying interrupted Unix writes and handling partial writes.
+func (file File) Write(text string) Result<int> {
+    if (!file.CanWrite()) return Result<int>.error("stream is not writable");
+    handle := file.NativeHandle();
+    bytes := text -> i8[];
+    offset := 0;
+    for (; offset < len(bytes);) {
+        data: *void = &bytes[offset];
+        count := len(bytes) - offset;
+        if (count > 2147483647) count = 2147483647;
+        written := -4096;
+        asm x86_64/linux {
+            mov eax, 1
+            mov rdi, ${handle}
+            mov rsi, ${data}
+            mov rdx, ${count}
+            syscall
+            mov ${written}, rax
+        }
+        asm aarch64/linux {
+            ldr x0, ${handle}
+            ldr x1, ${data}
+            ldr x2, ${count}
+            mov x8, #64
+            svc #0
+            str x0, ${written}
+        }
+        asm riscv64/linux {
+            ld a0, ${handle}
+            ld a1, ${data}
+            ld a2, ${count}
+            li a7, 64
+            ecall
+            sd a0, ${written}
+        }
+        asm x86_64/macos {
+            mov eax, 0x2000004
+            mov rdi, ${handle}
+            mov rsi, ${data}
+            mov rdx, ${count}
+            syscall
+            jnc 1f
+            neg rax
+            1:
+            mov ${written}, rax
+        }
+        asm aarch64/macos {
+            ldr x0, ${handle}
+            ldr x1, ${data}
+            ldr x2, ${count}
+            mov x16, #4
+            svc #0x80
+            cneg x0, x0, cs
+            str x0, ${written}
+        }
+        asm x86_64/windows {
+            mov r12, ${data}
+            mov r13, ${count}
+            mov r14, ${handle}
+            sub rsp, 48
+            mov rcx, r14
+            mov rdx, r12
+            mov r8d, r13d
+            lea r9, [rsp + 40]
+            mov dword ptr [rsp + 40], 0
+            mov qword ptr [rsp + 32], 0
+            call WriteFile
+            test eax, eax
+            jz 1f
+            mov eax, dword ptr [rsp + 40]
+            jmp 2f
+            1: mov rax, -1
+            2:
+            add rsp, 48
+            mov ${written}, rax
+        }
+        asm aarch64/windows {
+            ldr x19, ${data}
+            ldr x20, ${count}
+            ldr x23, ${handle}
+            sub sp, sp, #80
+            // Native calls may overwrite registers holding operand addresses.
+            stp x9, x10, [sp]
+            stp x11, x12, [sp, #16]
+            stp x13, x14, [sp, #32]
+            str x15, [sp, #48]
+            mov x0, x23
+            mov x1, x19
+            mov w2, w20
+            add x3, sp, #64
+            str wzr, [x3]
+            mov x4, #0
+            bl WriteFile
+            ldr w21, [sp, #64]
+            cmp w0, #0
+            mov x22, #-1
+            csel x21, x21, x22, ne
+            ldp x9, x10, [sp]
+            ldp x11, x12, [sp, #16]
+            ldp x13, x14, [sp, #32]
+            ldr x15, [sp, #48]
+            add sp, sp, #80
+            str x21, ${written}
+        }
+        if (written == -4096) return Result<int>.error("writing is unsupported on this architecture/platform");
+        if (written == -4) continue;
+        if (written <= 0 || written > count) return Result<int>.error("stream write failed");
+        offset += written;
+        index := file.slot; files[index].readEnded = false;
+    }
+    return Result<int>.value(offset);
+}
+
+func (file File) Close() {
+    if (!file.IsOpen()) return;
+    handle := file.NativeHandle();
+    index := file.slot;
+    files[index].closed = true;
+    result := -4096;
+    asm x86_64/linux {
+        mov eax, 3
+        mov rdi, ${handle}
+        syscall
+        mov ${result}, rax
+    }
+    asm aarch64/linux {
+        ldr x0, ${handle}
+        mov x8, #57
+        svc #0
+        str x0, ${result}
+    }
+    asm riscv64/linux {
+        ld a0, ${handle}
+        li a7, 57
+        ecall
+        sd a0, ${result}
+    }
+    asm x86_64/macos {
+        mov eax, 33554438
+        mov rdi, ${handle}
+        syscall
+        jnc 1f
+        neg rax
+        1:
+        mov ${result}, rax
+    }
+    asm aarch64/macos {
+        ldr x0, ${handle}
+        mov x16, #6
+        svc #128
+        cneg x0, x0, cs
+        str x0, ${result}
+    }
+    asm x86_64/windows {
+        mov r12, ${handle}
+        sub rsp, 64
+        mov rcx, r12
+        call CloseHandle
+        test eax, eax
+        setz al
+        movzx eax, al
+        neg rax
+        add rsp, 64
+        mov ${result}, rax
+    }
+    asm aarch64/windows {
+        ldr x19, ${handle}
+        sub sp, sp, #80
+        stp x9, x10, [sp]
+        stp x11, x12, [sp, #16]
+        stp x13, x14, [sp, #32]
+        str x15, [sp, #48]
+        mov x0, x19
+        bl CloseHandle
+        cmp w0, #0
+        cset x22, eq
+        neg x22, x22
+        ldp x9, x10, [sp]
+        ldp x11, x12, [sp, #16]
+        ldp x13, x14, [sp, #32]
+        ldr x15, [sp, #48]
+        add sp, sp, #80
+        str x22, ${result}
+    }
+    if (result == -4096) return panic "closing is unsupported on this architecture/platform";
+    if (result < 0) return panic "file close failed";
+}

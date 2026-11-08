@@ -128,6 +128,7 @@ struct stmt_enum {
     struct stmt_struct *payloads;
     struct stmt_struct storage; // Private {variant tag, boxed payload} representation.
     char prepared;
+    char isBuiltin;
 };
 
 struct stmt_branch {
@@ -198,6 +199,7 @@ struct stmt_func {
     typeTokens *paramTypeNames;
     char isVariadic; // Only the last parameter may be variadic.
     char isExtern;
+    char isBuiltin;
     const char *displayName; // Unqualified source name for diagnostics.
     const char *externalName; // Original C symbol when package names are qualified.
 
