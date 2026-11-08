@@ -845,3 +845,10 @@ and shared captures, recursive closures, generic specializations, per-iteration
 locals/range bindings, struct/array/any storage, deferred recovery, empty callable
 panics, lexical types, and callbacks crossing package boundaries.
 Run `ctest -R "closure_test|defer_test|panic_test" --output-on-failure` after building.
+
+## Value equality and string ordering
+
+`equality_test.py` checks struct/array/buffer/enum/closure equality, boxed dispatch,
+unconstrained generic searches, nested owned values, numeric edge cases, operand
+side effects, and lexicographic string ordering at `-O0` and `-O2`.
+Run `ctest -R "equality_test|type_lists_test|backend_test" --output-on-failure` after building.

@@ -89,6 +89,10 @@ static Value localSlot(Backend *b, Kind kind, const char *name) {
 static Value closureValue(Backend *b, struct stmt_func *function, MethodInstance *method, int adapter) {
     Kind kind = closureKind(b, function);
     if (kind == BAD) return value(b, BAD, "0");
+    if (adapter)
+        for (ClosureInstance *existing = b->closures; existing; existing = existing->next)
+            if (existing->adapter && existing->function == function && existing->method == method && existing->kind == kind)
+                return value(b, kind, "{ ptr @__ocean.closure.%u, ptr null }", existing->id);
     ClosureInstance *instance = checked(sizeof(*instance));
     instance->function = function; instance->kind = kind; instance->id = ++b->nClosures;
     instance->adapter = adapter; instance->method = method;

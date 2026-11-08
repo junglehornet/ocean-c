@@ -1670,8 +1670,30 @@ static enum binaryExprType baseOperation(enum binaryExprType operation) {
                ? operations[operation - EXPR_ADD_EQUALS]
                : operation;
 }
+// Equality is a universal capability, including unconstrained type parameters.
+// Concrete aggregates retain nominal identity; collection extents are values.
+static int equalityCompatible(Type *a, Type *b) {
+    if (a == &nullValue || b == &nullValue) return compatibleTypes(a, b) || compatibleTypes(b, a);
+    if (voidPointer(a)) return compatible(a, b);
+    if (voidPointer(b)) return compatible(b, a);
+    if (a == &unknown || b == &unknown || a->abstractParameter || b->abstractParameter ||
+        canonical(a) == &any || canonical(b) == &any || a->interface || b->interface ||
+        typeSetSpan(a).nTokens || typeSetSpan(b).nTokens) return 1;
+    if (definedType(a) || definedType(b)) return compatibleTypes(a, b);
+    int leftCollection = !strcmp(a->name, "dynamic-array") || !strcmp(a->name, "fixed-array");
+    int rightCollection = !strcmp(b->name, "dynamic-array") || !strcmp(b->name, "fixed-array");
+    if (leftCollection && rightCollection) {
+        if ((!strcmp(a->element->name, "dynamic-array") || !strcmp(a->element->name, "fixed-array")) &&
+            (!strcmp(b->element->name, "dynamic-array") || !strcmp(b->element->name, "fixed-array")))
+            return equalityCompatible(a->element, b->element);
+        return identicalTypes(a->element, b->element);
+    }
+    return compatibleTypes(a, b) || compatibleTypes(b, a);
+}
+
 static Type *operatorResult(Context *c, enum binaryExprType op, Type *a, Type *b, unsigned depth) {
     if (depth > 32) return NULL;
+    if (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) return &boolean;
     typeTokens list = typeSetSpan(a);
     if (list.nTokens) {
         Type *result = NULL;
@@ -1732,7 +1754,7 @@ static Type *operatorResult(Context *c, enum binaryExprType op, Type *a, Type *b
         return &boolean;
     if (representation(a)->immutableString && representation(b)->immutableString) {
         if (op == EXPR_ADD) return &string;
-        if (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) return &boolean;
+        if (op >= EXPR_EQUALITY && op <= EXPR_GREATER_EQUALS) return &boolean;
     }
     if (op == EXPR_ADD && a->dynamicArray && b->dynamicArray && matchesTypeConstraint(a, b) &&
         matchesTypeConstraint(b, a))
@@ -2249,6 +2271,26 @@ static Type *expression(Context *c, expr *e) {
             typeIntegerLiteral(b, &v->left);
             a = b;
         }
+        if (v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) {
+            if (a->enumeration || b->enumeration) {
+                if (a->enumeration && b->enumeration) {
+                    if (a->enumeration != b->enumeration) error(c, at, "cannot compare variants from different enum types");
+                    if (a->enumeration == b->enumeration && a->nArguments && b->nArguments && !compatibleTypes(a, b))
+                        error(c, at, "cannot compare different enum specializations");
+                    if (a->enumMember || b->enumMember) {
+                        v->left = a->enumMember ? enumInteger(a->enumMember - 1, at) : enumExpr(ENUM_TAG, a->enumeration, 0, v->left, at);
+                        v->right = b->enumMember ? enumInteger(b->enumMember - 1, at) : enumExpr(ENUM_TAG, b->enumeration, 0, v->right, at);
+                    }
+                    return &boolean;
+                }
+            }
+            int au, bu;
+            int numericPair = integerShape(a, &au) && integerShape(b, &bu);
+            if (numericPair && au != bu && (au ? integerShape(a, &au) : integerShape(b, &bu)) == 64)
+                error(c, at, "mixed signed and unsigned integers require an explicit -> cast");
+            else if (!numericPair && !equalityCompatible(a, b)) check(c, a, b, at);
+            return &boolean;
+        }
         int collectionAddition = (v->operation == EXPR_ADD || v->operation == EXPR_ADD_EQUALS) &&
             (a->dynamicArray || b->dynamicArray || !strcmp(a->name,"fixed-array") || !strcmp(b->name,"fixed-array"));
         if (v->operation != EXPR_ASSIGNMENT && v->operation != EXPR_COMMA && !collectionAddition &&
@@ -2287,15 +2329,7 @@ static Type *expression(Context *c, expr *e) {
             else error(c, at, "mixed signed and unsigned integers require an explicit -> cast");
         }
         if (recreated) recreated->freed = 0;
-        if ((v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) && (a->enumeration || b->enumeration)) {
-            if (a->enumeration != b->enumeration) error(c, at, "cannot compare variants from different enum types");
-            if (a->enumeration == b->enumeration && a->nArguments && b->nArguments && !compatibleTypes(a, b))
-                error(c, at, "cannot compare different enum specializations");
-            if (!a->enumMember && !b->enumMember) error(c, at, "enum comparison requires a variant selector");
-            v->left = a->enumMember ? enumInteger(a->enumMember - 1, at) : enumExpr(ENUM_TAG, a->enumeration, 0, v->left, at);
-            v->right = b->enumMember ? enumInteger(b->enumMember - 1, at) : enumExpr(ENUM_TAG, b->enumeration, 0, v->right, at);
-            return &boolean;
-        }
+
 
         if (v->operation == EXPR_COMMA)
             return b;

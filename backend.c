@@ -138,6 +138,11 @@ typedef struct JumpContext {
     JumpSite *sites;
     JumpAllocation *allocations;
 } JumpContext;
+typedef struct EqualityKind {
+    Kind left, right;
+    int emitted;
+    struct EqualityKind *next;
+} EqualityKind;
 typedef struct AnyType {
     Kind kind;
     struct AnyType *next;
@@ -168,6 +173,8 @@ typedef struct OperandText {
 typedef struct {
     OperandText *operands;
     AnyType *anyTypes;
+    EqualityKind *equalities;
+    int boxedEqualityUsed;
     TypeConstraint *constraints;
     unsigned nConstraints;
     int arrayViewUsed, homogeneousUsed;
@@ -314,6 +321,8 @@ static Value value(Backend *b, Kind k, const char *fmt, ...) {
     return (Value){.kind = k, .operand = ownOperand(b, text)};
 }
 static Value temp(Backend *b, Kind k) { return value(b, k, "%%v%u", ++b->next); }
+static Value aggregateEquality(Backend *, Value, Value);
+static Value boxedEquality(Backend *, enum binaryExprType, Value, Value);
 static Value specializedClosureValue(Backend *, expr *, int);
 static Kind closureKind(Backend *, struct stmt_func *);
 static Value closureParts(Backend *, Value, int);
@@ -3383,7 +3392,7 @@ static int runtimeOperator(Backend *b, enum binaryExprType op, Kind a, Kind c) {
     if (a == BOOL && c == BOOL)
         return op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS || op == EXPR_XOR;
     return a == stringKind(b) && c == a &&
-           (op == EXPR_ADD || op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS);
+           (op == EXPR_ADD || comparison);
 }
 typedef struct {
     Kind *items;
@@ -3453,6 +3462,7 @@ static Value boxedBinary(Backend *b, enum binaryExprType op, Value a, Value c, t
         }
         return result;
     }
+    if (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) return boxedEquality(b, op, a, c);
     Kind fallback[] = {INT, I8, I16, I32, UINT, U8, U16, U32, FLOAT, F32, BOOL, stringKind(b)};
     OperatorKinds left = {0}, right = {0};
     if (a.kind == SCALAR_ANY && leftTypes.nTokens) operatorKinds(b, leftTypes, &left, 0);
@@ -3542,7 +3552,10 @@ static Value boxedUnary(Backend *b, enum unaryExprType op, Value input, typeToke
     return load(b, result);
 }
 
+#include "backend_equality.inc"
 static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
+    if (representationKind(b, a.kind) == SCALAR_ANY) a.kind = SCALAR_ANY;
+    if (representationKind(b, c.kind) == SCALAR_ANY) c.kind = SCALAR_ANY;
     if (op == EXPR_ADD) {
         Kind result = arrayAdditionKind(b, a.kind, c.kind);
         if (result != BAD) return addArrayValues(b, a, c, result);
@@ -3571,32 +3584,27 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         return result;
     }
     BufferKind *rightArray = bufferKind(b, c.kind);
-    if ((op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) &&
-        array && array->shape == 4 && array->element == I8 && rightArray && rightArray->shape == 4 && rightArray->element == I8) {
-        Value leftLength = arrayBytes(b, a), rightLength = arrayBytes(b, c);
-        Value sameLength = temp(b, BOOL), result = slot(b, BOOL);
-        rawStore(b, result, value(b, BOOL, "false"));
-        fprintf(b->body, "  %s = icmp eq i64 %s, %s\n", sameLength.operand,
-                leftLength.operand, rightLength.operand);
-        unsigned compare = ++b->label, end = ++b->label;
-        branch(b, sameLength, compare, end);
-        label(b, compare);
-        Value left = arrayData(b, a), right = arrayData(b, c), compared = temp(b, I32);
-        fprintf(b->body, "  %s = call i32 @\"\\01memcmp\"(ptr %s, ptr %s, i64 %s)\n",
-                compared.operand, left.operand, right.operand, leftLength.operand);
-        Value equal = temp(b, BOOL);
-        fprintf(b->body, "  %s = icmp eq i32 %s, 0\n", equal.operand, compared.operand);
-        rawStore(b, result, equal);
-        jump(b, end);
-        label(b, end);
-        b->stringComparisonUsed = 1;
-        Value answer = load(b, result);
-        if (op == EXPR_NOT_EQUALS) {
-            Value inverted = temp(b, BOOL);
-            fprintf(b->body, "  %s = xor i1 %s, true\n", inverted.operand, answer.operand);
-            answer = inverted;
+    if (array && array->shape == 4 && array->element == I8 && rightArray && rightArray->shape == 4 && rightArray->element == I8 &&
+        ((op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) ||
+         (array->immutableString && rightArray->immutableString && op >= EXPR_LESS_THAN && op <= EXPR_GREATER_EQUALS)))
+        return stringComparison(b, op, a, c);
+    if (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) {
+        if (a.kind == RAW_POINTER || (array && array->shape == 3)) {
+            if (a.kind != c.kind) return value(b, BOOL, "%d", op == EXPR_NOT_EQUALS);
+            Value result = temp(b, BOOL);
+            fprintf(b->body, "  %s = icmp %s ptr %s, %s\n", result.operand,
+                    op == EXPR_EQUALITY ? "eq" : "ne", a.operand, c.operand);
+            return result;
         }
-        return answer;
+        if ((array && (array->shape == 4 || array->shape == 5 || array->shape == 2 || array->shape == 17 || !array->shape)) ||
+            (rightArray && (rightArray->shape == 4 || rightArray->shape == 5 || rightArray->shape == 2 || rightArray->shape == 17 || !rightArray->shape))) {
+            Value result = aggregateEquality(b, a, c);
+            if (op == EXPR_NOT_EQUALS) {
+                Value inverted = temp(b, BOOL);
+                fprintf(b->body, "  %s = xor i1 %s, true\n", inverted.operand, result.operand); result = inverted;
+            }
+            return result;
+        }
     }
     if (integral(b, a.kind) && integral(b, c.kind) && a.kind != c.kind) {
         Kind common = commonIntegerKind(b, a.kind, c.kind);
@@ -3608,6 +3616,8 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         Kind common = a.kind == FLOAT || c.kind == FLOAT ? FLOAT : F32;
         a = convert(b, a, common); c = convert(b, c, common);
     }
+    if (a.kind != c.kind && (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS))
+        return value(b, BOOL, "%d", op == EXPR_NOT_EQUALS);
     if (a.kind != c.kind)
         fail(b, "binary operand types differ");
     const char *instruction = NULL;
@@ -4407,6 +4417,9 @@ static Value expressionImpl(Backend *b, expr *e) {
             label(b, end);
             return load(b, dest);
         }
+        if ((v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) && ownsArrays(b, a.kind) &&
+            v->right.type != EXPR_TYPE_IDENTIFIER && v->right.type != EXPR_TYPE_LITERAL)
+            a = copyValue(b, a, 0);
         if (v->operation == EXPR_ADD &&
             arrayAdditionKind(b, a.kind, expressionKind(b, &v->right)) != BAD)
             a = copyValue(b, a, 0); // Snapshot before RHS side effects.
@@ -5993,12 +6006,18 @@ static void emitAnyRuntime(Backend *b) {
     b->returnTransportUsed = 1;
     b->nullChecksUsed = 1;
     for (;;) {
-        AnyType *entry = NULL;
-        for (AnyType *t = b->anyTypes; t; t = t->next) if (!t->emitted) { entry = t; break; }
-        if (!entry) break;
-        entry->emitted = 1;
-        emitAnyType(b, entry->kind);
+        for (;;) {
+            AnyType *entry = NULL;
+            for (AnyType *type = b->anyTypes; type; type = type->next) if (!type->emitted) { entry = type; break; }
+            if (!entry) break;
+            entry->emitted = 1; emitAnyType(b, entry->kind);
+        }
+        prepareEqualityHelpers(b);
+        AnyType *pending = b->anyTypes;
+        while (pending && pending->emitted) pending = pending->next;
+        if (!pending) break;
     }
+    emitBoxedEquality(b);
     fputs(
         "define internal { ptr, i64 } @__ocean.any.copy({ ptr, i64 } %box) {\nentry:\n"
         "  %tag = extractvalue { ptr, i64 } %box, 0\n"
@@ -6344,6 +6363,7 @@ int emitLLVM(parseResult *program, FILE *output) {
         DynamicArrayTemporary *next = b.dynamicArrayTemps->next;
         free(b.dynamicArrayTemps); b.dynamicArrayTemps = next;
     }
+    while (b.equalities) { EqualityKind *next = b.equalities->next; free(b.equalities); b.equalities = next; }
     while (b.diagnostics) {
         BackendDiagnostic *next = b.diagnostics->next;
         free(b.diagnostics); b.diagnostics = next;

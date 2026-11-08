@@ -338,9 +338,57 @@ release dynamic storage early; recreate it before further use.
 
 Explicit `null` is distinct from a default zero-address pointer. Initialize list
 terminators explicitly: `p: *Node = null;`. `p := null` cannot infer a type.
-Strings compare byte contents with `==`/`!=`. String-to-`i8[]` conversions copy.
+Strings compare byte contents with `==`/`!=` and support unsigned-byte
+lexicographic ordering with `<`, `<=`, `>`, and `>=`. String-to-`i8[]` conversions copy.
 String `.data` in a call is an isolated temporary buffer valid for that call;
 create a named mutable byte array for persistent C access.
+
+`==` and `!=` are available for every generic type parameter, including an
+unconstrained `T`; no comparability constraint is required. Operands still follow
+the language's type-compatibility and pointer/null rules.
+
+Struct equality recursively compares stored fields, ignoring padding. Arrays
+compare lengths and then elements recursively, including nested arrays and
+structs. Capacity and allocation address do not affect array equality. Fixed,
+runtime-sized, and dynamic arrays can compare when their element types match;
+different lengths compare unequal. Fixed raw buffers compare their elements;
+raw buffer pointer views and typed pointers compare addresses, without following
+pointees. Enum value equality compares both the tag and the active payload;
+comparison with a variant selector, such as `event == Event.Key`, tests only
+the tag. Function values compare code/environment identity; copies of a closure
+share identity, while separately created captured environments do not.
+
+Boxed `any` and interface values dispatch equality using their concrete types.
+Matching concrete types compare by the rules above; different types compare
+unequal, except primitive numeric values retain the usual numeric conversions.
+Floating-point equality is numeric even inside aggregates: positive and negative
+zero are equal, and NaN is unequal to itself. Both operands are evaluated once,
+left to right; the left value is preserved if the right expression mutates it.
+
+Strings support all six comparisons: `==`, `!=`, `<`, `<=`, `>`, and `>=`.
+Ordering is lexicographic over unsigned byte values, includes embedded NUL bytes,
+and puts a shorter equal prefix first. It is case-sensitive and does not perform
+locale collation or Unicode normalization. String constraints, including
+`T string`, support ordering. An unconstrained `T` promises equality but does not
+promise ordering or arithmetic.
+
+```ocean
+func indexOf<T>(data array<T>, value T) int {
+    for (i := 0; i < len(data); i++) {
+        if (data[i] == value) return i;
+    }
+    return -1;
+}
+
+struct Person { name string; age int; }
+
+func main() int {
+    people := Person[2]{{"Ada", 36}, {"Lin", 28}};
+    if (indexOf<Person>(people, Person{"Lin", 28}) != 1) return 1;
+    if (!("apple" < "banana" && "a" < "aa")) return 2;
+    return 0;
+}
+```
 
 Struct operator overloading is not supported. Use named receiver methods for
 custom struct operations.
@@ -372,8 +420,9 @@ generic constraints. Smaller numeric value arguments can widen to an accepted
 parameter type, for example an `i8` argument to `multiply<int>`. This does not
 make `i8` satisfy an exact `int | float` generic type constraint.
 
-Operators in generic or interface bodies must be valid for every possible
-operand type, even if the function is unused. `int | float` permits arithmetic
+Equality (`==` and `!=`) is available for every generic type parameter, including
+unconstrained `T`. Other operators in generic or interface bodies must be valid
+for every possible operand type, even if the function is unused. `int | float` permits arithmetic
 and numeric comparisons; integer-only operators require integer-only lists.
 An unconstrained `any` parameter does not promise arithmetic. Operands sharing
 a generic parameter have the same concrete type; ordinary interface parameters

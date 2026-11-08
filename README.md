@@ -928,13 +928,11 @@ func main() {
 
 Direct generic function calls require explicit type arguments (`<int>` or
 `[int]`) and are specialized for each concrete argument list. Generic function
-values and type argument inference remain unsupported. `zero(...)`, like
+values require an explicit specialization; type argument inference remains unsupported. `zero(...)`, like
 `sizeof(...)`, uses builtin syntax; a bare variable named `zero` is allowed.
 
 `zero` requires exactly one type. Values, `any` itself, and runtime-sized
-inline buffers are rejected. Use a fixed buffer or an array instead. Being
-able to obtain a zero value does not make an otherwise incomparable type
-support equality.
+inline buffers are rejected. Use a fixed buffer or an array instead. Equality is available for all value types, independently of default initialization.
 
 
 `zero(Type)` and `sizeof(...)` lower to LLVM constants whenever their storage
@@ -991,10 +989,59 @@ ternaries can also combine a typed pointer with `*void`. Conversion back to a
 concrete pointer still requires an explicit cast, such as `raw -> (*int)`.
 This rule does not convert `**T` to `**void` or change array element types.
 
-Strings support `==` and `!=` by comparing their lengths and complete byte
-contents, including embedded NUL bytes. Independently allocated strings with
-identical contents compare equal. This also applies to `i8[]`, the underlying
-string type; raw pointers still compare addresses.
+Strings compare their complete byte contents, including embedded NUL bytes.
+`<`, `<=`, `>`, and `>=` use unsigned-byte lexicographic order, with a shorter
+equal prefix first. Independently allocated strings with identical contents are
+equal. `i8[]` also supports content equality; raw pointers compare addresses.
+
+### Value equality and generic comparisons
+
+`==` and `!=` are available for every generic type parameter, including an
+unconstrained `T`; no comparability constraint is required. Operands still follow
+the language's type-compatibility and pointer/null rules.
+
+Struct equality recursively compares stored fields, ignoring padding. Arrays
+compare lengths and then elements recursively, including nested arrays and
+structs. Capacity and allocation address do not affect array equality. Fixed,
+runtime-sized, and dynamic arrays can compare when their element types match;
+different lengths compare unequal. Fixed raw buffers compare their elements;
+raw buffer pointer views and typed pointers compare addresses, without following
+pointees. Enum value equality compares both the tag and the active payload;
+comparison with a variant selector, such as `event == Event.Key`, tests only
+the tag. Function values compare code/environment identity; copies of a closure
+share identity, while separately created captured environments do not.
+
+Boxed `any` and interface values dispatch equality using their concrete types.
+Matching concrete types compare by the rules above; different types compare
+unequal, except primitive numeric values retain the usual numeric conversions.
+Floating-point equality is numeric even inside aggregates: positive and negative
+zero are equal, and NaN is unequal to itself. Both operands are evaluated once,
+left to right; the left value is preserved if the right expression mutates it.
+
+Strings support all six comparisons: `==`, `!=`, `<`, `<=`, `>`, and `>=`.
+Ordering is lexicographic over unsigned byte values, includes embedded NUL bytes,
+and puts a shorter equal prefix first. It is case-sensitive and does not perform
+locale collation or Unicode normalization. String constraints, including
+`T string`, support ordering. An unconstrained `T` promises equality but does not
+promise ordering or arithmetic.
+
+```ocean
+func indexOf<T>(data array<T>, value T) int {
+    for (i := 0; i < len(data); i++) {
+        if (data[i] == value) return i;
+    }
+    return -1;
+}
+
+struct Person { name string; age int; }
+
+func main() int {
+    people := Person[2]{{"Ada", 36}, {"Lin", 28}};
+    if (indexOf<Person>(people, Person{"Lin", 28}) != 1) return 1;
+    if (!("apple" < "banana" && "a" < "aa")) return 2;
+    return 0;
+}
+```
 
 Labels and `goto` are supported within a function:
 
@@ -1179,8 +1226,9 @@ generic constraints. Smaller numeric value arguments can widen to an accepted
 parameter type, for example an `i8` argument to `multiply<int>`. This does not
 make `i8` satisfy an exact `int | float` generic type constraint.
 
-Operators in generic or interface bodies must be valid for every possible
-operand type, even if the function is unused. `int | float` permits arithmetic
+Equality (`==` and `!=`) is available for every generic type parameter, including
+unconstrained `T`. Other operators in generic or interface bodies must be valid
+for every possible operand type, even if the function is unused. `int | float` permits arithmetic
 and numeric comparisons; integer-only operators require integer-only lists.
 An unconstrained `any` parameter does not promise arithmetic. Operands sharing
 a generic parameter have the same concrete type; ordinary interface parameters
