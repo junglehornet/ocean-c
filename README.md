@@ -36,6 +36,15 @@ packages default to an executable named after their directory; other packages
 default to `<package>.o`. `-o` overrides the destination. Compiler/linker failures
 preserve previous output and cannot overwrite a source file in the package graph.
 
+Use `ocean build --static . -o application` (or `ocean build -s .`) to
+statically link a main package executable. This passes `-static` to Clang and
+requires a host toolchain with static system libraries (and static libffi when
+needed). Unsupported targets or missing static libraries cause a linker error.
+`ocean run --static .` (or `ocean run -s .`) uses static linking for its
+temporary executable too. The flag cannot be combined with `check`, `--check`,
+or `--emit-llvm`, and is rejected for non-main packages. Cached objects are
+reused and relinked. Use `--` to forward literal `--static` or `-s` program arguments.
+
 `ocean run` builds in a private hidden temporary directory, executes with the
 current directory and inherited standard streams, and deletes the executable
 and temporary directory afterward, including on runtime failures and handled

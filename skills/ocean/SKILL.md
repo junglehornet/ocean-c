@@ -54,6 +54,15 @@ output. Fix errors and inspect warnings before using `run` for behavior checks.
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
 
+Use `ocean build --static . -o application` (or `ocean build -s .`) to
+statically link a main package executable. This passes `-static` to Clang and
+requires a host toolchain with static system libraries (and static libffi when
+needed). Unsupported targets or missing static libraries cause a linker error.
+`ocean run --static .` (or `ocean run -s .`) uses static linking for its
+temporary executable too. The flag cannot be combined with `check`, `--check`,
+or `--emit-llvm`, and is rejected for non-main packages. Cached objects are
+reused and relinked. Use `--` to forward literal `--static` or `-s` program arguments.
+
 `run` executes a private temporary build with the current working directory and
 inherited standard streams, returns the program's status, and cleans up afterward.
 Compiler flags `-o`, `--check`, and `--emit-llvm` are incompatible with `run`;

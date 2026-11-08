@@ -12,13 +12,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Windows stdout assembly calls the stable Win32 API instead of OS-versioned syscalls.
-#if defined(_WIN32)
-#define OCEAN_SYSTEM_LINK_LIBRARIES "-lkernel32",
-#else
-#define OCEAN_SYSTEM_LINK_LIBRARIES
-#endif
-
 typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER } Kind;
 typedef struct {
     Kind kind;
@@ -6156,7 +6149,7 @@ int emitLLVM(parseResult *program, FILE *output) {
 }
 /* Stage beside the destination so a failed compiler/linker preserves old output.
  * exec arguments are passed directly; paths never become shell commands. */
-static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath) {
+static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath, int staticLink) {
     size_t len = strlen(outputPath) + 16;
     char *staged = checked(len);
     snprintf(staged, len, "%s.XXXXXX", outputPath);
@@ -6185,15 +6178,23 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         return 1;
     }
     if (!child) {
-        if (objectPath) {
-            if (needsFFI) execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES "-lffi", (char *)NULL);
-            else execlp("clang", "clang", "-Wno-override-module", objectPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES (char *)NULL);
-        } else if (object)
-            execlp("clang", "clang", "-Wno-override-module", "-c", "-x", "ir", irPath, "-o", staged, (char *)NULL);
-        else if (needsFFI)
-            execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES "-lffi", (char *)NULL);
-        else
-            execlp("clang", "clang", "-Wno-override-module", "-x", "ir", irPath, "-o", staged, OCEAN_SYSTEM_LINK_LIBRARIES (char *)NULL);
+        char *args[16]; size_t n = 0;
+        args[n++] = "clang"; args[n++] = "-Wno-override-module";
+        if (staticLink && !object) args[n++] = "-static";
+        if (objectPath) args[n++] = (char *)objectPath;
+        else {
+            if (object) args[n++] = "-c";
+            args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
+        }
+        args[n++] = "-o"; args[n++] = staged;
+        if (!object) {
+#if defined(_WIN32)
+            args[n++] = "-lkernel32";
+#endif
+            if (needsFFI) args[n++] = "-lffi";
+        }
+        args[n] = NULL;
+        execvp(args[0], args);
         perror("could not execute clang (install clang and add it to PATH)");
         _exit(127);
     }
@@ -6217,14 +6218,17 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
 }
 
 int compileLLVM(const char *irPath, const char *outputPath) {
-    return compileLLVMMode(irPath, outputPath, 0, NULL);
+    return compileLLVMExecutable(irPath, outputPath, 0);
+}
+int compileLLVMExecutable(const char *irPath, const char *outputPath, int staticLink) {
+    return compileLLVMMode(irPath, outputPath, 0, NULL, staticLink);
 }
 int compileLLVMObject(const char *irPath, const char *outputPath) {
-    return compileLLVMMode(irPath, outputPath, 1, NULL);
+    return compileLLVMMode(irPath, outputPath, 1, NULL, 0);
 }
 
 int linkLLVMObject(const char *objectPath, const char *irPath, const char *outputPath) {
-    return compileLLVMMode(irPath, outputPath, 0, objectPath);
+    return compileLLVMMode(irPath, outputPath, 0, objectPath, 0);
 }
 
 int checkBackend(parseResult *program) {
@@ -6242,12 +6246,13 @@ int checkBackend(parseResult *program) {
     unlink(irPath);unlink(output);rmdir(directory);return failed;
 }
 
-int linkLLVMObjects(const char **objects, size_t count, const char *irPath, const char *output, int library) {
+int linkLLVMObjects(const char **objects, size_t count, const char *irPath, const char *output, int library, int staticLink) {
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
     int ffi=0;FILE *ir=fopen(irPath,"r");char line[1024];if(ir){while(fgets(line,sizeof(line),ir))if(strstr(line,"@ffi_type_"))ffi=1;fclose(ir);}
     char **args=checked(sizeof(char*)*(count+12));size_t n=0;
     args[n++]="clang";args[n++]="-Wno-override-module";
+    if(staticLink&&!library)args[n++]="-static";
     if(library){args[n++]="-r";args[n++]="-nostdlib";args[n++]="-no-pie";}
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
     args[n++]="-o";args[n++]=staged;if(ffi&&!library)args[n++]="-lffi";

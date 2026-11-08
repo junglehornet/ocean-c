@@ -6,8 +6,9 @@
 int emitLLVM(parseResult *program, FILE *output);
 /* Validate lowering, LLVM verification, and the normal link contract without publishing output. */
 int checkBackend(parseResult *program);
-int linkLLVMObjects(const char **objects, size_t count, const char *irPath, const char *output, int library);
+int linkLLVMObjects(const char **objects, size_t count, const char *irPath, const char *output, int library, int staticLink);
 /* Uses clang from PATH, with the host target and system linker. */
+int compileLLVMExecutable(const char *irPath, const char *outputPath, int staticLink);
 int compileLLVM(const char *irPath, const char *outputPath);
 int compileLLVMObject(const char *irPath, const char *outputPath);
 /* Always relink cached objects against the current system libraries. */

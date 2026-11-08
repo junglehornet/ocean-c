@@ -198,6 +198,9 @@ if(BUILD_TESTING)
     add_test(NAME new_allocation_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/new_allocation_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(new_allocation_test PROPERTIES TIMEOUT 60)
+    add_test(NAME static_link_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/static_link_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(static_link_test PROPERTIES TIMEOUT 120)
     add_test(NAME build_cache_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_cache_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(build_cache_test PROPERTIES TIMEOUT 120)

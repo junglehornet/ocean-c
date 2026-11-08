@@ -45,9 +45,9 @@ static int sameFile(const char *a, const char *b) {
     struct stat x, y;
     return !stat(a, &x) && !stat(b, &y) && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
 }
-static int nativeBuild(buildCache *cache, parseResult *program, const char *irPath, const char *output, int library) {
+static int nativeBuild(buildCache *cache, parseResult *program, const char *irPath, const char *output, int library, int staticLink) {
     char key[65];
-    if (!buildCacheObjectKey(cache,irPath,key)) return library?compileLLVMObject(irPath,output):compileLLVM(irPath,output);
+    if (!buildCacheObjectKey(cache,irPath,key)) return library?compileLLVMObject(irPath,output):compileLLVMExecutable(irPath,output,staticLink);
     llvmPackages units={0};
     if(splitLLVMPackages(program,irPath,&units))return 1;
     char **objects=calloc(units.count,sizeof(char*));int failed=!objects;
@@ -60,12 +60,12 @@ static int nativeBuild(buildCache *cache, parseResult *program, const char *irPa
             if(!failed&&buildCacheObjectKey(cache,units.paths[i],after)&&!strcmp(key,after))storeBuildCache(cache,key,objects[i]);
         }
     }
-    if(!failed)failed=linkLLVMObjects((const char**)objects,units.count,irPath,output,library);
+    if(!failed)failed=linkLLVMObjects((const char**)objects,units.count,irPath,output,library,staticLink);
     if(objects){for(size_t i=0;i<units.count;i++){if(objects[i]){unlink(objects[i]);free(objects[i]);}}free(objects);}
     freeLLVMPackages(&units);return failed;
 }
 static int packageMain(int argc, char **argv) {
-    int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, argumentStart = argc, programArgumentCount = 0;
+    int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, staticLink = 0, argumentStart = argc, programArgumentCount = 0;
     const char *location = NULL, *output = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--")) {
@@ -78,6 +78,7 @@ static int packageMain(int argc, char **argv) {
             output = argv[i];
         } else if (!strcmp(argv[i], "--emit-llvm")) emit = 1;
         else if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--static") || !strcmp(argv[i], "-s")) staticLink = 1;
         else if (argv[i][0] == '-') {
             if (run && location) { argv[2 + programArgumentCount++] = argv[i]; continue; }
             fprintf(stderr, "ocean: unknown option: %s\n", argv[i]); return 1;
@@ -85,13 +86,17 @@ static int packageMain(int argc, char **argv) {
         else if (run) argv[2 + programArgumentCount++] = argv[i];
         else { fprintf(stderr, "ocean build accepts one package location\n"); return 1; }
     }
-    if ((run && (output || emit || check)) || (check && (output || emit)) || (!run && argumentStart != argc)) {
+    if ((staticLink && (check || emit)) || (run && (output || emit || check)) || (check && (output || emit)) || (!run && argumentStart != argc)) {
         fprintf(stderr, "ocean: incompatible build/run options\n"); return 1;
     }
     if (!location) location = ".";
     packageBuild *build = loadPackage(location);
     parseResult *program = packageProgram(build);
     if (!program) { freePackage(build); return 1; }
+    if (staticLink && program->isLibrary) {
+        fprintf(stderr, "ocean: --static requires a main package executable\n");
+        freePackage(build); return 1;
+    }
     if (run && program->isLibrary) {
         fprintf(stderr, "ocean run: package %s is not main\n", program->packageName);
         freePackage(build); return 1;
@@ -158,7 +163,7 @@ static int packageMain(int argc, char **argv) {
             if (!failed) storeBuildCache(cache, buildCacheIRKey(cache), irPath);
         }
     }
-    if (!failed) failed = emit ? writeIR(irPath, output) : nativeBuild(cache, program, irPath, output, program->isLibrary);
+    if (!failed) failed = emit ? writeIR(irPath, output) : nativeBuild(cache, program, irPath, output, program->isLibrary, staticLink);
     unlink(irPath); closeBuildCache(cache);
     freePackage(build);
     int status = failed ? 1 : 0;
@@ -263,15 +268,15 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "mod")) return moduleMain(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "run"))) {
         if (argc == 3 && !strcmp(argv[2], "--help")) {
-            printf("Usage: ocean build [--check | --emit-llvm] [-o output] [location]\n"
-                   "       ocean run [location] [program-arguments...] [-- program-arguments...]\n");
+            printf("Usage: ocean build [--check | --emit-llvm | --static | -s] [-o output] [location]\n"
+                   "       ocean run [--static | -s] [location] [program-arguments...] [-- program-arguments...]\n");
             return 0;
         }
         return packageMain(argc, argv);
     }
     if (argc == 1 || (argc == 2 && (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")))) {
-        printf("Usage: ocean build [--check | --emit-llvm] [-o output] [location]\n"
-               "       ocean run [location] [program-arguments...] [-- program-arguments...]\n"
+        printf("Usage: ocean build [--check | --emit-llvm | --static | -s] [-o output] [location]\n"
+               "       ocean run [--static | -s] [location] [program-arguments...] [-- program-arguments...]\n"
                "       ocean check [location]\n"
                "       ocean check --lsp\n"
                "       ocean mod init [name]\n"
