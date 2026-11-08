@@ -19,6 +19,7 @@ struct Type {
     Type *element;
     Type *receiver;
     struct stmt_func *function;
+    Type **functionParams, **functionResults; // Resolved while lexical type bindings are live.
     struct stmt_struct *record;
     struct stmt_enum *enumeration;
     typeTokens *enumArguments; // Source spelling retained for constructor monomorphization.
@@ -170,6 +171,25 @@ static int enumArgumentsFit(Type *a, Type *b) {
             !matchesTypeConstraint(b->arguments[i], a->arguments[i])) return 0;
     return 1;
 }
+static Type *parameter(Context *, Type *, typeTokens);
+static int identicalFunctions(Type *a, Type *b) {
+    if (!a->function || !b->function) return 0;
+    struct stmt_func *left = a->function, *right = b->function;
+    if ((left->nTypeParams && a->nArguments != left->nTypeParams) ||
+        (right->nTypeParams && b->nArguments != right->nTypeParams)) return left == right;
+    if (left->nParams != right->nParams || left->nResults != right->nResults ||
+        left->isVariadic != right->isVariadic ||
+        (left->isVariadic && left->isExtern != right->isExtern)) return 0;
+    Context *context = a->context ? a->context : b->context;
+    if (!context) return left == right;
+    for (size_t i = 0; i < left->nParams + left->nResults; i++) {
+        typeTokens l = i < left->nParams ? left->paramTypeNames[i] : left->resultTypes[i-left->nParams];
+        typeTokens r = i < right->nParams ? right->paramTypeNames[i] : right->resultTypes[i-right->nParams];
+        if (!identicalTypes(parameter(context, a, l), parameter(context, b, r))) return 0;
+    }
+    return 1;
+}
+
 static int matchesTypeConstraint(Type *expected, Type *actual) {
     if (typeSetSpan(expected).nTokens)
         return typeSetFits(expected->context, expected, actual, 0);
@@ -275,7 +295,7 @@ static int compatibleTypes(Type *a, Type *b) {
                        (a->bufferSize != 1 || a->count == b->count)))
                     : a->count == b->count);
     if (a->function || b->function)
-        return a->function == b->function;
+        return identicalFunctions(a, b);
     if (a->enumeration || b->enumeration)
         return a->enumeration && a->enumeration == b->enumeration &&
                a->nArguments == b->nArguments && enumArgumentsFit(a, b);
@@ -345,6 +365,18 @@ static Type *typeOf(Context *c, typeTokens span) {
     if (!span.nTokens)
         return &unknown;
     token t = span.tokens[0];
+    if (t.type == FUNC) {
+        struct stmt_func *signature = parseFunctionType(span);
+        if (!signature) { error(c, t, "invalid function type"); return &unknown; }
+        Type *result = allocate(c, sizeof(*result));
+        result->name = "function"; result->function = signature; result->context = c;
+        // Resolve now so malformed and unresolved nested signatures are diagnosed.
+        result->functionParams = allocate(c, sizeof(Type *) * (signature->nParams + 1));
+        result->functionResults = allocate(c, sizeof(Type *) * (signature->nResults + 1));
+        for (size_t i = 0; i < signature->nParams; i++) result->functionParams[i] = typeOf(c, signature->paramTypeNames[i]);
+        for (size_t i = 0; i < signature->nResults; i++) result->functionResults[i] = typeOf(c, signature->resultTypes[i]);
+        return result;
+    }
     if (t.type == TILDE || constraintTermEnd(span, 0) < span.nTokens) {
         Type *list = allocate(c, sizeof(*list));
         list->name = "type-list"; list->typeList = 1;
@@ -1228,6 +1260,14 @@ static void function(Context *c, struct stmt_func *f) {
     c->scope = scope.parent;
 }
 static Type *parameter(Context *c, Type *fn, typeTokens span) {
+    if (fn->functionParams && fn->function) {
+        for (size_t i = 0; i < fn->function->nParams; i++)
+            if (span.tokens == fn->function->paramTypeNames[i].tokens && span.nTokens == fn->function->paramTypeNames[i].nTokens)
+                return fn->functionParams[i];
+        for (size_t i = 0; i < fn->function->nResults; i++)
+            if (span.tokens == fn->function->resultTypes[i].tokens && span.nTokens == fn->function->resultTypes[i].nTokens)
+                return fn->functionResults[i];
+    }
     size_t count = fn->function ? fn->function->nTypeParams
                    : fn->record ? fn->record->nTypeParams : 0;
     token *names = fn->function ? fn->function->typeParamNames
@@ -1360,6 +1400,7 @@ static int identicalTypes(Type *a, Type *b) {
     if (a == b) return 1;
     if (definedType(a) || definedType(b))
         return definedType(a) && definedType(b) && a->declaration == b->declaration;
+    if (a->function || b->function) return identicalFunctions(a, b);
     if (a->interface || b->interface) return a->interface && a->interface == b->interface;
     if (a->record || b->record) {
         if (a->record != b->record || a->nArguments != b->nArguments) return 0;
@@ -1705,6 +1746,24 @@ static int abstractOperand(Type *t) {
     return t->abstractParameter || typeSetSpan(t).nTokens || t->interface || canonical(t) == &any;
 }
 
+static void addCaptureName(token **names, size_t *count, token name) {
+    for (size_t i = 0; i < *count; i++) if (!strcmp((*names)[i].lexeme, name.lexeme)) return;
+    token *grown = realloc(*names, (*count + 1) * sizeof(token));
+    if (!grown) exit(1);
+    *names = grown; grown[(*count)++] = name;
+}
+static void captureReference(Context *c, Symbol *symbol) {
+    if (!c->function || !symbol->ownerFunction || symbol->ownerFunction == c->function || symbol->isType) return;
+    struct stmt_func *owner = symbol->ownerFunction;
+    // Only literal lexical ancestors can supply captured storage.
+    struct stmt_func *ancestor = c->function;
+    while (ancestor && ancestor != owner) ancestor = ancestor->lexicalParent;
+    if (!ancestor) return;
+    addCaptureName(&owner->capturedLocals, &owner->nCapturedLocals, symbol->name);
+    for (struct stmt_func *function = c->function; function != owner; function = function->lexicalParent)
+        addCaptureName(&function->captures, &function->nCaptures, symbol->name);
+}
+
 static Type *expression(Context *c, expr *e) {
     token at = e ? e->location : (token){0};
     if (!e || !e->underlying)
@@ -1746,7 +1805,7 @@ static Type *expression(Context *c, expr *e) {
             if (!f) { error(c, t, "extern function is not declared in this file"); return &unknown; }
             identifier->lexeme.lexeme = f->name.lexeme;
             Type *function = allocate(c, sizeof(*function));
-            function->name = "function"; function->function = f;
+            function->name = "function"; function->function = f; function->context = c;
             Symbol *symbol=allocate(c,sizeof(*symbol));symbol->name=f->name;symbol->type=function;indexReference(c,t,symbol);
             return function;
         }
@@ -1757,6 +1816,7 @@ static Type *expression(Context *c, expr *e) {
             error(c, t, fileExtern(c, t) ? "extern functions must be called with extern.name(...)" : "unresolved name");
             return &unknown;
         }
+        captureReference(c, s);
         indexReference(c,t,s);
         if (s->isType && s->type->enumeration && s->type->enumeration->isBuiltin)
             identifier->lexeme.lexeme = OCEAN_BUILTIN_RESULT_NAME;
@@ -1775,8 +1835,15 @@ static Type *expression(Context *c, expr *e) {
     }
     case EXPR_TYPE_FUNCTION: {
         Type *t = allocate(c, sizeof(*t));
-        t->name = "function";
+        t->name = "function"; t->context = c;
         t->function = e->underlying;
+        t->function->isLiteral = 1;
+        t->function->lexicalParent = c->function;
+        if (!t->function->name.lexeme) {
+            t->function->name = e->location;
+            t->function->name.lexeme = "<literal>";
+        }
+        if (t->function->nTypeParams) error(c, e->location, "function literals cannot declare type parameters");
         function(c, t->function);
         return t;
     }
@@ -1987,6 +2054,12 @@ static Type *expression(Context *c, expr *e) {
                 }
                 return &nothing;
             }
+        }
+        if (v->func.type == EXPR_TYPE_IDENTIFIER &&
+            !strcmp(((struct expr_identifier *)v->func.underlying)->lexeme.lexeme, "recover") && !lookup(c, "recover")) {
+            if (v->nParams || v->spread) error(c, at, "recover requires no arguments");
+            for (size_t i = 0; i < v->nParams; i++) expression(c, &v->params[i]);
+            return &any;
         }
         if (v->func.type == EXPR_TYPE_IDENTIFIER &&
             !strcmp(((struct expr_identifier *)v->func.underlying)->lexeme.lexeme, "free") && !lookup(c, "free")) {
@@ -2566,7 +2639,7 @@ static void predeclare(Context *c, stmt *s) {
         if (f->receiverType.nTokens || f->isExtern)
             return;
         t = allocate(c, sizeof(*t));
-        t->name = "function";
+        t->name = "function"; t->context = c;
         t->function = f;
         declare(c, f->name, t, 0);
         break;

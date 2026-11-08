@@ -829,3 +829,19 @@ in assignments, returns, generic calls, collection methods, and pointer/array
 storage. Fitting literals retain contextual typing; out-of-range literals and
 integer expressions require `->` for narrowing. `backend_test.py` verifies signed
 and unsigned widening, mixed-width arithmetic, and explicit truncation at runtime.
+
+## Deferred calls and recovery
+
+`defer_test.py` checks argument and receiver capture, loop/block registration,
+LIFO order, explicit and implicit returns, named results, panic propagation,
+returned/forwarded panic exclusions, and direct recovery at `-O0` and `-O2`.
+Run `ctest -R "defer_test|panic_test" --output-on-failure` after building.
+
+## Function literals and closures
+
+`closure_test.py` compiles and runs function literals at `-O0` and `-O2`.
+It covers callable parameters/results, structural signature checking, escaped
+and shared captures, recursive closures, generic specializations, per-iteration
+locals/range bindings, struct/array/any storage, deferred recovery, empty callable
+panics, lexical types, and callbacks crossing package boundaries.
+Run `ctest -R "closure_test|defer_test|panic_test" --output-on-failure` after building.

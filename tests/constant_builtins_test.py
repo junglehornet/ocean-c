@@ -73,6 +73,11 @@ func main() int {
     assert len(bodies) >= len(zero_names) + len(size_names), text
     specializations = 0
     for name, body in bodies.items():
+        frame = re.search(r'  (%v\d+) = alloca %__ocean\.defer_frame, align 16\n', body)
+        if frame:
+            body = body.replace(frame.group(0), "", 1)
+            pointer = re.escape(frame.group(1))
+            body = re.sub(r'  call void @__ocean\.(?:enter|leave)\(ptr ' + pointer + r'\)\n', "", body)
         # Function-wide box lifetime bookkeeping is independent of constant
         # evaluation. Remove only its exact initialization/cleanup sequence.
         region = re.search(r'  (%v\d+) = alloca ptr\n  store ptr null, ptr \1\n', body)

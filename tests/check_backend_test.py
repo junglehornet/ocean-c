@@ -9,7 +9,7 @@ with tempfile.TemporaryDirectory(prefix='ocean check backend ') as d:
         ('func main() int { return 7; }',True,''),
         ('func main() { x := 18446744073709551615; }',True,''),
         ('extern int ocean_missing_symbol(); func main() int { return extern.ocean_missing_symbol(); }',False,'link'),
-        ('func main() { defer main(); }',False,'backend'),
+        ('func cleanup() {} func main() { defer cleanup(); }',True,''),
         ('func main() int { return -9223372036854775808; }',True,''),
         ('func main() int { Ωmega := 1e2; return (Ωmega->int); }',True,''),
         ('func main() { panic "must never execute"; }',True,''),

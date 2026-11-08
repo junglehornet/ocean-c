@@ -88,7 +88,7 @@ func main() int {
         r=request('textDocument/completion',1,len('func main() { for (idx := 0; idx < 1; idx++) {} id'));assert 'idx' not in {x['label'] for x in r['result']['items']},r
         edited='package main;\nfunc main() { defer main(); }\n'
         send('textDocument/didChange',{'textDocument':{'uri':source.as_uri(),'version':9},'contentChanges':[{'text':edited}]})
-        r=recv();assert any('backend error' in x['message'] for x in r['params']['diagnostics']),r
+        r=recv();assert not r['params']['diagnostics'],r
         edited='package main;\nfunc main() int { result := Result<int>.value(7); return result.unwrap(); }\n'
         send('textDocument/didChange',{'textDocument':{'uri':source.as_uri(),'version':10},'contentChanges':[{'text':edited}]});r=recv()
         assert not r['params']['diagnostics'],r

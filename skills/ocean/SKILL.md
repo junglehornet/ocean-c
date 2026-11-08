@@ -190,11 +190,53 @@ discards a result. Named results use `(int total, count)` and allow `return;`.
 A final `values ...T` parameter accepts variadic values; use a final `items...`
 to expand an array. `...any` permits heterogeneous arguments.
 
+Function literals use `func(parameters) resultType { body }`; omit the result
+type for a function with no results. Their types use the same signature without
+the body: `func(int) int`, `func()`, or `func() (int, bool)`. Parameter names do
+not affect type identity. Parameter and result types, their storage widths,
+and the variadic marker must match. Functions can be assigned to variables,
+passed as arguments, returned, stored in structs or arrays, and boxed in `any`.
+Named functions are values too; specialize generic functions explicitly, such
+as `identity<int>`, before passing them as values. Function literals can use
+outer generic type parameters but cannot declare their own type parameters.
+
+Closures capture variables by reference. The surrounding function and sibling
+closures share updates to a captured variable. Returning a closure preserves its
+captures; copying a function value shares the same environment. Separate calls
+to a factory create independent environments. Range bindings and locals declared
+in a loop body have separate storage per iteration; a variable declared in a
+loop initializer retains its ordinary loop scope. Captured storage currently
+lives until process exit, when the runtime releases its owned values. Raw pointer
+and buffer captures still borrow their pointees and backing storage.
+
+Use a type alias for arrays of functions, such as `type Callback = func() int;`
+then `callbacks: Callback[3];`. A suffix in `func() int[3]` belongs to the result
+type. An uninitialized function value panics if called. Function values use an
+Ocean closure ABI and cannot be passed directly as native C function pointers.
+Bound method values and calls through interface methods remain unsupported.
+
+```ocean
+func map(data array<int>, closure func(int) int) int[] {
+    result := make(int[]);
+    for (i := 0; i < len(data); i++) {
+        result.append(closure(data[i]));
+    }
+    return result;
+}
+
+func main() int {
+    offset := 3;
+    values := int[2]{1, 2};
+    mapped := map(values, func(n int) int { return n + offset; });
+    return mapped[0] + mapped[1]; // 9
+}
+```
+
 Control flow includes `if`/`else`, `for`, range loops, `switch`, `break`,
 `continue`, and explicit `fallthrough`. A one-binding range receives the index,
 not the element. Type switches use `switch (v := value.(type)) { case int: ... }`.
 Labels and `goto` are function-local and cannot enter nested scopes or skip
-in-scope declarations. `panic "message";` terminates with a diagnostic and call
+in-scope declarations. An unrecovered `panic "message";` terminates with a diagnostic and call
 trace. `return panic "message";` reports at the caller. Use
 `forward panic return helper();` for a single statement, or
 `forward panic { first(); second(); }` for a block, to forward returned panics
@@ -205,6 +247,36 @@ nested forwarding blocks in one function do not skip extra frames. Successful
 calls behave normally; messages and full traces are preserved. A wrapped
 declaration remains visible in its enclosing scope. Forwarding does not catch
 panics or allow execution to continue.
+
+`defer cleanup(arg);` evaluates the receiver and arguments immediately and
+runs the call when the enclosing function exits. Deferred calls run in reverse
+registration order, including calls scheduled in loops and nested blocks.
+Return expressions are evaluated before deferred calls; deferred calls can
+change named results through pointers. Ocean's usual value-copy rules apply to
+captured arguments; pointers retain their aliasing behavior.
+
+`recover()` returns `any`. Called directly in a deferred Ocean function during
+panic unwinding, it returns the panic message as a boxed `string` and stops the
+panic. The panicking function finishes its remaining deferred calls and returns
+its named results, or zero values for unnamed results. Execution resumes in its
+caller. Outside that context, including an indirect helper call or a normally
+returning function's deferred call, `recover()` returns `null`. A second call
+after recovery also returns `null`; `defer recover();` does not recover a panic.
+Use an inline deferred literal for recovery: `defer func() { message := recover(); }();`
+
+An ordinary `panic` runs the function's defers, then its callers' defers as it
+propagates. `return panic` skips the originating function's defers. A caller
+that forwards that returned panic with `forward panic` also skips its defers;
+the first caller that does not forward runs its defers and can recover. Further
+propagation runs callers' defers normally. A direct panic inside
+`forward panic { panic "hi"; }` runs local defers, as does an ordinary panic from
+a called function. An unrecovered panic prints its diagnostic and exits with
+status 1. A new panic in a deferred call starts unwinding from that call.
+
+Compiler CLI, module/package discovery, and build configuration use the existing
+commands. Callable values can cross Ocean package boundaries; ordinary standard-library
+calls work inside literals, including deferred recovery functions. Deferred standard-library methods such as
+`defer file.Close();` use the same rules as other concrete methods.
 
 ## Collections and ownership
 
@@ -383,8 +455,8 @@ unsupported; use pointers. C variadic forwarding uses libffi; manually linking
 saved IR/objects using it requires `-lffi`.
 
 Do not assume Go or C features exist merely because syntax looks familiar.
-Current unsupported backend features include closures, function values, bound
-method values, interface method dispatch, and `defer`.
+Current unsupported backend features include bound method values and interface
+method dispatch. Generic function values require explicit type arguments.
 Parameterized array-field layout and dynamic array ABI are compiler-specific;
 do not rely on their layout at native boundaries. Validate unfamiliar features
 with a minimal package and the target compiler before building on them.

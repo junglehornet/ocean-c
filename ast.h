@@ -209,6 +209,10 @@ struct stmt_func {
     token *typeParamNames;
     typeTokens *typeParamConstraints;
 
+    char isLiteral;
+    struct stmt_func *lexicalParent; // Non-owning lexical function, for capture analysis.
+    size_t nCaptures, nCapturedLocals;
+    token *captures, *capturedLocals; // Shared mutable cells, including transitive captures.
     struct stmt_block body;
 };
 

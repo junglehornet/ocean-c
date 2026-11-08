@@ -226,10 +226,13 @@ The backend supports:
   and `string` (an alias for `i8[]`).
 - Functions, recursion, forward calls, typed variadic parameters, multiple return
   values, named results, local variables, and lexical shadowing.
+- Function literals, shared mutable closures, structural `func(...)` types,
+  named function values, and indirect calls.
 - Arithmetic, comparisons, integer bit operations, assignments, increments,
   numeric casts, ternaries, and short-circuit `&&` and `||`.
 - `if`/`else`, ordinary and deferred-condition `for` loops, labels, `goto`,
   and labeled or unlabeled `break` and `continue`.
+- Deferred calls with `defer`, panic unwinding, and direct `recover()` in deferred functions.
 - Value and condition switches, source-ordered case tests, defaults, and explicit
   `fallthrough`, as well as type-guard switches.
 - Fixed-signature `extern` functions resolved by the system linker. Declarations
@@ -312,6 +315,8 @@ and `*T[]`, including pointers returned by `new`. Self-assignment and `+=` are
 safe. Passing or returning dynamic arrays/strings by value copies their backing memory.
 Parameters, ordinary locals, named results, and owned nested values release their
 storage when their stack scope ends, including on early returns and loop exits.
+Captured variables are an exception: their shared storage remains valid until
+process exit so escaped closures can continue using it.
 Expression temporaries are cleaned up as well. Explicit `free(value)` can release
 a value early; subsequent scope cleanup does not free it again.
 
@@ -778,8 +783,7 @@ arguments. Generic functions can construct `Result<T>.value(item)` and return
 `Result[int]` is rejected.
 
 Unsupported backend features produce an error: calls through interface methods,
-other collection types, closures,
-function values, and defer statements.
+other collection types, and bound method values.
 The parser accepts more syntax than the backend currently implements.
 
 Method receivers use `name type`. Generic receiver arguments bind type parameters
@@ -943,7 +947,7 @@ uses an LLVM constant expression so LLVM applies the target's exact padding and
 alignment without executing size-calculation instructions. Its value operand
 remains unevaluated, so `sizeof(++counter)` does not increment `counter`.
 
-A `panic` statement stops execution with a runtime error:
+A `panic` statement starts panic unwinding:
 
 ```oc
 func requirePositive(n int) {
@@ -954,7 +958,7 @@ func requirePositive(n int) {
 `panic` accepts a string expression and requires a semicolon. It prints
 `Panic: <message>` to standard error, followed by the source file, line, column,
 source excerpt, and call trace using the same diagnostics as array bounds errors.
-Execution exits with status 1. A panic terminates its control-flow path, so a
+An unrecovered panic exits with status 1. A panic terminates its control-flow path, so a
 value-returning function may panic instead of returning a value.
 
 C APIs that use `void *` can be declared with `*void`. Explicit casts use
@@ -1028,8 +1032,8 @@ func main() int {
 }
 ```
 
-Like `panic`, it evaluates a string message and terminates execution with status
-1. It works in functions with any return signature, including no results. The
+Like `panic`, it evaluates a string message; an unrecovered panic exits with status
+1. It skips the current function's deferred calls. It works in functions with any return signature, including no results. The
 source location and excerpt come from the immediate caller; the full call trace
 is preserved. In `main`, where there is no Ocean caller, it reports the
 `return panic` statement instead. Source excerpts remain embedded in the
@@ -1063,6 +1067,90 @@ Only failures originating from `return panic` participate in forwarding.
 Ordinary `panic` statements and other runtime errors retain their locations,
 even inside a forwarding block: `forward panic { panic "hi"; }` reports at
 `panic "hi"`. The message and full call trace are preserved.
+
+### Function literals and closures
+
+Function literals use `func(parameters) resultType { body }`; omit the result
+type for a function with no results. Their types use the same signature without
+the body: `func(int) int`, `func()`, or `func() (int, bool)`. Parameter names do
+not affect type identity. Parameter and result types, their storage widths,
+and the variadic marker must match. Functions can be assigned to variables,
+passed as arguments, returned, stored in structs or arrays, and boxed in `any`.
+Named functions are values too; specialize generic functions explicitly, such
+as `identity<int>`, before passing them as values. Function literals can use
+outer generic type parameters but cannot declare their own type parameters.
+
+Closures capture variables by reference. The surrounding function and sibling
+closures share updates to a captured variable. Returning a closure preserves its
+captures; copying a function value shares the same environment. Separate calls
+to a factory create independent environments. Range bindings and locals declared
+in a loop body have separate storage per iteration; a variable declared in a
+loop initializer retains its ordinary loop scope. Captured storage currently
+lives until process exit, when the runtime releases its owned values. Raw pointer
+and buffer captures still borrow their pointees and backing storage.
+
+Use a type alias for arrays of functions, such as `type Callback = func() int;`
+then `callbacks: Callback[3];`. A suffix in `func() int[3]` belongs to the result
+type. An uninitialized function value panics if called. Function values use an
+Ocean closure ABI and cannot be passed directly as native C function pointers.
+Bound method values and calls through interface methods remain unsupported.
+
+```ocean
+func map(data array<int>, closure func(int) int) int[] {
+    result := make(int[]);
+    for (i := 0; i < len(data); i++) {
+        result.append(closure(data[i]));
+    }
+    return result;
+}
+
+func main() int {
+    offset := 3;
+    values := int[2]{1, 2};
+    mapped := map(values, func(n int) int { return n + offset; });
+    return mapped[0] + mapped[1]; // 9
+}
+```
+
+### Deferred calls and recovery
+
+`defer cleanup(arg);` evaluates the receiver and arguments immediately and
+runs the call when the enclosing function exits. Deferred calls run in reverse
+registration order, including calls scheduled in loops and nested blocks.
+Return expressions are evaluated before deferred calls; deferred calls can
+change named results through pointers. Ocean's usual value-copy rules apply to
+captured arguments; pointers retain their aliasing behavior.
+
+`recover()` returns `any`. Called directly in a deferred Ocean function during
+panic unwinding, it returns the panic message as a boxed `string` and stops the
+panic. The panicking function finishes its remaining deferred calls and returns
+its named results, or zero values for unnamed results. Execution resumes in its
+caller. Outside that context, including an indirect helper call or a normally
+returning function's deferred call, `recover()` returns `null`. A second call
+after recovery also returns `null`; `defer recover();` does not recover a panic.
+
+An ordinary `panic` runs the function's defers, then its callers' defers as it
+propagates. `return panic` skips the originating function's defers. A caller
+that forwards that returned panic with `forward panic` also skips its defers;
+the first caller that does not forward runs its defers and can recover. Further
+propagation runs callers' defers normally. A direct panic inside
+`forward panic { panic "hi"; }` runs local defers, as does an ordinary panic from
+a called function. An unrecovered panic prints its diagnostic and exits with
+status 1. A new panic in a deferred call starts unwinding from that call.
+
+```ocean
+func handlePanic() {
+    message := recover();
+    if (message != null) {
+        // message.(string) contains the panic text.
+    }
+}
+
+func work() {
+    defer handlePanic();
+    panic "operation failed";
+}
+```
 
 ### Interfaces and type lists
 

@@ -1877,6 +1877,24 @@ invalid:
     return (stmt){0};
 }
 
+// Parse the same signature grammar used by literals, with a synthetic empty body.
+struct stmt_func *parseFunctionType(typeTokens span) {
+    if (!span.nTokens || span.tokens[0].type != FUNC) return NULL;
+    token *tokens = calloc(span.nTokens + 3, sizeof(*tokens));
+    CHECK_MALLOC(tokens);
+    memcpy(tokens, span.tokens, span.nTokens * sizeof(*tokens));
+    tokens[span.nTokens] = (token){.type = LEFT_CURLY_BRACE, .lexeme = "{"};
+    tokens[span.nTokens + 1] = (token){.type = RIGHT_CURLY_BRACE, .lexeme = "}"};
+    tokens[span.nTokens + 2] = (token){.type = EOF_TOKEN};
+    parserState state = {.tokens = tokens, .tokensLen = span.nTokens + 3, .quietErrors = 1};
+    stmt parsed = parseFuncDeclaration(&state, 0, 1, 1);
+    free(tokens);
+    if (state.hasError || parsed.type != STMT_FUNC) return NULL;
+    struct stmt_func *function = parsed.value;
+    function->name = span.tokens[0]; function->name.lexeme = "<function>";
+    return function;
+}
+
 // Extern declarations use C ordering: extern result name(type parameter, ...);
 static stmt parseExtern(parserState *state) {
     if (state->functionDepth) {
@@ -3018,6 +3036,8 @@ static stmt parseStatementImpl(parserState *state) {
             tok = advance(state);
             return (stmt){0};
         case FUNC:
+            if (state->functionDepth && peek(state).type == LEFT_PAREN)
+                goto expressionStatement; // Immediately invoked literal in statement position.
             return parseFunc(state);
         default:
         expressionStatement:;

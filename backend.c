@@ -6,6 +6,7 @@
 #include "value_list.h"
 #include <errno.h>
 #include <ffi.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,9 +18,12 @@ typedef struct {
     Kind kind;
     const char *operand; // Backend-owned text; aggregate constants can be arbitrarily long.
     struct Scope *owner;
+    int closureCell; // Shared capture storage, owned by the closure runtime.
     int throughPointer;
     const char *homogeneousArray; // Indexed writes retain the array element identity.
     Kind elementRequirement;
+    Kind backingKind; // A .data argument retains its source through a deferred call.
+    const char *backingOperand;
     const char *length; // Lexical metadata for a sized raw buffer.
 } Value;
 typedef struct DynamicArrayTemporary {
@@ -57,6 +61,7 @@ typedef struct BufferKind {
     struct stmt_struct *record; // Shape 5: concrete user struct; type arguments are compiler-only.
     Kind *arguments;
     size_t nArguments;
+    struct stmt_func *callable; // Shape 17: Ocean function signature.
     int immutableString; // Read-only i8 dynamic array with capacity equal to length.
     int dynamicArray; // Heap payload with a {length, capacity, data} header.
     int fixedArray; // Sized Ocean array, distinct from an unchecked buffer.
@@ -83,6 +88,23 @@ typedef struct MethodInstance {
     unsigned id;
     struct MethodInstance *next;
 } MethodInstance;
+typedef struct ClosureInstance {
+    struct stmt_func *function;
+    Scope *lexicalScope;
+    Kind kind;
+    Kind *captures;
+    char *captureLengths;
+    TypeBinding *bindings;
+    size_t nBindings;
+    unsigned id;
+    int adapter;
+    MethodInstance *method, *typeContext;
+    struct ClosureInstance *next;
+} ClosureInstance;
+typedef struct ClosureCellType {
+    Kind kind;
+    struct ClosureCellType *next;
+} ClosureCellType;
 typedef struct JumpRegion {
     struct JumpRegion *parent;
 } JumpRegion;
@@ -160,15 +182,23 @@ typedef struct {
     unsigned nMethods;
     unsigned recordDepth, interfaceDepth, enumDepth;
     parseResult *program;
-    FILE *out, *body, *slots, *globalOutput;
+    FILE *out, *body, *slots, *globalOutput, *deferredOutput;
     int initializingGlobals;
     Scope *scope;
+    Scope *functionScope;
     Scope *globalScope;
     struct stmt_func *function;
     unsigned next, label, strings;
     unsigned breakLabel, continueLabel;
     int terminated, errors;
     int functionHasAsm;
+    ClosureInstance *closures, *lastClosure, *closure;
+    ClosureCellType *closureCells;
+    unsigned nClosures;
+    int closuresUsed;
+    expr *deferCall;
+    unsigned nDefers;
+    Value deferFrame;
     int forwardPanic; // Lexical forwarding context for call trace frames.
     token location;
     BackendDiagnostic *diagnostics;
@@ -284,6 +314,23 @@ static Value value(Backend *b, Kind k, const char *fmt, ...) {
     return (Value){.kind = k, .operand = ownOperand(b, text)};
 }
 static Value temp(Backend *b, Kind k) { return value(b, k, "%%v%u", ++b->next); }
+static Value specializedClosureValue(Backend *, expr *, int);
+static Kind closureKind(Backend *, struct stmt_func *);
+static Value closureParts(Backend *, Value, int);
+static void requireClosureCode(Backend *, Value, token);
+static Value closureValue(Backend *, struct stmt_func *, MethodInstance *, int);
+static Value localSlot(Backend *, Kind, const char *);
+static BufferKind *closureCalleeKind(Backend *, expr *);
+static Binding *lookupBinding(Backend *b, const char *name) {
+    for (Scope *scope = b->scope; scope; scope = scope->parent)
+        for (Binding *binding = scope->bindings; binding; binding = binding->next)
+            if (binding->name && !strcmp(binding->name, name)) return binding;
+    return NULL;
+}
+static int copy(FILE *, FILE *);
+static Value scheduleIntrinsicDefer(Backend *, expr *);
+static void retainDeferredPointee(Backend *, Value);
+static void scheduleDefer(Backend *, struct stmt_func *, MethodInstance *, Value, Value *, size_t, Kind, size_t, Kind *, expr *, Value);
 static Value moduleString(Backend *b, const char *text) {
     unsigned id = ++b->strings;
     size_t n = strlen(text);
@@ -681,7 +728,7 @@ static struct stmt_type *findTypeDeclaration(Backend *b, const char *name, Scope
     return NULL;
 }
 static Kind declaredKind(Backend *b, struct stmt_type *declaration, Scope *owner) {
-    MethodInstance *method = owner == b->globalScope ? NULL : b->method;
+    MethodInstance *method = owner == b->globalScope ? NULL : b->closure ? b->closure->typeContext : b->method;
     DeclaredKind *entry;
     for (entry = b->declaredKinds; entry; entry = entry->next)
         if (entry->declaration == declaration && entry->method == method) break;
@@ -903,6 +950,11 @@ static size_t recordField(BufferKind *t, const char *name) {
 static Kind type(Backend *b, typeTokens t) {
     if (!t.nTokens)
         return VOID;
+    if (t.tokens[0].type == FUNC) {
+        struct stmt_func *signature = parseFunctionType(t);
+        if (!signature) { fail(b, "invalid function type"); return BAD; }
+        return closureKind(b, signature);
+    }
     if (t.tokens[0].type == TILDE || typeListEnd(t, 0) < t.nTokens) return SCALAR_ANY;
     if (t.nTokens > 1 && t.tokens[t.nTokens - 1].type == STAR)
         return pointerKind(b, type(b, (typeTokens){t.nTokens - 1, t.tokens}));
@@ -1282,7 +1334,7 @@ static struct stmt_func *directCallee(Backend *b, expr *callee,
     }
     if (callee->type != EXPR_TYPE_IDENTIFIER) return NULL;
     struct expr_identifier *identifier = callee->underlying;
-    if (!identifier->externReference) return findFunction(b, identifier->lexeme.lexeme);
+    if (!identifier->externReference) return lookupBinding(b, identifier->lexeme.lexeme) ? NULL : findFunction(b, identifier->lexeme.lexeme);
     for (size_t i = 0; i < b->program->nStatements; i++) {
         stmt *s = &b->program->statements[i];
         if (s->type != STMT_FUNC) continue;
@@ -1596,7 +1648,7 @@ static Value boxScalar(Backend *b, Value v, int promote) {
     if (v.kind == NULL_VALUE) v = value(b, RAW_POINTER, "@__ocean.null");
     BufferKind *t = bufferKind(b, v.kind);
     Value metadata = anyMetadata(b, identity == NULL_VALUE ? RAW_POINTER : identity);
-    if (t && (t->shape == 4 || t->shape == 5 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
+    if (t && (t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
         Value address = slot(b, v.kind), result = temp(b, SCALAR_ANY);
         rawStore(b, address, v);
         fprintf(b->body, "  %s = call { ptr, i64 } @__ocean.any.box.%u(ptr %s)\n",
@@ -1636,7 +1688,7 @@ static Value unboxMatched(Backend *b, Value box, Kind kind) {
     Value storage = slot(b, INT);
     rawStore(b, storage, bits);
     BufferKind *t = bufferKind(b, kind);
-    if (t && (t->shape == 4 || t->shape == 5 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
+    if (t && (t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
         Value result = temp(b, kind);
         fprintf(b->body, "  %s = call %s @__ocean.any.unbox.%u(i64 %s)\n",
                 result.operand, irType(b, kind), (unsigned)kind, bits.operand);
@@ -1759,7 +1811,7 @@ static Value bufferLiteralSlot(Backend *b, Kind kind) {
 }
 static Value extract(Backend *b, Value aggregate, size_t index) {
     BufferKind *t = bufferKind(b, aggregate.kind);
-    if (!t || (t->shape && t->shape != 2 && t->shape != 5) || index >= t->count) {
+    if (!t || (t->shape && t->shape != 2 && t->shape != 5 && t->shape != 17) || index >= t->count) {
         fail(b, "invalid aggregate extraction");
         return value(b, BAD, "0");
     }
@@ -1922,8 +1974,13 @@ static Kind expressionKind(Backend *b, expr *e) {
         char *name = ((struct expr_identifier *)e->underlying)->lexeme.lexeme;
         if (!strcmp(name, "true") || !strcmp(name, "false"))
             return BOOL;
-        return find(b, name).kind;
+        Binding *binding = lookupBinding(b, name);
+        if (binding) return binding->address.kind;
+        struct stmt_func *function = findFunction(b, name);
+        return function ? closureKind(b, function) : find(b, name).kind;
     }
+    case EXPR_TYPE_INSTANTIATION: return specializedClosureValue(b, e, 1).kind;
+    case EXPR_TYPE_FUNCTION: return closureKind(b, e->underlying);
     case EXPR_TYPE_LITERAL: {
         enum literalType t = ((struct expr_literal *)e->underlying)->type;
         if (t == LITERAL_TYPE_NULL) return NULL_VALUE;
@@ -1978,6 +2035,8 @@ static Kind expressionKind(Backend *b, expr *e) {
         return type(b, ((struct expr_typecast *)e->underlying)->type);
     case EXPR_TYPE_CALL: {
         struct expr_call *v = e->underlying;
+        BufferKind *callable = closureCalleeKind(b, &v->func);
+        if (callable) return callable->element;
         typeTokens *typeArguments;
         size_t count;
         struct expr_dot *dot = methodCallee(&v->func, &typeArguments, &count);
@@ -1995,6 +2054,7 @@ static Kind expressionKind(Backend *b, expr *e) {
         }
         if (v->func.type == EXPR_TYPE_IDENTIFIER) {
             const char *name = ((struct expr_identifier *)v->func.underlying)->lexeme.lexeme;
+            if (!strcmp(name, "recover") && !findFunction(b, "recover")) return SCALAR_ANY;
             if (!strcmp(name, "compilerReflectFields") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_FIELDS)
                 return resultType(b, b->function);
             if (!strcmp(name, "compilerReflectIsStruct") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_IS_STRUCT)
@@ -2842,6 +2902,7 @@ static Value emptyValue(Backend *b, Kind kind) {
     if (floating(b, kind))
         return value(b, kind, "0x0000000000000000");
     BufferKind *t = bufferKind(b, kind);
+    if (t && t->shape == 17) return value(b, kind, "zeroinitializer");
     if (t && t->zeroOperand)
         return (Value){.kind = kind, .operand = t->zeroOperand};
     if (t && t->shape == 4 && t->definition) {
@@ -3374,6 +3435,24 @@ static void operatorKinds(Backend *b, typeTokens span, OperatorKinds *result, un
 // Dispatch follows the declared finite alternatives, never arbitrary any values.
 static Value boxedBinary(Backend *b, enum binaryExprType op, Value a, Value c, typeTokens leftTypes,
                          typeTokens rightTypes) {
+    if ((op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) &&
+        ((a.kind == SCALAR_ANY && c.kind == NULL_VALUE) ||
+         (c.kind == SCALAR_ANY && a.kind == NULL_VALUE))) {
+        Value box = a.kind == SCALAR_ANY ? a : c;
+        Value tag = temp(b, RAW_POINTER), bits = temp(b, INT);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %s, 0\n", tag.operand, box.operand);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %s, 1\n", bits.operand, box.operand);
+        Value pointerTag = anyMetadata(b, RAW_POINTER), isPointer = temp(b, BOOL), isNull = temp(b, BOOL), result = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp eq ptr %s, %s\n", isPointer.operand, tag.operand, pointerTag.operand);
+        fprintf(b->body, "  %s = icmp eq i64 %s, ptrtoint (ptr @__ocean.null to i64)\n", isNull.operand, bits.operand);
+        fprintf(b->body, "  %s = and i1 %s, %s\n", result.operand, isPointer.operand, isNull.operand);
+        if (op == EXPR_NOT_EQUALS) {
+            Value inverted = temp(b, BOOL);
+            fprintf(b->body, "  %s = xor i1 %s, true\n", inverted.operand, result.operand);
+            return inverted;
+        }
+        return result;
+    }
     Kind fallback[] = {INT, I8, I16, I32, UINT, U8, U16, U32, FLOAT, F32, BOOL, stringKind(b)};
     OperatorKinds left = {0}, right = {0};
     if (a.kind == SCALAR_ANY && leftTypes.nTokens) operatorKinds(b, leftTypes, &left, 0);
@@ -3737,10 +3816,16 @@ static Value expressionImpl(Backend *b, expr *e) {
         }
         break;
     }
+    case EXPR_TYPE_INSTANTIATION: return specializedClosureValue(b, e, 0);
+    case EXPR_TYPE_FUNCTION: return closureValue(b, e->underlying, NULL, 0);
     case EXPR_TYPE_IDENTIFIER: {
         const char *name = ((struct expr_identifier *)e->underlying)->lexeme.lexeme;
         if (!strcmp(name, "true") || !strcmp(name, "false"))
             return value(b, BOOL, "%d", !strcmp(name, "true"));
+        Binding *binding = lookupBinding(b, name);
+        if (binding) return load(b, binding->address);
+        struct stmt_func *function = findFunction(b, name);
+        if (function) return closureValue(b, function, NULL, 1);
         return load(b, find(b, name));
     }
     case EXPR_TYPE_COMPOSITE:
@@ -3809,7 +3894,14 @@ static Value expressionImpl(Backend *b, expr *e) {
                     store(b, storage, parent);
                     parent = load(b, storage);
                 }
-                return arrayData(b, parent);
+                Value data = arrayData(b, parent);
+                if (b->deferCall && !t->immutableString && v->parent.type == EXPR_TYPE_IDENTIFIER) {
+                    Value storage = address(b, &v->parent);
+                    retainDeferredPointee(b, value(b, pointerKind(b, storage.kind), "%s", storage.operand));
+                } else {
+                    data.backingKind = parent.kind; data.backingOperand = parent.operand;
+                }
+                return data;
             }
         }
         fail(b, "unsupported member access");
@@ -3885,12 +3977,21 @@ static Value expressionImpl(Backend *b, expr *e) {
         typeTokens *typeArguments;
         size_t count;
         struct expr_dot *dot = methodCallee(&v->func, &typeArguments, &count);
-        if (dot) {
+        BufferKind *indirectKind = closureCalleeKind(b, &v->func);
+        Value indirect = value(b, BAD, "");
+        if (indirectKind) {
+            indirect = expression(b, &v->func);
+            f = indirectKind->callable;
+        } else if (dot) {
             name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
             Kind actual = expressionKind(b, &dot->parent);
             BufferKind *dynamicArray = bufferKind(b, actual);
             BufferKind *arrayReceiver = dynamicArray;
             while (arrayReceiver && arrayReceiver->shape == 6) arrayReceiver = bufferKind(b, arrayReceiver->element);
+            if (b->deferCall == e && arrayReceiver && arrayReceiver->shape == 4 &&
+                (!strcmp(name, "array") || !strcmp(name, "remove") || !strcmp(name, "pop") ||
+                 !strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add")))
+                return scheduleIntrinsicDefer(b, e);
             if (arrayReceiver && arrayReceiver->shape == 4 && !arrayReceiver->fixedArray && !strcmp(name, "array")) {
                 Value source = expression(b, &dot->parent);
                 BufferKind *sourceType = bufferKind(b, source.kind);
@@ -3965,6 +4066,18 @@ static Value expressionImpl(Backend *b, expr *e) {
             }
             return result;
         }
+        if (!f && b->deferCall == e && (!strcmp(name, "recover") || !strcmp(name, "free") || !strcmp(name, "len")))
+            return scheduleIntrinsicDefer(b, e);
+        if (!f && !strcmp(name, "recover")) {
+            Value header = temp(b, stringKind(b)), present = temp(b, BOOL), result = slot(b, SCALAR_ANY);
+            fprintf(b->body, "  %s = call ptr @__ocean.recover()\n", header.operand);
+            fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, header.operand);
+            unsigned yes = ++b->label, no = ++b->label, done = ++b->label;
+            branch(b, present, yes, no); label(b, yes);
+            rawStore(b, result, coerce(b, header, SCALAR_ANY)); jump(b, done);
+            label(b, no); rawStore(b, result, coerce(b, value(b, NULL_VALUE, "null"), SCALAR_ANY));
+            jump(b, done); label(b, done); return load(b, result);
+        }
         if (!f && !strcmp(name, "free")) {
             Value item = expression(b, &v->params[0]);
             BufferKind *t = bufferKind(b, item.kind);
@@ -4003,10 +4116,12 @@ static Value expressionImpl(Backend *b, expr *e) {
         if (method) b->typeBindings = method->nBindings ? method->bindings : NULL;
         Kind *parameterKinds = checked(sizeof(Kind) * (f->nParams + 1));
         for (size_t i = 0; i < f->nParams; i++)
-            parameterKinds[i] = f->isVariadic && i + 1 == f->nParams ? type(b, f->paramTypeNames[i]) : parameterKind(b, f, i);
+            parameterKinds[i] = indirectKind
+                ? f->isVariadic && i + 1 == f->nParams ? bufferKind(b, indirectKind->arguments[i])->element : indirectKind->arguments[i]
+                : f->isVariadic && i + 1 == f->nParams ? type(b, f->paramTypeNames[i]) : parameterKind(b, f, i);
         Kind variadicArrayKind = f->isVariadic && !f->isExtern && f->nParams
-                                     ? parameterKind(b, f, f->nParams - 1) : BAD;
-        Kind resultKind = resultType(b, f);
+                                     ? indirectKind ? indirectKind->arguments[f->nParams-1] : parameterKind(b, f, f->nParams - 1) : BAD;
+        Kind resultKind = indirectKind ? indirectKind->element : resultType(b, f);
         b->typeBindings = previousBindings;
         size_t fixed = f->nParams - (f->isVariadic && !f->isExtern ? 1 : 0);
         Kind *expected = checked(sizeof(Kind) * (v->nParams + 1));
@@ -4031,6 +4146,12 @@ static Value expressionImpl(Backend *b, expr *e) {
         int dynamicC = f->isExtern && f->isVariadic && v->spread;
         for (size_t i = fixed; f->isExtern && f->isVariadic && i < evaluated.count; i++)
             if (evaluated.items[i].kind == SCALAR_ANY) dynamicC = 1;
+        if (dynamicC && b->deferCall == e) {
+            scheduleDefer(b, NULL, NULL, value(b, BAD, ""), evaluated.items,
+                          evaluated.count, VOID, 0, NULL, e, value(b, BAD, ""));
+            free(evaluated.items); free(parameterKinds);
+            return value(b, VOID, "");
+        }
         if (dynamicC) {
             b->ffiUsed = 1;
             size_t prefix = evaluated.count - (v->spread ? 1 : 0);
@@ -4161,6 +4282,13 @@ static Value expressionImpl(Backend *b, expr *e) {
             }
         }
         free(evaluated.items);
+        if (b->deferCall == e) {
+            scheduleDefer(b, f, method, receiver, args, nArgs, resultKind, fixed, parameterKinds, NULL, indirect);
+            free(args); free(parameterKinds);
+            return value(b, VOID, "");
+        }
+        Value code = value(b, RAW_POINTER, "null"), environment = code;
+        if (indirectKind) { code = closureParts(b, indirect, 0); environment = closureParts(b, indirect, 1); requireClosureCode(b, code, v->location); }
         Value traceParent = value(b, RAW_POINTER, "null");
         if (!f->isExtern)
             traceParent = pushTraceFrame(b, f, v->location);
@@ -4176,13 +4304,15 @@ static Value expressionImpl(Backend *b, expr *e) {
                 fprintf(b->body, "%s%s", i ? ", " : "", irType(b, parameterKinds[i]));
             fprintf(b->body, "%s...) ", fixed ? ", " : "");
         }
-        if (method) methodName(b->body, method);
+        if (indirectKind) fprintf(b->body, "%s", code.operand);
+        else if (method) methodName(b->body, method);
         else functionName(b->body, f);
         fprintf(b->body, "(");
+        if (indirectKind) fprintf(b->body, "ptr %s", environment.operand);
         if (method && f->receiverType.nTokens)
             fprintf(b->body, "%s %s", irType(b, receiver.kind), receiver.operand);
         for (size_t i = 0; i < nArgs; i++)
-            fprintf(b->body, "%s%s %s", (i || (method && f->receiverType.nTokens)) ? ", " : "",
+            fprintf(b->body, "%s%s %s", (i || indirectKind || (method && f->receiverType.nTokens)) ? ", " : "",
                     irType(b, args[i].kind), args[i].operand);
         fprintf(b->body, ")\n");
         if (!f->isExtern)
@@ -4405,6 +4535,7 @@ static int statementAllocatesStack(stmt *s) {
         return statementAllocatesStack(((struct stmt_label *)s->value)->body);
     if (s->type == STMT_VAR)
         return 1; // Inferred variables can own arrays nested inside other values.
+    if (s->type == STMT_DEFER) return 1;
     if (s->type == STMT_EXPR || s->type == STMT_PANIC || s->type == STMT_RETURN_PANIC)
         return hasArrayAllocation(s->value);
     if (s->type == STMT_RETURN) {
@@ -4571,12 +4702,17 @@ static void blockLimit(Backend *b, struct stmt_block *v, size_t count) {
             b->terminated = 1;
         }
     }
-    if (!b->terminated)
+    if (!b->terminated) {
+        if (b->function && v == &b->function->body)
+            fprintf(b->body, "  call void @__ocean.leave(ptr %s)\n", b->deferFrame.operand);
         restoreStack(b, &scope);
+    }
     b->scope = scope.parent;
     clearScope(&scope);
 }
 static void block(Backend *b, struct stmt_block *v) { blockLimit(b, v, v->nStmts); }
+#include "backend_closure.inc"
+#include "backend_defer.inc"
 static void statementImpl(Backend *, stmt *);
 static void statement(Backend *b, stmt *s) {
     token previous = b->location;
@@ -4667,6 +4803,13 @@ static void statementImpl(Backend *b, stmt *s) {
     if (!s || (b->terminated && s->type != STMT_LABEL))
         return;
     switch (s->type) {
+    case STMT_DEFER: {
+        expr *previous = b->deferCall;
+        b->deferCall = ((struct stmt_defer *)s->value)->call;
+        expression(b, b->deferCall);
+        b->deferCall = previous;
+        break;
+    }
     case STMT_ASM: assemblyStatement(b, s->value); break;
     case STMT_LABEL: {
         struct stmt_label *node = s->value;
@@ -4706,10 +4849,11 @@ static void statementImpl(Backend *b, stmt *s) {
             for (size_t i = 0; i < v->nVars; i++) {
                 if (v->vars[i].type == UNDERSCORE) continue;
                 Value storage = parameterArrayValue(b, v->type, kind, v->nInitValues ? &v->initValues[i] : NULL);
-                Value binding = slot(b, kind);
+                Value binding = localSlot(b, kind, v->vars[i].lexeme);
                 bind(b, v->vars[i].lexeme, binding);
-                b->scope->bindings->autoRelease = 1;
-                escapeDynamicArrays(b, storage); rawStore(b, binding, storage);
+                b->scope->bindings->autoRelease = !binding.closureCell;
+                if (binding.closureCell) store(b, binding, storage);
+                else { escapeDynamicArrays(b, storage); rawStore(b, binding, storage); }
             }
             break;
         }
@@ -4734,7 +4878,7 @@ static void statementImpl(Backend *b, stmt *s) {
                 Value storage = temp(b, pointerKind);
                 fprintf(b->body, "  %s = alloca %s, i64 %s\n", storage.operand,
                         irType(b, elementKind), count.operand);
-                Value binding = slot(b, pointerKind);
+                Value binding = localSlot(b, pointerKind, v->vars[i].lexeme);
                 binding.length = count.operand;
                 bind(b, v->vars[i].lexeme, binding);
                 store(b, binding, storage);
@@ -4787,10 +4931,10 @@ static void statementImpl(Backend *b, stmt *s) {
                 fail(b, "variable needs a supported value type");
                 continue;
             }
-            Value addr = slot(b, k);
+            Value addr = localSlot(b, k, v->vars[i].lexeme);
             if (v->nInitValues && i < values.count) addr.length = initial[i].length;
             bind(b, v->vars[i].lexeme, addr);
-            b->scope->bindings->autoRelease = containsDynamicArrays(b, k);
+            b->scope->bindings->autoRelease = !addr.closureCell && containsDynamicArrays(b, k);
             Value init = v->nInitValues ? initial[i] : emptyValue(b, k);
             store(b, addr, init);
         }
@@ -4849,6 +4993,16 @@ static void statementImpl(Backend *b, stmt *s) {
             r = convert(b, r, k);
         if (r.kind != k)
             fail(b, "return value type mismatch");
+        for (size_t i = 0; i < b->function->nResults; i++)
+            if (b->function->resultNames[i].type != EOF_TOKEN)
+                store(b, find(b, b->function->resultNames[i].lexeme),
+                      b->function->nResults == 1 ? r : extract(b, r, i));
+        fprintf(b->body, "  call void @__ocean.leave(ptr %s)\n", b->deferFrame.operand);
+        for (size_t i = 0; i < b->function->nResults; i++)
+            if (b->function->resultNames[i].type != EOF_TOKEN) {
+                Value item = load(b, find(b, b->function->resultNames[i].lexeme));
+                r = b->function->nResults == 1 ? item : insert(b, r, item, i);
+            }
         if (ownsArrays(b, k)) {
             b->copyTransport = 1;
             r = copyValue(b, r, 0);
@@ -4946,17 +5100,17 @@ static void statementImpl(Backend *b, stmt *s) {
         saveStack(b, &bodyScope, v->range || statementAllocatesStack(v->body));
         if (v->range) {
             // The visible binding is a per-iteration value, not the loop counter.
-            Value binding = slot(b, INT);
+            Value binding = localSlot(b, INT, v->bindings[0].lexeme);
             store(b, binding, load(b, index));
             bind(b, v->bindings[0].lexeme, binding);
         }
         if (v->range && v->nBindings == 2) {
-            Value item = slot(b, rangeType->element);
+            Value item = localSlot(b, rangeType->element, v->bindings[1].lexeme);
             Value i = load(b, index);
             checkArrayIndex(b, range, i, v->range->location);
             store(b, item, load(b, elementAddress(b, range, i)));
             bind(b, v->bindings[1].lexeme, item);
-            b->scope->bindings->autoRelease = 1;
+            b->scope->bindings->autoRelease = !item.closureCell;
         }
         statement(b, v->body);
         if (!b->terminated)
@@ -5069,10 +5223,10 @@ static void statementImpl(Backend *b, stmt *s) {
                     fprintf(b->body, "  %s = select i1 %s, ptr %s, ptr %s\n",
                             bound.operand, small.operand, local.operand, indirect.operand);
                 } else bound = kind == SCALAR_ANY ? box : underlyingMatch ? unboxMatched(b, box, kind) : unboxValue(b, box, kind);
-                Value address = slot(b, kind);
+                Value address = localSlot(b, kind, v->binding.lexeme);
                 store(b, address, bound);
                 bind(b, v->binding.lexeme, address);
-                b->scope->bindings->autoRelease = containsDynamicArrays(b, kind);
+                b->scope->bindings->autoRelease = !address.closureCell && containsDynamicArrays(b, kind);
             }
             struct stmt_block *body = &v->cases[i].body;
             int falls = body->nStmts && body->stmts[body->nStmts - 1].type == STMT_FALLTHROUGH;
@@ -5131,15 +5285,17 @@ static void statementImpl(Backend *b, stmt *s) {
 }
 static void signature(Backend *b, struct stmt_func *f, FILE *out) {
     Kind result = resultType(b, f);
-    fprintf(out, "%s %s ", f->isExtern ? "declare" : ownsArrays(b, result) ? "define internal" : "define",
+    fprintf(out, "%s %s ", f->isExtern ? "declare" : b->closure || ownsArrays(b, result) ? "define internal" : "define",
             irType(b, result));
-    if (b->method) methodName(out, b->method);
+    if (b->closure) fprintf(out, "@__ocean.closure.%u", b->closure->id);
+    else if (b->method) methodName(out, b->method);
     else functionName(out, f);
     fprintf(out, "(");
     int hasReceiver = b->method && f->receiverType.nTokens;
+    if (b->closure) fputs("ptr %environment", out);
     if (hasReceiver) fprintf(out, "%s %%receiver", irType(b, b->method->receiver));
     for (size_t i = 0; i < f->nParams; i++)
-        fprintf(out, "%s%s %%arg%zu", (i || hasReceiver) ? ", " : "",
+        fprintf(out, "%s%s %%arg%zu", (i || hasReceiver || b->closure) ? ", " : "",
                 irType(b, parameterKind(b, f, i)), i);
     if (f->isExtern && f->isVariadic)
         fprintf(out, "%s...", f->nParams ? ", " : "");
@@ -5205,11 +5361,15 @@ static void emitBoundsRuntime(Backend *b) {
         "  unreachable\n"
         "}\n",
         snippetFormat.operand, traceTitle.operand, frameFormat.operand);
+    fprintf(b->out,
+        "define internal void @__ocean.panic(ptr %%m, i64 %%n, ptr %%f, i64 %%l, i64 %%c, ptr %%s) noreturn {\n"
+        "  call void @__ocean.unwind(ptr %%m, i64 %%n, i1 false)\n"
+        "  call void @__ocean.panic_report(ptr %%m, i64 %%n, ptr %%f, i64 %%l, i64 %%c, ptr %%s)\n  unreachable\n}\n");
     Value panicPrefix = moduleString(b, "Panic: ");
     Value panicLocation = moduleString(b, "\n  --> %s:%lld:%lld\n");
     fprintf(b->out,
             "declare i64 @\"\\01write\"(i32, ptr, i64)\n"
-            "define internal void @__ocean.panic(ptr %%message, i64 %%size, ptr %%file, i64 %%line, "
+            "define internal void @__ocean.panic_report(ptr %%message, i64 %%size, ptr %%file, i64 %%line, "
             "i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
             "  call i64 @\"\\01write\"(i32 2, ptr %s, i64 7)\n"
             "  call i64 @\"\\01write\"(i32 2, ptr %%message, i64 %%size)\n"
@@ -5225,6 +5385,7 @@ static void emitBoundsRuntime(Backend *b) {
     fprintf(b->out,
             "define internal void @__ocean.return_panic(ptr %%message, i64 %%size, ptr %%file, "
             "i64 %%line, i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
+            "  call void @__ocean.unwind(ptr %%message, i64 %%size, i1 true)\n"
             "  %%initial = load ptr, ptr @__ocean.trace_head\n"
             "  %%present = icmp ne ptr %%initial, null\n"
             "  br i1 %%present, label %%parent, label %%fallback\n"
@@ -5251,11 +5412,11 @@ static void emitBoundsRuntime(Backend *b) {
             "  %%caller.column = load i64, ptr %%column.slot\n"
             "  %%snippet.slot = getelementptr %%__ocean.trace, ptr %%head, i32 0, i32 5\n"
             "  %%caller.snippet = load ptr, ptr %%snippet.slot\n"
-            "  call void @__ocean.panic(ptr %%message, i64 %%size, ptr %%caller.file, "
+            "  call void @__ocean.panic_report(ptr %%message, i64 %%size, ptr %%caller.file, "
             "i64 %%caller.line, i64 %%caller.column, ptr %%caller.snippet)\n"
             "  unreachable\n"
             "fallback:\n"
-            "  call void @__ocean.panic(ptr %%message, i64 %%size, ptr %%file, "
+            "  call void @__ocean.panic_report(ptr %%message, i64 %%size, ptr %%file, "
             "i64 %%line, i64 %%column, ptr %%snippet)\n"
             "  unreachable\n}\n");
     fprintf(b->out,
@@ -5303,15 +5464,31 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
             fclose(b->slots);
         return;
     }
-    Scope scope = {.parent = b->globalScope};
-    b->scope = &scope;
+    Scope scope = {.parent = b->closure && b->closure->lexicalScope ? b->closure->lexicalScope : b->globalScope};
+    b->scope = b->functionScope = &scope;
     b->function = f;
     b->terminated = 0;
     b->functionTemps = dynamicArrayTempMark(b);
+    if (b->closure && !b->closure->adapter) {
+        for (size_t i = 0; i < f->nCaptures; i++) {
+            Value field = temp(b, RAW_POINTER), cell = temp(b, RAW_POINTER);
+            fprintf(b->body, "  %s = getelementptr { ptr, i64 }, ptr %%environment, i64 %zu, i32 0\n", field.operand, i);
+            fprintf(b->body, "  %s = load ptr, ptr %s\n", cell.operand, field.operand);
+            Value address = value(b, b->closure->captures[i], "%s", cell.operand);
+            address.throughPointer = address.closureCell = 1;
+            if (b->closure->captureLengths[i]) {
+                Value lengthField = temp(b, RAW_POINTER), length = temp(b, INT);
+                fprintf(b->body, "  %s = getelementptr { ptr, i64 }, ptr %%environment, i64 %zu, i32 1\n", lengthField.operand, i);
+                fprintf(b->body, "  %s = load i64, ptr %s\n", length.operand, lengthField.operand);
+                address.length = length.operand;
+            }
+            bind(b, f->captures[i].lexeme, address);
+        }
+    }
     if (b->method && f->receiverType.nTokens) {
-        Value addr = slot(b, b->method->receiver);
+        Value addr = localSlot(b, b->method->receiver, f->receiverName.lexeme);
         bind(b, f->receiverName.lexeme, addr);
-        b->scope->bindings->autoRelease = 1;
+        b->scope->bindings->autoRelease = !addr.closureCell;
         store(b, addr, value(b, b->method->receiver, "%%receiver"));
     }
     b->terminated = 0;
@@ -5319,21 +5496,38 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
     b->breakLabel = b->continueLabel = 0;
     for (size_t j = 0; j < f->nParams; j++) {
         Kind k = parameterKind(b, f, j);
-        Value addr = slot(b, k);
-        bind(b, f->paramNames[j].lexeme, addr);
-        b->scope->bindings->autoRelease = 1;
+        Value addr = localSlot(b, k, f->paramNames[j].lexeme);
+        bind(b, f->paramNames[j].lexeme ? f->paramNames[j].lexeme : "$unused", addr);
+        b->scope->bindings->autoRelease = !addr.closureCell;
         store(b, addr, value(b, k, "%%arg%zu", j));
         if (k==SCALAR_ANY) checkElementRequirement(b,load(b,addr),constraintKind(b,f->paramTypeNames[j]));
     }
     for (size_t j = 0; j < f->nResults; j++)
         if (f->resultNames[j].type != EOF_TOKEN) {
             Kind k = type(b, f->resultTypes[j]);
-            Value addr = slot(b, k);
+            Value addr = localSlot(b, k, f->resultNames[j].lexeme);
             bind(b, f->resultNames[j].lexeme, addr);
-            b->scope->bindings->autoRelease = 1;
+            b->scope->bindings->autoRelease = !addr.closureCell;
             Value initial = emptyValue(b, k);
             store(b, addr, initial);
         }
+    b->deferFrame = temp(b, RAW_POINTER);
+    fprintf(b->slots, "  %s = alloca %%__ocean.defer_frame, align 16\n", b->deferFrame.operand);
+    fprintf(b->body, "  call void @__ocean.enter(ptr %s)\n", b->deferFrame.operand);
+    stmt functionBody = {.type = STMT_BLOCK, .value = &f->body};
+    int hasDefer = containsDefer(&functionBody);
+    unsigned recoverLabel = 0;
+    if (hasDefer) {
+        Value environment = temp(b, RAW_POINTER), buffer = temp(b, RAW_POINTER), resumed = temp(b, I32), recovering = temp(b, BOOL);
+        fprintf(b->slots, "  %s = alloca [%zu x i8], align %zu\n", buffer.operand, sizeof(jmp_buf), (size_t)_Alignof(jmp_buf));
+        fprintf(b->body, "  %s = getelementptr %%__ocean.defer_frame, ptr %s, i32 0, i32 3\n", environment.operand, b->deferFrame.operand);
+        fprintf(b->body, "  store ptr %s, ptr %s\n", buffer.operand, environment.operand);
+        fprintf(b->body, "  %s = call i32 @\"\\01_setjmp\"(ptr %s)\n", resumed.operand, buffer.operand);
+        fprintf(b->body, "  %s = icmp ne i32 %s, 0\n", recovering.operand, resumed.operand);
+        recoverLabel = ++b->label;
+        unsigned startLabel = ++b->label;
+        branch(b, recovering, recoverLabel, startLabel); label(b, startLabel);
+    }
     JumpContext jumps = {0};
     JumpContext *previousJumps = b->jumps;
     prepareJumps(b, &jumps, &f->body);
@@ -5359,6 +5553,29 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
             fprintf(b->body, "  ret %s %s\n", irType(b, kind), zero.operand);
         }
     }
+    if (hasDefer) {
+        label(b, recoverLabel);
+        fprintf(b->body, "  call void @__ocean.finish_recovery(ptr %s)\n", b->deferFrame.operand);
+        Kind recoveredKind = resultType(b, f);
+        Value recoveredResult = emptyValue(b, recoveredKind);
+        if (f->nResults == 1 && f->resultNames[0].type != EOF_TOKEN)
+            recoveredResult = loadRecoveredResult(b, find(b, f->resultNames[0].lexeme));
+        else if (f->nResults > 1) {
+            for (size_t i = 0; i < f->nResults; i++)
+                if (f->resultNames[i].type != EOF_TOKEN)
+                    recoveredResult = insert(b, recoveredResult, loadRecoveredResult(b, find(b, f->resultNames[i].lexeme)), i);
+        }
+        if (ownsArrays(b, recoveredKind)) {
+            int previous = b->copyTransport; b->copyTransport = 1;
+            recoveredResult = copyValue(b, recoveredResult, 0); b->copyTransport = previous;
+            escapeDynamicArrays(b, recoveredResult);
+        }
+        releaseScopeValues(b);
+        cleanDynamicArrayTemps(b, b->functionTemps);
+        fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
+        if (recoveredKind == VOID) fprintf(b->body, "  ret void\n");
+        else fprintf(b->body, "  ret %s %s\n", irType(b, recoveredKind), recoveredResult.operand);
+    }
     size_t packageId = 1;
     for (size_t i=0;i<b->program->nSources;i++)
         if (f->name.filename && !strcmp(f->name.filename,b->program->sources[i].filename)) packageId=b->program->sources[i].packageId;
@@ -5373,7 +5590,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
     fclose(b->body);
     clearScope(&scope);
     b->scope = NULL;
-    b->function = NULL;
+    b->function = NULL; b->functionScope = NULL;
 }
 static int globalKindReady(Backend *b, expr *e) {
     if (!e || !e->underlying) return 1;
@@ -5512,7 +5729,7 @@ static void emitGlobals(Backend *b, FILE *output) {
 static void emitAnyType(Backend *b, Kind kind) {
     BufferKind *t = bufferKind(b, kind);
     Value metadata = anyMetadata(b, kind);
-    int aggregate = t && (t->shape == 4 || t->shape == 5 || !t->shape || (t->definition && representationKind(b, kind) == SCALAR_ANY));
+    int aggregate = t && (t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, kind) == SCALAR_ANY));
     if (!aggregate) {
         b->ffiUsed = 1;
         fprintf(b->out, "%s = private constant { ptr, ptr, ptr } { ptr %s, ptr null, ptr null }\n",
@@ -5939,6 +6156,8 @@ int emitLLVM(parseResult *program, FILE *output) {
     fprintf(output, "; Generated by ocean-c\n"
                     "@__ocean.null = private global i8 0\n"
                     "%%__ocean.trace = type { ptr, ptr, ptr, i64, i64, ptr, i1 }\n"
+                    "%%__ocean.defer_frame = type { ptr, ptr, ptr, ptr, ptr }\n"
+                    "%%__ocean.recovery = type { ptr, ptr, i1, { i64, i64, ptr }, ptr }\n"
                     "@__ocean.trace_head = internal thread_local global ptr null\n"
                     "declare ptr @llvm.stacksave.p0()\n"
                     "declare void @llvm.stackrestore.p0(ptr)\n");
@@ -5947,6 +6166,7 @@ int emitLLVM(parseResult *program, FILE *output) {
         fail(&b, "could not create module function buffer");
         return 1;
     }
+    b.deferredOutput = functions;
     output = functions; // Identified struct definitions must precede aggregate constants.
     struct stmt_func *main = findFunction(&b, "main");
     if (!program->isLibrary && (!main || main->isExtern || main->nTypeParams || main->nParams || main->nResults > 1))
@@ -5992,11 +6212,13 @@ int emitLLVM(parseResult *program, FILE *output) {
             }
             if (duplicate) continue;
             BufferKind *result = bufferKind(&b, resultType(&b, f));
-            if (result && result->shape == 5)
+            if (result && result->shape == 17) fail(&b, "Ocean function values cannot cross the native C ABI");
+            else if (result && result->shape == 5)
                 fail(&b, "C structs passed or returned by value require ABI lowering; use pointers");
             for (size_t j = 0; j < f->nParams; j++) {
                 BufferKind *param = bufferKind(&b, type(&b, f->paramTypeNames[j]));
-                if (param && param->shape == 5)
+                if (param && param->shape == 17) fail(&b, "Ocean function values cannot cross the native C ABI");
+                else if (param && param->shape == 5)
                     fail(&b, "C structs passed or returned by value require ABI lowering; use pointers");
             }
             signature(&b, f, output);
@@ -6005,11 +6227,25 @@ int emitLLVM(parseResult *program, FILE *output) {
         }
         emitFunction(&b, f, output);
     }
-    for (MethodInstance *m = b.methods; m; m = m->next) {
-        b.method = m;
-        b.typeBindings = m->nBindings ? m->bindings : NULL;
-        emitFunction(&b, m->function, output);
+    MethodInstance *emittedMethod = NULL;
+    ClosureInstance *emittedClosure = NULL;
+    for (;;) {
+        MethodInstance *method = emittedMethod ? emittedMethod->next : b.methods;
+        ClosureInstance *closure = emittedClosure ? emittedClosure->next : b.closures;
+        if (method) {
+            b.closure = NULL; b.method = method;
+            b.typeBindings = method->nBindings ? method->bindings : NULL;
+            emitFunction(&b, method->function, output); emittedMethod = method;
+        } else if (closure) {
+            b.closure = closure; b.method = NULL;
+            b.typeBindings = closure->nBindings ? closure->bindings : NULL;
+            if (closure->adapter) emitClosureAdapter(&b, closure, output);
+            else emitFunction(&b, closure->function, output);
+            emittedClosure = closure;
+        } else break;
     }
+    b.closure = NULL;
+    emitClosureCellDrops(&b, output);
     b.method = NULL;
     b.typeBindings = NULL;
     if (!program->isLibrary && main && !main->isExtern && !main->nParams && main->nResults <= 1) {
@@ -6090,13 +6326,16 @@ int emitLLVM(parseResult *program, FILE *output) {
     if (b.dataCopyUsed)
         fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n");
     if (b.newUsed) fprintf(output, "declare ptr @\"\\01calloc\"(i64, i64)\n");
-    if (b.returnTransportUsed) {
-        // Distinct IR names share the libc symbols without conflicting with user declarations.
+    {
+        // Deferred captures and boxed values use libc allocation. Distinct IR
+        // names avoid conflicts with user declarations of the same symbols.
         fprintf(output, "declare ptr @\"\\01malloc\"(i64)\n"
                         "declare void @\"\\01free\"(ptr)\n");
     }
     emitFFIRuntime(&b);
     if (b.nullChecksUsed || b.ffiUsed) fprintf(output, "declare void @llvm.trap() cold noreturn nounwind\n");
+    emitClosureRuntime(&b);
+    emitDeferRuntime(&b);
     emitBoundsRuntime(&b);
     if (fflush(output) || ferror(output))
         fail(&b, "could not write LLVM IR");
@@ -6127,10 +6366,21 @@ int emitLLVM(parseResult *program, FILE *output) {
             free(b.buffers->arguments);
             free(b.buffers->members);
         }
+        if (b.buffers->shape == 17 && !b.buffers->definition) free(b.buffers->callable);
         free(b.buffers->layout);
         free(b.buffers->ir);
         free(b.buffers);
         b.buffers = next;
+    }
+    while (b.closures) {
+        ClosureInstance *next = b.closures->next;
+        Scope *scope = b.closures->lexicalScope;
+        while (scope && scope != b.globalScope) { Scope *parent = scope->parent; clearScope(scope); free(scope); scope = parent; }
+        free(b.closures->captures); free(b.closures->captureLengths); free(b.closures->bindings); free(b.closures); b.closures = next;
+    }
+    while (b.closureCells) {
+        ClosureCellType *next = b.closureCells->next;
+        free(b.closureCells); b.closureCells = next;
     }
     while (b.methods) {
         MethodInstance *next = b.methods->next;
