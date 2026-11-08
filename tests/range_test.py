@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { a := int[]{1, 2, 3}; sum := 0; "
             "for (i, item := range a) { if (i == 0) a[1] = 9; sum += item; } "
             "return sum; }", 13)
-    program("func sum<T>(a T[]) T { result := zero(T); "
+    program("func sum<T int | float>(a T[]) T { result := zero(T); "
             "for (i, item := range a) { result += item; } return result; } "
             "func main() int { return sum<int>(int[]{4, 6}); }", 10)
     program("func main() int { n := 0; outer: for (i := range int[]{1, 2}) { "

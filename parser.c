@@ -33,6 +33,7 @@ typedef struct parserState {
     size_t loopDepth;
     size_t switchDepth;
     size_t syntaxDepth;
+    size_t signatureDepth;
     size_t fallthroughDepth;
 } parserState;
 
@@ -104,6 +105,8 @@ static expr comma(parserState *state);
 static char signatureEllipsis(parserState *state);
 static char parseCastTarget(parserState *state, typeTokens *target);
 static char parseSignatureType(parserState *state, size_t depth);
+static char parseTypeConstraint(parserState *state);
+static char parseInterfaceBody(parserState *state, struct stmt_interface *node);
 static char tryCallTypeArguments(parserState *state, struct expr_instantiation *result);
 static typeTokens copySignatureSpan(parserState *state, size_t start, size_t end);
 static char signatureError(parserState *state, const char *message);
@@ -1184,96 +1187,6 @@ static char parseTypeBrackets(parserState *state, size_t depth, char prefix) {
     return 1;
 }
 
-// Operators usable in custom interface requirements.
-static char constraintOperator(enum tokenType type) {
-    enum binaryExprType operation;
-    return binaryOperator(type, &operation) != 0 || type == EXCLAMATION ||
-           type == TILDE || type == PLUS_PLUS || type == MINUS_MINUS ||
-           (isAssignmentOperator(type) && type != EQUALS && type != TILDE_EQUALS);
-}
-
-// Validate an operand's complete type syntax on a bounded, isolated token list.
-// This lets '*' mean either a pointer suffix or an infix operator without
-// changing the shared type grammar or mutating the caller's tokens.
-static char constraintTypeSpan(parserState *state, size_t start, size_t end, size_t depth) {
-    if (start == end) return 0;
-    size_t count = end - start;
-    token *tokens = malloc((count + 1) * sizeof(*tokens));
-    CHECK_MALLOC(tokens);
-    memcpy(tokens, state->tokens + start, count * sizeof(*tokens));
-    tokens[count] = endToken(state);
-    parserState trial = *state;
-    trial.tokens = tokens;
-    trial.tokensLen = count + 1;
-    trial.tokenIndex = 0;
-    trial.quietErrors = 1;
-    char ok = parseSignatureType(&trial, depth) && !trial.isSynchronizing &&
-              trial.tokenIndex == count;
-    free(tokens);
-    return ok;
-}
-
-// Parse one embedded type/union, signed membership term, or infix operator
-// requirement. The caller consumes ';' and retains the complete token span.
-static char parseInterfaceConstraint(parserState *state, size_t depth) {
-    DEFINE_TOK;
-    if (tok.type == MINUS || tok.type == PLUS || tok.type == EQUALS) {
-        advance(state);
-        return parseSignatureType(state, depth);
-    }
-    size_t start = state->tokenIndex;
-    parserState trial = *state;
-    trial.quietErrors = 1;
-    // Prefer existing embedded type/union syntax, including pointer types.
-    char ok = 1;
-    do {
-        if (tok.type == TILDE) advance(&trial);
-        if (!parseSignatureType(&trial, depth)) { ok = 0; break; }
-        tok = currentToken(&trial);
-        if (tok.type != BITWISE_OR) break;
-        tok = advance(&trial);
-    } while (1);
-    if (ok && tok.type == SEMICOLON) {
-        if (trial.tokenIndex == start + 2 && state->tokens[start].type == IDENTIFIER &&
-            !strcmp(state->tokens[start].lexeme, "self") &&
-            state->tokens[start + 1].type == STAR)
-            return signatureError(state, "Expected right operand after self *");
-        state->tokenIndex = trial.tokenIndex;
-        state->pendingGreater = trial.pendingGreater;
-        return 1;
-    }
-    // Only top-level operators split operands; bracketed and composite types
-    // may contain their own operators, semicolons, and method signatures.
-    size_t end = start, nesting = 0;
-    for (; end < state->tokensLen; end++) {
-        enum tokenType type = state->tokens[end].type;
-        if (type == EOF_TOKEN) break;
-        if (!nesting && (type == SEMICOLON || type == RIGHT_CURLY_BRACE)) break;
-        if (type == LEFT_PAREN || type == LEFT_BRACKET || type == LEFT_CURLY_BRACE) nesting++;
-        if (type == RIGHT_PAREN || type == RIGHT_BRACKET || type == RIGHT_CURLY_BRACE) {
-            if (!nesting) break;
-            nesting--;
-        }
-    }
-    nesting = 0;
-    for (size_t i = start; i < end; i++) {
-        enum tokenType type = state->tokens[i].type;
-        char leftSelf = i == start + 1 && state->tokens[start].type == IDENTIFIER &&
-                        !strcmp(state->tokens[start].lexeme, "self");
-        char rightSelf = end == i + 2 && state->tokens[i + 1].type == IDENTIFIER &&
-                         !strcmp(state->tokens[i + 1].lexeme, "self");
-        if (!nesting && (leftSelf || rightSelf) && constraintOperator(type) &&
-            constraintTypeSpan(state, start, i, depth) &&
-            constraintTypeSpan(state, i + 1, end, depth)) {
-            state->tokenIndex = end;
-            return 1;
-        }
-        if (type == LEFT_PAREN || type == LEFT_BRACKET || type == LEFT_CURLY_BRACE) nesting++;
-        if ((type == RIGHT_PAREN || type == RIGHT_BRACKET || type == RIGHT_CURLY_BRACE) && nesting) nesting--;
-    }
-    return signatureError(state, "Expected interface type, union, membership term, or operator requirement");
-}
-
 // Struct fields share one type across a comma-separated list of names.
 static char parseStructFields(parserState *state, signatureFields *fields,
                               signatureFields *valueParams, token *indexField,
@@ -1308,6 +1221,14 @@ static char parseStructFields(parserState *state, signatureFields *fields,
 static char parseCompositeTypeBody(parserState *state, size_t depth, char isInterface) {
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Composite type nesting limit exceeded");
+    if (isInterface) {
+        struct stmt_interface node = {0};
+        char ok = parseInterfaceBody(state, &node);
+        for (size_t i = 0; i < node.nConstraints; i++) free(node.constraints[i].tokens);
+        free(node.constraints);
+        free(node.methods);
+        return ok;
+    }
     token tok = advance(state); // opening brace
     signatureFields members = {0};
     token indexField = {.type = EOF_TOKEN};
@@ -1326,33 +1247,8 @@ static char parseCompositeTypeBody(parserState *state, size_t depth, char isInte
                 continue;
             }
         }
-        char hasFunc = isInterface && tok.type == FUNC;
-        if (hasFunc) tok = advance(state);
-        if (hasFunc && (tok.type != IDENTIFIER || peek(state).type != LEFT_PAREN)) {
-            signatureError(state, "Expected interface method after func");
-            goto invalid;
-        }
-        size_t start = state->tokenIndex;
-        if (isInterface && tok.type == IDENTIFIER && peek(state).type == LEFT_PAREN) {
-            token name = tok;
-            advance(state);
-            signatureFields params = {0}, results = {0};
-            char ok = parseSignatureFields(state, &params, 1, depth + 1);
-            freeSignatureFields(&params);
-            if (!ok) goto invalid;
-            SET_TOK;
-            if (tok.type == LEFT_PAREN) {
-                ok = parseSignatureFields(state, &results, 0, depth + 1);
-                freeSignatureFields(&results);
-                if (!ok) goto invalid;
-            } else if (tok.type != SEMICOLON && !parseSignatureType(state, depth + 1)) goto invalid;
-            if (!addSignatureField(state, &members, name, start, state->tokenIndex)) goto invalid;
-        } else if (isInterface) {
-            if (!parseInterfaceConstraint(state, depth + 1)) goto invalid;
-        } else {
-            if (!parseStructFields(state, &members, NULL, &indexField,
-                                   indexModifier, depth + 1)) goto invalid;
-        }
+        if (!parseStructFields(state, &members, NULL, &indexField,
+                               indexModifier, depth + 1)) goto invalid;
         SET_TOK;
         if (tok.type != SEMICOLON) {
             signatureError(state, "Expected semicolon after composite type member");
@@ -1378,7 +1274,16 @@ invalid:
 }
 
 static char parseSignatureTypeImpl(parserState *state, size_t depth);
+static char parseSignatureTypeInner(parserState *state, size_t depth);
 static char parseSignatureType(parserState *state, size_t depth) {
+    if (state->signatureDepth >= PARSER_MAX_RECURSION_DEPTH)
+        return signatureError(state,"Type nesting limit exceeded");
+    state->signatureDepth++;
+    char ok=parseSignatureTypeInner(state,depth);
+    state->signatureDepth--;
+    return ok;
+}
+static char parseSignatureTypeInner(parserState *state, size_t depth) {
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Type nesting limit exceeded");
     DEFINE_TOK;
@@ -1603,7 +1508,7 @@ static char parseNameFirstParameters(parserState *state, signatureFields *fields
         // Prefer an entire unnamed type when it ends at a field delimiter.
         parserState trial = *state;
         trial.quietErrors = 1;
-        char unnamed = parseSignatureType(&trial, depth + 1) &&
+        char unnamed = parseTypeConstraint(&trial) &&
             (currentToken(&trial).type == COMMA || currentToken(&trial).type == RIGHT_PAREN);
         char hasNames = 0;
         if (!unnamed || ((tok.type == IDENTIFIER || tok.type == UNDERSCORE) && peek(state).type == COMMA)) {
@@ -1633,7 +1538,7 @@ static char parseNameFirstParameters(parserState *state, signatureFields *fields
         if (unnamed && !hasNames) {
             state->tokenIndex = trial.tokenIndex;
             state->pendingGreater = trial.pendingGreater;
-        } else if (!parseSignatureType(state, depth + 1)) return 0;
+        } else if (!parseTypeConstraint(state)) return 0;
         size_t end = state->tokenIndex;
         if (hasNames) {
             if (variadic && namesStart != namesEnd)
@@ -1680,7 +1585,7 @@ static char parseSignatureFields(parserState *state, signatureFields *fields,
             if (!addSignatureField(state, fields, name, groupStart, groupEnd)) return 0;
             tok = advance(state);
         } else {
-            if (!parseSignatureType(state, depth + 1)) return 0;
+            if (!parseTypeConstraint(state)) return 0;
             size_t end = state->tokenIndex;
             SET_TOK;
             char hasName = tok.type == IDENTIFIER || tok.type == UNDERSCORE;
@@ -1896,7 +1801,7 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
     if (tok.type == LEFT_PAREN) {
         if (!parseSignatureFields(state, &results, 0, 0)) goto invalid;
     } else if (tok.type != LEFT_CURLY_BRACE && !(isExtern && tok.type == SEMICOLON)) {
-        if (!parseSignatureType(state, 0)) goto invalid;
+        if (!parseTypeConstraint(state)) goto invalid;
         if (!addSignatureField(state, &results, (token){.type = EOF_TOKEN},
                                resultStart, state->tokenIndex)) goto invalid;
     }
@@ -2326,19 +2231,87 @@ invalid:
 }
 
 static char startsInterfaceMethod(parserState *state) {
-    token tok = state->tokens[state->tokenIndex];
-    if (tok.type == FUNC) return 1;
+    token tok = currentToken(state);
+    if (tok.type == FUNC) return peek(state).type == IDENTIFIER;
     if (tok.type != IDENTIFIER) return 0;
     size_t i = state->tokenIndex + 1;
-    // Preserve generic method signatures while allowing embedded Box[T] types.
-    if (i < state->tokensLen && state->tokens[i].type == LEFT_BRACKET) {
+    if (i < state->tokensLen &&
+        (state->tokens[i].type == LESS_THAN || state->tokens[i].type == LEFT_BRACKET)) {
         size_t depth = 1;
         while (++i < state->tokensLen && depth) {
-            if (state->tokens[i].type == LEFT_BRACKET) depth++;
-            if (state->tokens[i].type == RIGHT_BRACKET) depth--;
+            enum tokenType k = state->tokens[i].type;
+            if (k == LESS_THAN || k == LEFT_BRACKET) depth++;
+            if (k == GREATER_THAN || k == RIGHT_BRACKET) depth--;
+            if (k == BITSHIFT_RIGHT) depth = depth > 1 ? depth - 2 : 0;
         }
     }
     return i < state->tokensLen && state->tokens[i].type == LEFT_PAREN;
+}
+
+// Interfaces contain either method signatures or one union of type terms.
+// The final semicolon of a type list is optional.
+static char parseInterfaceBody(parserState *state, struct stmt_interface *node) {
+    token tok = advance(state);
+    while (tok.type != RIGHT_CURLY_BRACE) {
+        if (!startsInterfaceMethod(state)) {
+            if (node->nMethods || node->nConstraints)
+                return signatureError(state, "Interface must contain methods or one type list");
+            size_t start = state->tokenIndex;
+            if (!parseTypeConstraint(state)) return 0;
+            node->constraints = malloc(sizeof(typeTokens));
+            CHECK_MALLOC(node->constraints);
+            node->constraints[node->nConstraints++] =
+                copySignatureSpan(state, start, state->tokenIndex);
+            tok = currentToken(state);
+            if (tok.type == SEMICOLON) tok = advance(state);
+            if (tok.type != RIGHT_CURLY_BRACE)
+                return signatureError(state, "Expected end of interface type list");
+            break;
+        }
+        if (node->nConstraints)
+            return signatureError(state, "Interface must contain methods or one type list");
+        if (tok.type == FUNC && peek(state).type != IDENTIFIER)
+            return signatureError(state, "Interface methods have an implied receiver");
+        stmt method = parseFuncDeclaration(state, 1, tok.type == FUNC, 0);
+        if (state->isSynchronizing) return 0;
+        struct stmt_func *signature = method.value;
+        signature->isExtern = 0;
+        for (size_t i = 0; i < node->nMethods; i++) {
+            if (!strcmp(node->methods[i].name.lexeme, signature->name.lexeme)) {
+                free(signature);
+                return signatureError(state, "Duplicate interface method");
+            }
+        }
+        struct stmt_func *methods = realloc(node->methods, (node->nMethods + 1) * sizeof(*methods));
+        CHECK_MALLOC(methods);
+        node->methods = methods;
+        node->methods[node->nMethods++] = *signature;
+        free(signature);
+        tok = currentToken(state);
+    }
+    advance(state);
+    return 1;
+}
+
+struct stmt_interface *parseInterfaceType(typeTokens span) {
+    if (span.nTokens < 3 || span.tokens[0].type != INTERFACE ||
+        span.tokens[1].type != LEFT_CURLY_BRACE)
+        return NULL;
+    token *tokens = malloc((span.nTokens + 1) * sizeof(token));
+    CHECK_MALLOC(tokens);
+    memcpy(tokens, span.tokens, span.nTokens * sizeof(token));
+    tokens[span.nTokens] = (token){.type = EOF_TOKEN};
+    parserState state = {
+        .tokens = tokens, .tokensLen = span.nTokens + 1, .tokenIndex = 1, .quietErrors = 1};
+    struct stmt_interface *node = calloc(1, sizeof(*node));
+    CHECK_MALLOC(node);
+    char ok = parseInterfaceBody(&state, node) && state.tokenIndex == span.nTokens;
+    free(tokens);
+    if (!ok) {
+        free(node);
+        return NULL;
+    }
+    return node;
 }
 
 static stmt parseInterface(parserState *state) {
@@ -2359,45 +2332,7 @@ static stmt parseInterface(parserState *state) {
         signatureError(state, "Expected interface body");
         goto invalid;
     }
-    tok = advance(state);
-    while (tok.type != RIGHT_CURLY_BRACE) {
-        if (!startsInterfaceMethod(state)) {
-            size_t start = state->tokenIndex;
-            if (!parseInterfaceConstraint(state, 0)) goto invalid;
-            SET_TOK;
-            if (tok.type != SEMICOLON) {
-                signatureError(state, "Expected semicolon after interface constraint");
-                goto invalid;
-            }
-            typeTokens *constraints = realloc(node->constraints,
-                (node->nConstraints + 1) * sizeof(*constraints));
-            CHECK_MALLOC(constraints);
-            node->constraints = constraints;
-            node->constraints[node->nConstraints++] =
-                copySignatureSpan(state, start, state->tokenIndex);
-            tok = advance(state);
-            continue;
-        }
-        // Interface methods omit the func keyword and end in a semicolon.
-        stmt method = parseFuncDeclaration(state, 1, tok.type == FUNC, 0);
-        if (state->isSynchronizing) goto invalid;
-        struct stmt_func *signature = method.value;
-        signature->isExtern = 0;
-        for (size_t i = 0; i < node->nMethods; i++) {
-            if (!strcmp(node->methods[i].name.lexeme, signature->name.lexeme)) {
-                signatureError(state, "Duplicate interface method");
-                free(signature);
-                goto invalid;
-            }
-        }
-        struct stmt_func *methods = realloc(node->methods, (node->nMethods + 1) * sizeof(*methods));
-        CHECK_MALLOC(methods);
-        node->methods = methods;
-        node->methods[node->nMethods++] = *signature;
-        free(signature);
-        SET_TOK;
-    }
-    advance(state);
+    if (!parseInterfaceBody(state, node)) goto invalid;
     node->nTypeParams = typeParams.count;
     node->typeParamNames = typeParams.names;
     node->typeParamConstraints = typeParams.types;

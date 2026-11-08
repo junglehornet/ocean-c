@@ -99,7 +99,7 @@ int main(void) {
     assert(type->underlying.nTokens == 7 && type->underlying.tokens[6].type == GREATER_THAN);
     valid("type Deep Box<Box<Box<int>>>;");
     valid("type Mixed Box<Box[int], Pair<int, []string>>;");
-    valid("interface Derived<T Box<int>> { Base<Box<T>>; Read(value Box<T>) Box<T>; }");
+    valid("interface Derived<T Box<int>> { Read(value Box<T>) Box<T>; }");
     valid("func constrained<T Box<Box<int>>>(value T) T { return value; }");
     r = valid("struct Constrained<T Box<int>> { value T; }");
     box = r.statements[0].value;

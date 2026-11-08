@@ -80,7 +80,7 @@ func take(xs mixed Scalar[]) int { return len(xs); }
 func main() int { xs := mixed Scalar[]{1, "x"}; xs[0] = "y";
     return take(xs) + take(int[]{2, 3}); }''', 4)
 
-    program(definitions + '''interface Extended { Value; Extra() bool; }
+    program(definitions + '''interface Extended { Get() int; Extra() bool; }
 struct Both { n int; }
 func (b Both) Get() int { return b.n; }
 func (b Both) Extra() bool { return true; }

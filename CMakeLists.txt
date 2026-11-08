@@ -139,6 +139,9 @@ if(BUILD_TESTING)
     add_test(NAME fallthrough_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fallthrough_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(fallthrough_test PROPERTIES TIMEOUT 60)
+    add_test(NAME type_lists_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/type_lists_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(type_lists_test PROPERTIES TIMEOUT 90)
     add_test(NAME type_constraints_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/type_constraints_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(type_constraints_test PROPERTIES TIMEOUT 60)

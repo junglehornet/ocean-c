@@ -1,0 +1,33 @@
+package main;
+
+interface Number { int | float }
+interface Integer { ~int }
+
+// Method receivers are implied, and parameter names are optional.
+interface Arithmetic {
+    func add(int) int;
+    func subtract(other int) int;
+    func multiply<T int | float>(T) float;
+}
+
+struct Value { amount int; }
+func (value Value) add(other int) int { return value.amount + other; }
+func (value Value) subtract(other int) int { return value.amount - other; }
+func (value Value) multiply<T Number>(other T) float {
+    return (value.amount -> float) * (other -> float);
+}
+
+func add<T Number>(x, y T) T { return x + y; }
+func sum(x, y int | float) int | float { return x + y; }
+func multiply<T Arithmetic>(value T, other i8) float {
+    // The value argument widens from i8 to the explicitly selected int type.
+    return value.multiply<int>(other);
+}
+
+func main() int {
+    if (add<int>(2, 3) != 5 || add<float>(1.5, 2.5) != 4.0) return 1;
+    if (sum(2, 3.5).(float) != 5.5) return 2;
+    small: i8 = 3;
+    if (multiply<Value>(Value{2}, small) != 6.0) return 3;
+    return 0;
+}

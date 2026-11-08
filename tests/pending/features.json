@@ -504,45 +504,6 @@
       ]
     },
     {
-      "id": "custom_constraints",
-      "stage": "semantic",
-      "reason": "Membership and infix requirements are parsed but have no type-set semantics.",
-      "syntax": "existing",
-      "cases": [
-        {
-          "id": "exclude",
-          "source": "struct Matrix {} interface Scalar { -Matrix; } func takes[T Scalar](value T) {} func main() { takes[Matrix](Matrix{}); }",
-          "expected": {
-            "ok": false,
-            "diagnostic": "constraint_violation"
-          }
-        },
-        {
-          "id": "require",
-          "source": "struct Required {} interface Exact { =Required; } func takes[T Exact](value T) {} func main() { takes[int](1); }",
-          "expected": {
-            "ok": false,
-            "diagnostic": "constraint_violation"
-          }
-        },
-        {
-          "id": "permit",
-          "source": "struct Optional {} interface Allowed { +Optional; } func takes[T Allowed](value T) {} func main() { takes[Optional](Optional{}); }",
-          "expected": {
-            "ok": true
-          }
-        },
-        {
-          "id": "operator",
-          "source": "struct Opaque {} interface Multiply { self * int; } func takes[T Multiply](value T) {} func main() { takes[Opaque](Opaque{}); }",
-          "expected": {
-            "ok": false,
-            "diagnostic": "missing_required_operator"
-          }
-        }
-      ]
-    },
-    {
       "id": "index_delegation",
       "stage": "semantic",
       "reason": "Delegated field existence is checked, but indexability is not.",

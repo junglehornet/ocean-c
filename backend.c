@@ -732,7 +732,27 @@ static const char *receiverTypeName(Backend *b, const char *name) {
     }
     return name;
 }
+static size_t typeListEnd(typeTokens span, size_t start) {
+    size_t nesting = 0;
+    for (size_t i = start; i < span.nTokens; i++) {
+        enum tokenType k = span.tokens[i].type;
+        if (!nesting && k == BITWISE_OR) return i;
+        if (k == LESS_THAN || k == LEFT_BRACKET || k == LEFT_PAREN || k == LEFT_CURLY_BRACE)
+            nesting++;
+        if ((k == GREATER_THAN || k == RIGHT_BRACKET || k == RIGHT_PAREN ||
+             k == RIGHT_CURLY_BRACE) &&
+            nesting)
+            nesting--;
+        if (k == BITSHIFT_RIGHT) nesting = nesting > 1 ? nesting - 2 : 0;
+    }
+    return span.nTokens;
+}
+
 static Kind constraintKind(Backend *b, typeTokens span) {
+    if (span.nTokens >= 3 && span.tokens[0].type == INTERFACE) {
+        struct stmt_interface *contract=parseInterfaceType(span);
+        return contract ? interfacePattern(b,contract) : BAD;
+    }
     if (span.nTokens == 1) {
         Scope *owner = NULL;
         struct stmt_type *declaration = findTypeDeclaration(b, span.tokens[0].lexeme, &owner);
@@ -890,6 +910,7 @@ static size_t recordField(BufferKind *t, const char *name) {
 static Kind type(Backend *b, typeTokens t) {
     if (!t.nTokens)
         return VOID;
+    if (t.tokens[0].type == TILDE || typeListEnd(t, 0) < t.nTokens) return SCALAR_ANY;
     if (t.nTokens > 1 && t.tokens[t.nTokens - 1].type == STAR)
         return pointerKind(b, type(b, (typeTokens){t.nTokens - 1, t.tokens}));
     typeTokens arrayElement;
@@ -910,6 +931,7 @@ static Kind type(Backend *b, typeTokens t) {
     }
     if (t.nTokens == 3 && t.tokens[0].type == INTERFACE &&
         t.tokens[1].type == LEFT_CURLY_BRACE && t.tokens[2].type == RIGHT_CURLY_BRACE) return SCALAR_ANY;
+    if (t.nTokens >= 3 && t.tokens[0].type == INTERFACE) return SCALAR_ANY;
     if (t.nTokens == 1 && findInterface(b, t.tokens[0].lexeme)) return SCALAR_ANY;
     if (isBufferType(t)) {
         if (t.nTokens == 1) return SCALAR_ANY;
@@ -992,6 +1014,28 @@ static Kind type(Backend *b, typeTokens t) {
     fail(b, "unsupported type (supported: int, i64, i32, i16, i8, uint, u64, u32, u16, u8, float, f64, f32, bool, string)");
     return BAD;
 }
+static int identicalKinds(Backend *, Kind, Kind);
+static int constraintSubset(Backend *b, Kind left, Kind right, unsigned depth) {
+    if (depth > 32) return 0;
+    BufferKind *a = bufferKind(b, left), *c = bufferKind(b, right);
+    if (a && a->shape == 12 && a->contract->nConstraints)
+        return constraintSubset(b, constraintKind(b, a->contract->constraints[0]), right,
+                                depth + 1);
+    if (c && c->shape == 12 && c->contract->nConstraints)
+        return constraintSubset(b, left, constraintKind(b, c->contract->constraints[0]), depth + 1);
+    if (a && a->shape == 8) {
+        for (size_t i = 0; i < a->nArguments; i++)
+            if (!constraintSubset(b, a->arguments[i], right, depth + 1)) return 0;
+        return 1;
+    }
+    if (c && c->shape == 8) {
+        for (size_t i = 0; i < c->nArguments; i++)
+            if (constraintSubset(b, left, c->arguments[i], depth + 1)) return 1;
+        return 0;
+    }
+    return identicalKinds(b, left, right);
+}
+
 static int identicalKinds(Backend *b, Kind left, Kind right) {
     if (left == right) return 1;
     BufferKind *a = bufferKind(b, left), *c = bufferKind(b, right);
@@ -1001,6 +1045,15 @@ static int identicalKinds(Backend *b, Kind left, Kind right) {
         if (a->record != c->record || a->nArguments != c->nArguments) return 0;
         for (size_t i = 0; i < a->nArguments; i++)
             if (!identicalKinds(b, a->arguments[i], c->arguments[i])) return 0;
+        return 1;
+    }
+    if (a->shape == 8 && c->shape == 8) {
+        if (a->nArguments != c->nArguments) return 0;
+        for (size_t i=0;i<a->nArguments;i++) {
+            int found=0;
+            for (size_t j=0;j<c->nArguments;j++) if (identicalKinds(b,a->arguments[i],c->arguments[j])) found=1;
+            if (!found) return 0;
+        }
         return 1;
     }
     return a->shape == c->shape && a->fixedArray == c->fixedArray && a->dynamicArray == c->dynamicArray && a->immutableString == c->immutableString &&
@@ -1023,12 +1076,7 @@ static int matchesInterface(Backend *b, struct stmt_interface *contract, Kind ac
                 if (t == BITSHIFT_RIGHT) nesting = nesting > 1 ? nesting - 2 : 0;
             }
             typeTokens term = {end - start, span.tokens + start};
-            int exclude = term.nTokens && term.tokens[0].type == MINUS;
-            if (term.nTokens && (exclude || term.tokens[0].type == PLUS || term.tokens[0].type == EQUALS || term.tokens[0].type == TILDE)) {
-                term.tokens++; term.nTokens--;
-            }
-            int fits = matchesConstraint(b, constraintKind(b, term), actual);
-            if (exclude ? !fits : fits) matches = 1;
+            if (matchesConstraint(b, constraintKind(b, term), actual)) matches = 1;
             start = end + 1;
         }
         if (!matches) accepted = 0;
@@ -1055,15 +1103,26 @@ static int matchesInterface(Backend *b, struct stmt_interface *contract, Kind ac
                 if (!strcmp(receiverTypeName(b, receiver.tokens[index].lexeme), name)) provided = f;
             }
         }
-        if (!provided || provided->nTypeParams || required->nTypeParams ||
+        if (!provided || provided->nTypeParams != required->nTypeParams ||
             required->nParams != provided->nParams || required->nResults != provided->nResults ||
             required->isVariadic != provided->isVariadic) { accepted = 0; break; }
         TypeBinding *previous = b->typeBindings;
-        TypeBinding *bindings = checked(sizeof(*bindings) * (provided->nReceiverTypeParams + 1));
+        TypeBinding *bindings = checked(sizeof(*bindings) * (provided->nReceiverTypeParams + 2*provided->nTypeParams + 1));
         for (size_t j = 0; j < provided->nReceiverTypeParams && j < owner->nArguments; j++) {
             bindings[j] = (TypeBinding){provided->receiverTypeParamNames[j].lexeme, owner->arguments[j], b->typeBindings};
             b->typeBindings = &bindings[j];
         }
+        for (size_t j=0;j<provided->nTypeParams;j++) {
+            Kind placeholder=constraintShape(b,17,VOID,j);
+            size_t index=provided->nReceiverTypeParams+2*j;
+            bindings[index]=(TypeBinding){provided->typeParamNames[j].lexeme,placeholder,b->typeBindings};
+            b->typeBindings=&bindings[index];
+            bindings[index+1]=(TypeBinding){required->typeParamNames[j].lexeme,placeholder,b->typeBindings};
+            b->typeBindings=&bindings[index+1];
+        }
+        for (size_t j=0;accepted && j<provided->nTypeParams;j++)
+            if (!(constraintSubset(b,constraintKind(b,required->typeParamConstraints[j]),constraintKind(b,provided->typeParamConstraints[j]),0) &&
+                  constraintSubset(b,constraintKind(b,provided->typeParamConstraints[j]),constraintKind(b,required->typeParamConstraints[j]),0))) accepted=0;
         for (size_t j = 0; accepted && j < required->nParams + required->nResults; j++) {
             typeTokens a = j < required->nParams ? required->paramTypeNames[j] : required->resultTypes[j - required->nParams];
             typeTokens c = j < provided->nParams ? provided->paramTypeNames[j] : provided->resultTypes[j - provided->nParams];
@@ -1983,6 +2042,8 @@ static Kind expressionKind(Backend *b, expr *e) {
         }
         if (v->operation == EXPR_ASSIGNMENT || v->operation >= EXPR_ADD_EQUALS)
             return a;
+        if (a == SCALAR_ANY || c == SCALAR_ANY)
+            return v->checkedResult.nTokens ? type(b, v->checkedResult) : SCALAR_ANY;
         return a == FLOAT || c == FLOAT ? FLOAT : a == F32 || c == F32 ? F32
                : integral(b, a) && integral(b, c) && a != c ? commonIntegerKind(b, a, c) : a;
     }
@@ -3247,11 +3308,174 @@ static Value addArrayValues(Backend *b, Value left, Value right, Kind resultKind
     }
     return result;
 }
+static Value binary(Backend *, enum binaryExprType, Value, Value);
+static int runtimeOperator(Backend *b, enum binaryExprType op, Kind a, Kind c) {
+    int comparison = op >= EXPR_EQUALITY && op <= EXPR_GREATER_EQUALS;
+    if ((integral(b, a) || floating(b, a)) && (integral(b, c) || floating(b, c))) {
+        if (integral(b, a) && integral(b, c) && unsignedInteger(b, a) != unsignedInteger(b, c) &&
+            (unsignedInteger(b, a) ? a : c) == UINT)
+            return 0;
+        return comparison || (op >= EXPR_ADD && op <= EXPR_DIVIDE) ||
+               (!floating(b, a) && !floating(b, c) &&
+                (op == EXPR_MODULO || op == EXPR_XOR || op == EXPR_BITWISE_AND ||
+                 op == EXPR_AMPERSAND || op == EXPR_BITWISE_OR || op == EXPR_BITSHIFT_LEFT ||
+                 op == EXPR_BITSHIFT_RIGHT));
+    }
+    if (op == EXPR_ADD && arrayAdditionKind(b, a, c) != BAD) return 1;
+    BufferKind *left = bufferKind(b, a), *right = bufferKind(b, c);
+    if (left && right && left->shape == 6 && right->shape == 6 && a == c &&
+        (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS))
+        return 1;
+    if (a == BOOL && c == BOOL)
+        return op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS || op == EXPR_XOR;
+    return a == stringKind(b) && c == a &&
+           (op == EXPR_ADD || op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS);
+}
+typedef struct {
+    Kind *items;
+    size_t count;
+} OperatorKinds;
+static void operatorKinds(Backend *b, typeTokens span, OperatorKinds *result, unsigned depth) {
+    if (depth > 32) {
+        fail(b, "recursive operator type list");
+        return;
+    }
+    for (size_t start = 0; start < span.nTokens;) {
+        size_t end = typeListEnd(span, start);
+        typeTokens term = {end - start, span.tokens + start};
+        if (term.nTokens && term.tokens[0].type == TILDE) {
+            term.tokens++;
+            term.nTokens--;
+        }
+        struct stmt_interface *contract =
+            term.nTokens == 1 ? findInterface(b, term.tokens[0].lexeme)
+            : term.nTokens && term.tokens[0].type == INTERFACE ? parseInterfaceType(term)
+                                                               : NULL;
+        Scope *owner = NULL;
+        struct stmt_type *alias =
+            term.nTokens == 1 ? findTypeDeclaration(b, term.tokens[0].lexeme, &owner) : NULL;
+        if (contract && contract->nConstraints)
+            operatorKinds(b, contract->constraints[0], result, depth + 1);
+        else if (alias && alias->isAlias) {
+            Scope *previous = b->scope;
+            b->scope = owner;
+            operatorKinds(b, alias->underlying, result, depth + 1);
+            b->scope = previous;
+        } else {
+            Kind kind = type(b, term);
+            int found = 0;
+            for (size_t i = 0; i < result->count; i++)
+                if (result->items[i] == kind) found = 1;
+            if (!found) {
+                result->items = realloc(result->items, (result->count + 1) * sizeof(Kind));
+                if (!result->items) {
+                    fprintf(stderr, "out of memory\n");
+                    exit(1);
+                }
+                result->items[result->count++] = kind;
+            }
+        }
+        start = end + 1;
+    }
+}
+// Dispatch follows the declared finite alternatives, never arbitrary any values.
+static Value boxedBinary(Backend *b, enum binaryExprType op, Value a, Value c, typeTokens leftTypes,
+                         typeTokens rightTypes) {
+    Kind fallback[] = {INT, I8, I16, I32, UINT, U8, U16, U32, FLOAT, F32, BOOL, stringKind(b)};
+    OperatorKinds left = {0}, right = {0};
+    if (a.kind == SCALAR_ANY && leftTypes.nTokens) operatorKinds(b, leftTypes, &left, 0);
+    if (c.kind == SCALAR_ANY && rightTypes.nTokens) operatorKinds(b, rightTypes, &right, 0);
+    Kind *leftKinds = left.count ? left.items : a.kind == SCALAR_ANY ? fallback : &a.kind;
+    Kind *rightKinds = right.count ? right.items : c.kind == SCALAR_ANY ? fallback : &c.kind;
+    size_t leftCount = left.count             ? left.count
+                       : a.kind == SCALAR_ANY ? sizeof(fallback) / sizeof(*fallback)
+                                              : 1;
+    size_t rightCount = right.count            ? right.count
+                        : c.kind == SCALAR_ANY ? sizeof(fallback) / sizeof(*fallback)
+                                               : 1;
+    int comparison = op >= EXPR_EQUALITY && op <= EXPR_GREATER_EQUALS;
+    Value result = slot(b, comparison ? BOOL : SCALAR_ANY);
+    unsigned end = ++b->label;
+    for (size_t i = 0; i < leftCount; i++) {
+        for (size_t j = 0; j < rightCount; j++) {
+            if (!runtimeOperator(b, op, leftKinds[i], rightKinds[j])) continue;
+            Value yes = value(b, BOOL, "true");
+            if (a.kind == SCALAR_ANY)
+                yes = testConstraint(b, a, constraintShape(b, 14, leftKinds[i], 0), 0);
+            if (c.kind == SCALAR_ANY) {
+                Value match = testConstraint(b, c, constraintShape(b, 14, rightKinds[j], 0), 0),
+                      both = temp(b, BOOL);
+                fprintf(b->body, "  %s = and i1 %s, %s\n", both.operand, yes.operand,
+                        match.operand);
+                yes = both;
+            }
+            unsigned selected = ++b->label, next = ++b->label;
+            branch(b, yes, selected, next);
+            label(b, selected);
+            Value left = a.kind == SCALAR_ANY ? unboxMatched(b, a, leftKinds[i]) : a;
+            Value right = c.kind == SCALAR_ANY ? unboxMatched(b, c, rightKinds[j]) : c;
+            Value computed = binary(b, op, left, right);
+            rawStore(b, result, comparison ? computed : boxScalar(b, computed, 1));
+            jump(b, end);
+            label(b, next);
+        }
+    }
+    fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+    b->nullChecksUsed = 1;
+    b->terminated = 1;
+    free(left.items);
+    free(right.items);
+    label(b, end);
+    return load(b, result);
+}
+static Value boxedUnary(Backend *b, enum unaryExprType op, Value input, typeTokens types) {
+    Kind fallback[] = {INT, I8, I16, I32, UINT, U8, U16, U32, FLOAT, F32, BOOL};
+    OperatorKinds choices = {0};
+    if (types.nTokens) operatorKinds(b, types, &choices, 0);
+    Kind *kinds = choices.count ? choices.items : fallback;
+    size_t count = choices.count ? choices.count : sizeof(fallback) / sizeof(*fallback);
+    Value result = slot(b, SCALAR_ANY);
+    unsigned end = ++b->label;
+    for (size_t i = 0; i < count; i++) {
+        Kind kind = kinds[i];
+        if ((op == UNARY_BITWISE_NOT && !integral(b, kind)) ||
+            (op == UNARY_LOGICAL_NOT && kind != BOOL) || (op != UNARY_LOGICAL_NOT && kind == BOOL))
+            continue;
+        Value match = testConstraint(b, input, constraintShape(b, 14, kind, 0), 0);
+        unsigned yes = ++b->label, next = ++b->label;
+        branch(b, match, yes, next);
+        label(b, yes);
+        Value concrete = unboxMatched(b, input, kind), computed;
+        if (op == UNARY_NEGATE)
+            computed = binary(b, EXPR_SUBTRACT,
+                              value(b, kind, floating(b, kind) ? "0.000000e+00" : "0"), concrete);
+        else if (op == UNARY_BITWISE_NOT || op == UNARY_LOGICAL_NOT) {
+            computed = temp(b, kind);
+            fprintf(b->body, "  %s = xor %s %s, %s\n", computed.operand, irType(b, kind),
+                    concrete.operand, kind == BOOL ? "true" : "-1");
+        } else {
+            int decrement = op == UNARY_POSTFIX_DECREMENT || op == UNARY_PREFIX_DECREMENT;
+            computed = binary(b, decrement ? EXPR_SUBTRACT : EXPR_ADD, concrete,
+                              value(b, kind, floating(b, kind) ? "1.000000e+00" : "1"));
+        }
+        rawStore(b, result, boxScalar(b, computed, 1));
+        jump(b, end);
+        label(b, next);
+    }
+    fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
+    b->nullChecksUsed = 1;
+    b->terminated = 1;
+    free(choices.items);
+    label(b, end);
+    return load(b, result);
+}
+
 static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
     if (op == EXPR_ADD) {
         Kind result = arrayAdditionKind(b, a.kind, c.kind);
         if (result != BAD) return addArrayValues(b, a, c, result);
     }
+    if (a.kind == SCALAR_ANY || c.kind == SCALAR_ANY) return boxedBinary(b,op,a,c,(typeTokens){0},(typeTokens){0});
     if (a.kind == NULL_VALUE || c.kind == NULL_VALUE) {
         if (op != EXPR_EQUALITY && op != EXPR_NOT_EQUALS) {
             fail(b, "null supports only equality comparisons");
@@ -4029,7 +4253,11 @@ static Value expressionImpl(Backend *b, expr *e) {
                     EXPR_ADD,         EXPR_SUBTRACT,  EXPR_MULTIPLY,      EXPR_DIVIDE,
                     EXPR_MODULO,      EXPR_XOR,       EXPR_BITSHIFT_LEFT, EXPR_BITSHIFT_RIGHT,
                     EXPR_BITWISE_AND, EXPR_BITWISE_OR};
-                r = binary(b, ops[v->operation - EXPR_ADD_EQUALS], old, r);
+                enum binaryExprType op=ops[v->operation - EXPR_ADD_EQUALS];
+                if ((old.kind==SCALAR_ANY || r.kind==SCALAR_ANY) &&
+                    (v->operandTypes[0].nTokens || v->operandTypes[1].nTokens))
+                    r=boxedBinary(b,op,old,r,v->operandTypes[0],v->operandTypes[1]);
+                else r = binary(b,op,old,r);
             }
             if (v->operation == EXPR_ADD_EQUALS && target && target->fixedArray && !target->shape && r.kind != addr.kind &&
                 v->left.type == EXPR_TYPE_IDENTIFIER) {
@@ -4040,6 +4268,7 @@ static Value expressionImpl(Backend *b, expr *e) {
         }
         Value a = expression(b, &v->left);
         if (v->operation == EXPR_LOGICAL_OR || v->operation == EXPR_LOGICAL_AND) {
+            if (a.kind == SCALAR_ANY) a = unboxValue(b,a,BOOL);
             Value dest = slot(b, BOOL);
             store(b, dest, a);
             unsigned rhs = ++b->label, end = ++b->label;
@@ -4049,6 +4278,7 @@ static Value expressionImpl(Backend *b, expr *e) {
                 branch(b, a, end, rhs);
             label(b, rhs);
             Value c = expression(b, &v->right);
+            if (c.kind == SCALAR_ANY) c = unboxValue(b,c,BOOL);
             store(b, dest, c);
             jump(b, end);
             label(b, end);
@@ -4060,7 +4290,12 @@ static Value expressionImpl(Backend *b, expr *e) {
         Value c = expression(b, &v->right);
         if (v->operation == EXPR_COMMA)
             return c;
-        return binary(b, v->operation, a, c);
+        Value computed = (a.kind==SCALAR_ANY || c.kind==SCALAR_ANY) &&
+            (v->operandTypes[0].nTokens || v->operandTypes[1].nTokens)
+            ? boxedBinary(b,v->operation,a,c,v->operandTypes[0],v->operandTypes[1])
+            : binary(b, v->operation, a, c);
+        return computed.kind == SCALAR_ANY && v->checkedResult.nTokens
+            ? convert(b,computed,type(b,v->checkedResult)) : computed;
     }
     case EXPR_TYPE_UNARY: {
         struct expr_unary *v = e->underlying;
@@ -4079,6 +4314,10 @@ static Value expressionImpl(Backend *b, expr *e) {
             Value addr = address(b, &v->child), old = load(b, addr);
             int decrement =
                 v->operation == UNARY_POSTFIX_DECREMENT || v->operation == UNARY_PREFIX_DECREMENT;
+            if (old.kind == SCALAR_ANY) {
+                Value updated = boxedUnary(b,v->operation,old,v->operandTypes); store(b,addr,updated);
+                return v->operation == UNARY_POSTFIX_INCREMENT || v->operation == UNARY_POSTFIX_DECREMENT ? old : updated;
+            }
             Value one = floating(b, old.kind) ? value(b, old.kind, "0x3FF0000000000000") : value(b, old.kind, "1");
             Value r = binary(b, decrement ? EXPR_SUBTRACT : EXPR_ADD, old, one);
             store(b, addr, r);
@@ -4087,7 +4326,15 @@ static Value expressionImpl(Backend *b, expr *e) {
                        ? old
                        : r;
         }
-        Value a = expression(b, &v->child), r = temp(b, a.kind);
+        Value a = expression(b, &v->child);
+        if (a.kind == SCALAR_ANY) {
+            if (v->operation == UNARY_LOGICAL_NOT) {
+                Value concrete=unboxValue(b,a,BOOL), result=temp(b,BOOL);
+                fprintf(b->body,"  %s = xor i1 %s, true\n",result.operand,concrete.operand); return result;
+            }
+            return boxedUnary(b,v->operation,a,v->operandTypes);
+        }
+        Value r = temp(b, a.kind);
         if (v->operation == UNARY_NEGATE && floating(b, a.kind))
             fprintf(b->body, "  %s = fneg %s %s\n", r.operand, irType(b, a.kind), a.operand);
         else if (v->operation == UNARY_NEGATE && integral(b, a.kind))
@@ -5083,6 +5330,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         bind(b, f->paramNames[j].lexeme, addr);
         b->scope->bindings->autoRelease = 1;
         store(b, addr, value(b, k, "%%arg%zu", j));
+        if (k==SCALAR_ANY) checkElementRequirement(b,load(b,addr),constraintKind(b,f->paramTypeNames[j]));
     }
     for (size_t j = 0; j < f->nResults; j++)
         if (f->resultNames[j].type != EOF_TOKEN) {

@@ -196,37 +196,26 @@ int main(void) {
     r = valid("interface Reader { Read(buffer []byte) (int, error); Close() error; }", 1);
     struct stmt_interface *iface = r.statements[0].value;
     assert(iface->nMethods == 2 && iface->methods[0].nResults == 2);
-    r = valid("interface Scalar { ~int | ~string; Reader; pkg.Writer; "
-              "Box[int]; Read(buffer []byte) (int, error); func Close(); }", 1);
+    r = valid("interface Scalar { ~int | ~string }", 1);
     iface = r.statements[0].value;
-    assert(iface->nConstraints == 4 && iface->nMethods == 2);
+    assert(iface->nConstraints == 1 && iface->nMethods == 0);
     typeTokens unionTerms = iface->constraints[0];
     assert(unionTerms.nTokens == 5 && unionTerms.tokens[0].type == TILDE &&
            !strcmp(unionTerms.tokens[1].lexeme, "int") &&
            unionTerms.tokens[2].type == BITWISE_OR &&
            unionTerms.tokens[3].type == TILDE &&
            !strcmp(unionTerms.tokens[4].lexeme, "string"));
-    assert(iface->constraints[1].nTokens == 1 &&
-           !strcmp(iface->constraints[1].tokens[0].lexeme, "Reader"));
-    assert(iface->constraints[2].nTokens == 3 &&
-           iface->constraints[2].tokens[1].type == DOT);
-    assert(iface->constraints[3].nTokens == 4 &&
-           iface->constraints[3].tokens[3].type == RIGHT_BRACKET);
-    assert(!strcmp(iface->methods[0].name.lexeme, "Read") &&
-           !iface->methods[0].isExtern && iface->methods[0].nResults == 2);
     valid("interface Empty {} interface Any { any; }", 2);
     r = valid("interface Mapper[T, U any, V ~int | ~string,] { "
-              "Base[T]; ~[]V | pkg.Values[V]; Map(value T) U; }", 1);
+              "Map(value T) U; }", 1);
     iface = r.statements[0].value;
-    assert(iface->nTypeParams == 3 && iface->nConstraints == 2 && iface->nMethods == 1);
+    assert(iface->nTypeParams == 3 && iface->nConstraints == 0 && iface->nMethods == 1);
     assert(!strcmp(iface->typeParamNames[0].lexeme, "T") &&
            !strcmp(iface->typeParamNames[1].lexeme, "U") &&
            !strcmp(iface->typeParamNames[2].lexeme, "V"));
     assert(iface->typeParamConstraints[0].nTokens == 1 &&
            iface->typeParamConstraints[0].tokens[0].type == ANY &&
            iface->typeParamConstraints[2].nTokens == 5);
-    assert(iface->constraints[0].nTokens == 4 &&
-           !strcmp(iface->constraints[0].tokens[2].lexeme, "T"));
     assert(!strcmp(iface->methods[0].paramTypeNames[0].tokens[0].lexeme, "T") &&
            !strcmp(iface->methods[0].resultTypes[0].tokens[0].lexeme, "U"));
     valid("interface EmptyGeneric[T interface { ~int | ~string; }] {}", 1);
@@ -238,13 +227,13 @@ int main(void) {
     r = parse("interface Bad[T any] { ~; } interface Good[T any] { M() T; }");
     assert(r.hasError && r.nStatements == 1 && r.statements[0].type == STMT_INTERFACE &&
            ((struct stmt_interface*)r.statements[0].value)->nTypeParams == 1);
-    truncatedInputs("interface Mapper[T any, U ~int | ~string] { Base[T]; Map(value T) U; }");
+    truncatedInputs("interface Mapper[T any, U ~int | ~string] { Map(value T) U; }");
 
-    valid("interface Nested { interface { ~int | ~string; }; "
-          "~[]byte | pkg.Bytes; M[T any](T x) T; }", 1);
+    valid("interface Nested { interface { ~int | ~string; } | "
+          "~[]byte | pkg.Bytes }", 1);
     invalid("interface Bad { ~; }"); invalid("interface Bad { int |; }");
     invalid("interface Bad { | int; }"); invalid("interface Bad { int || string; }");
-    invalid("interface Bad { int }"); invalid("interface Bad { Reader Writer; }");
+    valid("interface Number { int }", 1); invalid("interface Bad { Reader Writer; }");
     invalid("interface Bad { pkg.; }"); invalid("interface Bad { Box[int; }");
     invalid("interface Bad { index; }"); invalid("interface Bad { ~pkg.index; }");
     invalid("interface Bad { Reader; M(); M(); }");
@@ -252,7 +241,7 @@ int main(void) {
     invalid("interface Bad { Reader; M() {} }");
     r = parse("interface Bad { int |; } func after() {}");
     assert(r.hasError && r.nStatements == 1 && r.statements[0].type == STMT_FUNC);
-    truncatedInputs("interface Scalar { Reader; ~int | ~string; Box[int]; M(x int) int; }");
+    truncatedInputs("interface Scalar { Reader | ~int | ~string | Box[int] }");
 
     r = valid("extern int write([]byte bytes); extern void done(void);", 2);
     assert(((struct stmt_func*)r.statements[0].value)->isExtern);
@@ -402,8 +391,8 @@ int main(void) {
     valid("type Indexed struct { index data []int; };", 1);
     valid("type Indexed struct { index data; data []int; };", 1);
     valid("type Reader interface { Read(buffer []byte) (int, error); Close(); };", 1);
-    valid("type Constraint interface { ~int | ~string; Reader; };", 1);
-    valid("func nested[T interface { M(x int) int; ~int | ~string; }](x T) {}", 1);
+    valid("type Constraint interface { ~int | ~string | Reader };", 1);
+    valid("func nested[T interface { M(x int) int; }](x T) {}", 1);
     valid("type Nested Box[map[string][]int, struct { x int; }, func()];", 1);
     valid("type Array [2 * (pkg.Width + 1)]int;", 1);
     valid("type Matrix int[height + 1][width << 2];", 1);
@@ -432,7 +421,7 @@ int main(void) {
     invalid("type Bad [1, 2]int;");
     invalid("type Bad int[width +];");
     invalid("type Bad int[(width];");
-    truncatedInputs("type Record struct { values Box[int, string]; }; type C interface { M(x []int) int; ~int | ~string; };");
+    truncatedInputs("type Record struct { values Box[int, string]; }; type C interface { M(x []int) int; };");
     e = expression("number->int8;");
     assert(e.type == EXPR_TYPE_TYPECAST);
     struct expr_typecast *cast = e.underlying;
@@ -532,36 +521,14 @@ int main(void) {
     e = expression("f[map[string]](x);");
     assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INDEX);
     truncatedInputs("result := pkg.pair[Box[int], []string,](x, y).field[0];");
-    r = valid("interface Scalar[T any] { -Matrix; =Required[T]; +Optional; "
-              "self * T; T + self; self == pkg.Value; self += T; Read() T; }", 1);
+    r = valid("interface Arithmetic { func add(int) int; func subtract(other int) int; func multiply<T int | float>(T) float; }", 1);
     iface = r.statements[0].value;
-    assert(iface->nConstraints == 7 && iface->nMethods == 1);
-    assert(iface->constraints[0].nTokens == 2 && iface->constraints[0].tokens[0].type == MINUS);
-    assert(iface->constraints[1].nTokens == 5 && iface->constraints[1].tokens[0].type == EQUALS);
-    assert(iface->constraints[2].tokens[0].type == PLUS);
-    assert(iface->constraints[3].nTokens == 3 && iface->constraints[3].tokens[1].type == STAR &&
-           !strcmp(iface->constraints[3].tokens[0].lexeme, "self"));
-    assert(iface->constraints[4].tokens[1].type == PLUS &&
-           !strcmp(iface->constraints[4].tokens[2].lexeme, "self"));
-    valid("type Scalar interface { -Matrix; =Required; +Optional; self * T; T + self; };", 1);
-    valid("func custom[T interface { -Matrix; self * int; }](value T) {}", 1);
-    valid("interface Complex { self * map[string][]int; "
-          "Box[int]* + self; self << int; self && bool; "
-          "self * interface { M() int; }; }", 1);
-    valid("interface Legacy { *Pointer; Value*; ~int | ~string; Reader; }", 1);
-    invalid("interface Bad { -; }"); invalid("interface Bad { =; }");
-    invalid("interface Bad { +; }"); invalid("interface Bad { --Matrix; }");
-    invalid("interface Bad { -index; }"); invalid("interface Bad { self *; }");
-    invalid("interface Bad { * self; extra }");
-    invalid("interface Bad { self + T + U; }");
-    invalid("interface Bad { self * index; }");
-    invalid("interface Bad { self * T }");
-    invalid("interface Bad { self -> T; }");
-    invalid("type Bad interface { self *; };");
-    r = parse("interface Bad { self *; } interface Good { -Matrix; self * int; }");
-    assert(r.hasError && r.nStatements == 1 && r.statements[0].type == STMT_INTERFACE &&
-           ((struct stmt_interface*)r.statements[0].value)->nConstraints == 2);
-    truncatedInputs("interface Scalar[T any] { -Matrix; =Base[T]; +Other; self * T; T + self; }");
+    assert(iface->nMethods == 3 && iface->nConstraints == 0);
+    assert(iface->methods[0].paramNames[0].type == EOF_TOKEN);
+    assert(!strcmp(iface->methods[1].paramNames[0].lexeme,"other"));
+    assert(iface->methods[2].nTypeParams == 1 && iface->methods[2].typeParamConstraints[0].nTokens == 3);
+    valid("func add(x, y int | float) int | float { return x + y; }", 1);
+    truncatedInputs("interface Arithmetic { func multiply<T int | float>(T) float; }");
     fixture("testcode/helloWorld.oc", 2);
     fixture("testcode/loops.oc", 2);
     printf("%zu parser feature checks passed\n", checks);

@@ -1055,6 +1055,49 @@ Ordinary `panic` statements and other runtime errors retain their locations,
 even inside a forwarding block: `forward panic { panic "hi"; }` reports at
 `panic "hi"`. The message and full call trace are preserved.
 
+### Interfaces and type lists
+
+Interfaces contain either method signatures or one type list; the two forms
+cannot be mixed. Method receivers are implied, parameter names are optional,
+and methods can declare their own constrained type parameters:
+
+```ocean
+interface Arithmetic {
+    func add(int) int;
+    func subtract(other int) int;
+    func multiply<T int | float>(T) float;
+}
+interface Number { int | float }
+interface Integer { ~int }
+func add<T int | float>(x, y T) T { return x + y; }
+func sum(x, y int | float) int | float { return x + y; }
+```
+
+The `func` keyword is optional for interface method signatures. Type-list
+interfaces allow an optional final semicolon. `int | float` matches exactly
+those types (including aliases); a distinct `type ID int` requires `~int` to
+match its underlying representation. `~int` does not include narrower types
+such as `i8` or `i32`. Type lists also work directly in parameter lists and as
+generic constraints. Smaller numeric value arguments can widen to an accepted
+parameter type, for example an `i8` argument to `multiply<int>`. This does not
+make `i8` satisfy an exact `int | float` generic type constraint.
+
+Operators in generic or interface bodies must be valid for every possible
+operand type, even if the function is unused. `int | float` permits arithmetic
+and numeric comparisons; integer-only operators require integer-only lists.
+An unconstrained `any` parameter does not promise arithmetic. Operands sharing
+a generic parameter have the same concrete type; ordinary interface parameters
+can hold different listed types, so their operations must support all pairs.
+Named type-list parameters use boxed runtime dispatch; generic calls specialize
+normally. Generic interface method implementations must match the required
+signature and constraints, independently of parameter names. Generic methods
+still require explicit type arguments at calls. Calls through a boxed method
+interface still require narrowing to a concrete type first.
+
+Interface operator requirements (`self * T`) and signed membership prefixes
+(`-Type`, `+Type`, `=Type`) are no longer part of the language. Use type lists
+for supported operations and named methods for custom struct behavior.
+
 `T[]` is homogeneous: every element has the same concrete type, which must
 satisfy `T`. `mixed T[]` permits different concrete types, and each element must
 satisfy the interface `T`. `any` is equivalent to the empty `interface{}`.

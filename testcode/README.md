@@ -34,9 +34,10 @@ the examples were checked and run on Linux.
 | `native.oc` | Recursive functions and C output. |
 | `structs.oc` | Generic structs, immutable value parameters, and independent copies. |
 | `structEtc.oc` | Generic matrices, a named pointer receiver method, enums, and a type alias. |
+| `interfaces.oc` | Exact and underlying type lists, numeric operators, and generic method interfaces. |
 | `enums.oc` | Variant construction, payload extraction, and exhaustive matching. |
 
-All 14 `.oc` examples pass `ocean check` and run with exit status zero in separate
+All 15 `.oc` examples pass `ocean check` and run with exit status zero in separate
 packages. Loops use deterministic updates and terminate. Formatting uses Ocean
 `io`'s `{}` placeholders. Struct operations use named methods; there is no struct
 operator overloading or delegated indexing in these examples.

@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
             'if (!(a == b) || a != b || a == "x" || !("x" != a)) return 1; '
             'if (!("a\\0b" == "a\\0b") || "a\\0b" == "a\\0c" || '
             '"a\\0b" == "a") return 2; return 0; }', optimize=True)
-    program('func same<T>(a T, b T) bool { return a == b; } '
+    program('func same<T string>(a T, b T) bool { return a == b; } '
             'func main() int { a := "abc"; b := a; b = "axc"; '
             'bytes: i8[] = "abc"; if (a == b || !(a != b) || !(bytes == a) || '
             '!same<string>(a, "abc")) return 1; return 0; }', optimize=True)

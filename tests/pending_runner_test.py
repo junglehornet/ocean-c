@@ -40,7 +40,7 @@ class PendingRunnerTests(unittest.TestCase):
                     "generic_instantiation", "ambiguous_calls", "generic_function_values",
                     "type_dimension_resolution", "constant_evaluation",
                     "return_checking", "label_resolution", "extern_linkage", "struct_value_application",
-                    "custom_constraints", "index_delegation", "cleanup"}
+                    "index_delegation", "cleanup"}
         self.assertEqual({feature["id"] for feature in self.manifest["features"]}, expected)
 
     def test_duplicate_ids_rejected(self):

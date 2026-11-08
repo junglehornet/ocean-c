@@ -316,29 +316,21 @@ mutable `data` storage supporting copy assignments and element writes.
 Value argument application remains unimplemented. Native struct values and
 concrete generic struct layouts are supported by the backend.
 
-## Custom interface constraints
+## Interfaces and type lists
 
-Struct operator overloading is not supported. Use named receiver methods.
-Interfaces retain custom requirement syntax:
+Interfaces contain either method signatures or one union of types. Type-list
+interfaces do not require a final semicolon. Named and inline forms share the
+same parser; methods have implied receivers, optional parameter names, and may
+have generic type parameters. Signed membership and infix operator requirements
+have been removed. Struct operator overloading remains unsupported.
 
-```Ocean
-interface Scalar[T any] {
-    -Matrix;
-    =Required;
-    +Optional;
-    self * T;
-    T + self;
-}
-```
-
-Membership prefixes retain the meanings proposed in `structEtc.oc`: `-Type`
-excludes a type, `=Type` requires it, and `+Type` permits it. Infix requirements
-must have `self` as at least one complete operand; the other operand uses the
-type grammar. Named and inline interfaces share this syntax. Complete terms
-remain token spans in `stmt_interface.constraints` (or the enclosing inline
-type span), so semantic analysis can interpret their meaning later. Existing
-embedded types and union constraints take precedence over infix requirements.
-`self *;` is rejected as an incomplete multiplication requirement.
+`type_lists_test.py` checks numeric generic constraints, boxed arithmetic and
+comparisons, strings, array concatenation, pointer equality, direct type-list
+parameters, value widening, exact versus underlying
+type matching, constraint forwarding, generic method interface satisfaction, and imported constraints.
+It executes both ordinary and optimized native builds. Operator checking covers
+every alternative in a generic body before specialization. Existing parser suites
+cover both interface forms and AST signatures. No rejection tests were added.
 
 ## Expanded coverage suites
 
@@ -411,11 +403,11 @@ printing, and incorrect command-line success statuses on errors.
 
 ## Pending incomplete features
 
-The [pending inventory](pending/README.md) defines 52 future acceptance
-contracts across 17 incomplete feature areas. CTest lists them individually
+The [pending inventory](pending/README.md) defines 48 future acceptance
+contracts across 16 incomplete feature areas. CTest lists them individually
 under the `pending` label. Unmet contracts are reported as skipped/XFAIL;
 unexpected successes fail so they can be promoted to regression tests.
-Six cases probe current APIs; 46 semantic/cleanup fixtures explicitly
+Six cases probe current APIs; 42 semantic/cleanup fixtures explicitly
 await compiler-stage adapters. Proposed syntax is marked in the inventory.
 
 ```sh

@@ -34,7 +34,9 @@ struct Type {
     int bufferSize;
     int bufferFamily; // 1: bare buffer; 2: buffer<T> without a dimension.
     typeTokens dimension;
-    typeTokens constraint; // Inherited from a receiver struct parameter, when present.
+    typeTokens constraint; // Type-list spelling, retained for membership and operator checks.
+    int abstractParameter;
+    int typeList;
     const char *spelling; // Keep explicit numeric type names for diagnostics.
     Type *semanticBase; // Numeric family used for operations; spelling retains storage width.
 };
@@ -137,6 +139,12 @@ static Symbol *declare(Context *c, token name, Type *type, int isType) {
 }
 static Type *canonical(Type *t) { return t->semanticBase ? t->semanticBase : t; }
 static int interfaceFits(Context *, Type *, Type *, unsigned);
+static typeTokens typeSetSpan(Type *);
+static int typeSetFits(Context *, Type *, Type *, unsigned);
+static int identicalTypes(Type *, Type *);
+static size_t constraintTermEnd(typeTokens, size_t);
+static typeTokens constraintTerm(typeTokens, size_t, size_t);
+
 static int definedType(Type *t) { return t->declaration && !t->declaration->isAlias; }
 static Type *representation(Type *t) {
     for (unsigned depth = 0; t->underlying && depth < 64; depth++) t = t->underlying;
@@ -163,6 +171,9 @@ static int enumArgumentsFit(Type *a, Type *b) {
     return 1;
 }
 static int matchesTypeConstraint(Type *expected, Type *actual) {
+    if (typeSetSpan(expected).nTokens)
+        return typeSetFits(expected->context, expected, actual, 0);
+
     if (canonical(expected) == &any || (canonical(actual) == &any && !definedType(expected)) || expected == &unknown || actual == &unknown) return 1;
     if (expected == actual) return 1;
     if (expected->enumeration || actual->enumeration)
@@ -193,9 +204,7 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
         return expected->element && actual->element && !strcmp(expected->name, actual->name) &&
                expected->count == actual->count && expected->bufferSize == actual->bufferSize &&
                matchesTypeConstraint(expected->element, actual->element);
-    const char *a = expected->spelling ? expected->spelling : expected->name;
-    const char *b = actual->spelling ? actual->spelling : actual->name;
-    return !strcmp(a, b);
+    return identicalTypes(expected, actual);
 }
 // Preserve numeric spelling before canonicalization erases integer storage widths.
 static int integerShape(Type *t, int *isUnsigned) {
@@ -214,6 +223,10 @@ static int integerFits(Type *expected, Type *actual) {
     return eu == au ? ew >= aw : (!eu && au && ew > aw);
 }
 static int compatibleTypes(Type *a, Type *b) {
+    if (a == b) return 1;
+    if (typeSetSpan(a).nTokens) return typeSetFits(a->context, a, b, 0);
+    if (typeSetSpan(b).nTokens) return typeSetFits(b->context, a, b, 0);
+
     int au, bu;
     if (integerShape(a, &au) && integerShape(b, &bu)) return integerFits(a, b);
     a = canonical(a);
@@ -332,6 +345,12 @@ static Type *typeOf(Context *c, typeTokens span) {
     if (!span.nTokens)
         return &unknown;
     token t = span.tokens[0];
+    if (t.type == TILDE || constraintTermEnd(span, 0) < span.nTokens) {
+        Type *list = allocate(c, sizeof(*list));
+        list->name = "type-list"; list->typeList = 1;
+        list->constraint = span; list->context = c;
+        return list;
+    }
     if (span.nTokens > 2 && t.type == IDENTIFIER && span.tokens[1].type == LEFT_BRACKET &&
         span.tokens[2].type != RIGHT_BRACKET) {
         Symbol *symbol = lookup(c, t.lexeme);
@@ -398,6 +417,12 @@ static Type *typeOf(Context *c, typeTokens span) {
     }
     if (span.nTokens == 3 && t.type == INTERFACE && span.tokens[1].type == LEFT_CURLY_BRACE &&
         span.tokens[2].type == RIGHT_CURLY_BRACE) return &any;
+    if (t.type == INTERFACE) {
+        struct stmt_interface *contract=parseInterfaceType(span);
+        if (!contract) { error(c,t,"invalid interface type"); return &unknown; }
+        Type *result=allocate(c,sizeof(*result)); result->name="interface";
+        result->interface=contract; result->context=c; return result;
+    }
     if (isBufferType(span)) {
         if (span.nTokens == 1) {
             Type *family = allocate(c, sizeof(*family));
@@ -610,6 +635,7 @@ static void formatType(FILE *out, Type *t, unsigned depth) {
         fputs("?", out);
         return;
     }
+    if (t->typeList) { formatTypeSpan(out, t->constraint, NULL, depth + 1); return; }
     if (t->spelling) {
         fputs(t->spelling, out);
         return;
@@ -862,11 +888,37 @@ static void typeIntegerLiteral(Type *expected, expr *e) {
     e->type = EXPR_TYPE_TYPECAST;
     e->underlying = cast;
 }
+static Type *widenToTypeSet(Context *c, Type *expected, Type *actual, expr *value, unsigned depth) {
+    if (depth > 32 || !typeSetSpan(expected).nTokens || typeSetSpan(actual).nTokens ||
+        typeSetFits(c, expected, actual, 0))
+        return actual;
+    typeTokens list = typeSetSpan(expected);
+    for (size_t start = 0; start < list.nTokens;) {
+        size_t end = constraintTermEnd(list, start);
+        Type *candidate = typeOf(c, constraintTerm(list, start, end));
+        if (typeSetSpan(candidate).nTokens) {
+            Type *widened = widenToTypeSet(c, candidate, actual, value, depth + 1);
+            if (widened != actual) return widened;
+        } else if (list.tokens[start].type != TILDE && !definedType(candidate) &&
+                   !definedType(actual) &&
+                   (integerFits(candidate, actual) ||
+                    (canonical(candidate) == &floating && canonical(actual) == &floating &&
+                     candidate->spelling == NULL && actual->spelling &&
+                     !strcmp(actual->spelling, "f32")))) {
+            typeIntegerLiteral(candidate, value);
+            return candidate;
+        }
+        start = end + 1;
+    }
+    return actual;
+}
+
 static Type *expectedExpression(Context *c, Type *expected, expr *e, token at) {
     coerceFloatLiteral(expected, e);
     if (e->type == EXPR_TYPE_COMPOSITE && !((struct expr_composite *)e->underlying)->type.type)
         return checkComposite(c, expected, e, at);
     Type *actual = expression(c, e);
+    actual = widenToTypeSet(c,expected,actual,e,0);
     return contextualInteger(c, expected, actual, e, at);
 }
 static void checkArrayDataLiteral(Context *c, Type *element, struct expr_composite *literal,
@@ -914,6 +966,8 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
                 return (TypeList){items, 2};
             }
         }
+        if (!assignmentContext && i < nExpected)
+            t = widenToTypeSet(c,expected[i],t,&values[i],0);
         if (!assignmentContext && i < nExpected)
             t = contextualInteger(c, expected[i], t, &values[i], values[i].location);
         if (t->enumeration && t->nArguments != t->enumeration->nTypeParams)
@@ -1118,23 +1172,22 @@ static void function(Context *c, struct stmt_func *f) {
                 continue;
             }
             Type *bound = allocate(c, sizeof(*bound));
-            bound->name = name.lexeme;
             if (record && i < record->nTypeParams)
-                bound->constraint = record->typeParamConstraints[i];
+                *bound = *typeOf(c, record->typeParamConstraints[i]);
+            else *bound = any;
+            if (!strcmp(bound->name,"any") && !bound->interface) { bound->name=name.lexeme; bound->semanticBase=NULL; }
+            bound->abstractParameter = 1; bound->context = c;
             declare(c, name, bound, 1);
         }
     }
     for (size_t i = 0; i < f->nTypeParams; i++) {
-        typeTokens span = f->typeParamConstraints[i];
-        int compound = 0;
-        for (size_t j = 0; j < span.nTokens; j++)
-            if (span.tokens[j].type == TILDE || span.tokens[j].type == BITWISE_OR) compound = 1;
-        Type *bound = compound ? &any : typeOf(c, span);
-        if (bound == &any) {
-            bound = allocate(c, sizeof(*bound));
-            *bound = any;
-            bound->semanticBase = &any; // An abstract parameter is resolved when specialized.
-        }
+        Type *resolved = typeOf(c, f->typeParamConstraints[i]);
+        Type *bound = allocate(c, sizeof(*bound));
+        *bound = *resolved;
+        bound->abstractParameter = 1;
+        bound->context = c;
+        if (resolved==&integer || resolved==&signedByte || resolved==&floating || resolved==&boolean || resolved==&any)
+            bound->semanticBase=resolved;
         declare(c, f->typeParamNames[i], bound, 1);
     }
     for (size_t i = 0; i < f->nParams; i++) {
@@ -1209,25 +1262,71 @@ static typeTokens constraintTerm(typeTokens span, size_t start, size_t end) {
     if (term.nTokens && term.tokens[0].type == TILDE) { term.tokens++; term.nTokens--; }
     return term;
 }
-static int acceptsConstraint(Context *c, Type *owner, typeTokens span, Type *actual, unsigned depth) {
-    if (depth > 32) return 0;
-    if (actual->constraint.nTokens) {
-        // Every alternative of an abstract receiver parameter must be accepted.
-        typeTokens inherited = actual->constraint;
-        for (size_t start = 0; start < inherited.nTokens;) {
-            size_t end = constraintTermEnd(inherited, start);
-            Type *term = parameter(c, owner, constraintTerm(inherited, start, end));
-            if (!acceptsConstraint(c, owner, span, term, depth + 1)) return 0;
+static typeTokens typeSetSpan(Type *type) {
+    if (type->typeList) return type->constraint;
+    if (type->interface && type->interface->nConstraints) return type->interface->constraints[0];
+    return (typeTokens){0};
+}
+static Type *underlyingIdentity(Type *type) {
+    for (unsigned i = 0; type->underlying && i < 64; i++)
+        type = type->underlying;
+    return type;
+}
+// Exact terms retain width and defined-type identity. ~ removes only definitions,
+// never integer widths. A set accepts another set only if it covers every term.
+static int typeSetFits(Context *c, Type *expected, Type *actual, unsigned depth) {
+    if (depth > 32 || !c) return 0;
+    if (expected == actual) return 1;
+    typeTokens source = typeSetSpan(actual), target = typeSetSpan(expected);
+    if (source.nTokens) {
+        for (size_t start = 0; start < source.nTokens;) {
+            size_t end = constraintTermEnd(source, start);
+            Type *term = typeOf(c, constraintTerm(source, start, end));
+            if (source.tokens[start].type == TILDE) {
+                int covered = 0;
+                for (size_t j = 0; j < target.nTokens;) {
+                    size_t stop = constraintTermEnd(target, j);
+                    if (target.tokens[j].type == TILDE &&
+                        identicalTypes(
+                            underlyingIdentity(typeOf(c, constraintTerm(target, j, stop))),
+                            underlyingIdentity(term)))
+                        covered = 1;
+                    j = stop + 1;
+                }
+                if (!covered) return 0;
+            } else if (!typeSetFits(c, expected, term, depth + 1))
+                return 0;
             start = end + 1;
         }
         return 1;
     }
+    if (!target.nTokens) return matchesTypeConstraint(expected, actual);
+    for (size_t start = 0; start < target.nTokens;) {
+        size_t end = constraintTermEnd(target, start);
+        Type *bound = typeOf(c, constraintTerm(target, start, end));
+        if (typeSetSpan(bound).nTokens) {
+            if (typeSetFits(c, bound, actual, depth + 1)) return 1;
+        } else if (target.tokens[start].type == TILDE
+                       ? identicalTypes(underlyingIdentity(bound), underlyingIdentity(actual))
+                       : matchesTypeConstraint(bound, actual))
+            return 1;
+        start = end + 1;
+    }
+    return 0;
+}
+
+static int acceptsConstraint(Context *c, Type *owner, typeTokens span, Type *actual, unsigned depth) {
+    if (depth > 32) return 0;
+    if (typeSetSpan(actual).nTokens) {
+        Type *expected=parameter(c,owner,span);
+        return typeSetFits(c,expected,actual,depth+1);
+    }
     for (size_t start = 0; start < span.nTokens;) {
         size_t end = constraintTermEnd(span, start);
         int underlying = span.tokens[start].type == TILDE;
-        Type *candidate = underlying ? representation(actual) : actual;
+        Type *candidate = underlying ? underlyingIdentity(actual) : actual;
         Type *bound = parameter(c, owner, constraintTerm(span, start, end));
-        if (matchesTypeConstraint(underlying ? representation(bound) : bound, candidate)) return 1;
+        if (underlying ? identicalTypes(underlyingIdentity(bound), candidate) : matchesTypeConstraint(bound, candidate)) return 1;
         start = end + 1;
     }
     return 0;
@@ -1288,25 +1387,7 @@ static int interfaceFits(Context *c, Type *expected, Type *actual, unsigned dept
     if (actual == &unknown || canonical(actual) == &any || actual->interface) return 1;
     struct stmt_interface *contract = expected->interface;
     if (contract->nTypeParams) return 0;
-    for (size_t i = 0; i < contract->nConstraints; i++) {
-        typeTokens span = contract->constraints[i];
-        int accepted = 0;
-        for (size_t start = 0; start < span.nTokens;) {
-            size_t end = constraintTermEnd(span, start);
-            typeTokens term = constraintTerm(span, start, end);
-            if (term.nTokens && (term.tokens[0].type == PLUS || term.tokens[0].type == EQUALS)) {
-                term.tokens++; term.nTokens--;
-            }
-            int exclude = term.nTokens && term.tokens[0].type == MINUS;
-            if (exclude) { term.tokens++; term.nTokens--; }
-            Type *bound = typeOf(c, term);
-            int fits = bound->interface ? interfaceFits(c, bound, actual, depth + 1)
-                                       : matchesTypeConstraint(bound, actual);
-            if (exclude ? !fits : fits) accepted = 1;
-            start = end + 1;
-        }
-        if (!accepted) return 0;
-    }
+    if (contract->nConstraints && !typeSetFits(c, expected, actual, depth + 1)) return 0;
     Type *owner = actual;
     int pointer = !definedType(owner) && !strcmp(owner->name, "pointer");
     if (pointer) owner = owner->element;
@@ -1314,18 +1395,36 @@ static int interfaceFits(Context *c, Type *expected, Type *actual, unsigned dept
         if (!owner || (!owner->record && !definedType(owner))) return 0;
         struct stmt_func *required = &contract->methods[i];
         struct stmt_func *provided = findMethod(c, owner, required->name.lexeme);
-        if (!provided || provided->nTypeParams || required->nTypeParams ||
+        if (!provided || provided->nTypeParams != required->nTypeParams ||
             provided->nParams != required->nParams || provided->nResults != required->nResults ||
             provided->isVariadic != required->isVariadic) return 0;
         typeTokens receiver = provided->receiverType;
         if (!pointer && (receiver.tokens[0].type == STAR || receiver.tokens[receiver.nTokens - 1].type == STAR)) return 0;
         Type callable = {.function = provided, .receiver = owner};
+        Type requirement = {.function = required};
+        size_t n=required->nTypeParams;
+        Type **arguments=allocate(c,(n+1)*sizeof(Type*));
+        for (size_t j=0;j<n;j++) {
+            Type *parameterType=allocate(c,sizeof(Type));
+            char *name=allocate(c,48); snprintf(name,48,"<interface-parameter-%zu>",j);
+            parameterType->name=name; arguments[j]=parameterType;
+        }
+        callable.nArguments=requirement.nArguments=n;
+        callable.arguments=requirement.arguments=arguments;
+        for (size_t j=0;j<n;j++) {
+            Type *a=parameter(c,&requirement,required->typeParamConstraints[j]);
+            Type *b=parameter(c,&callable,provided->typeParamConstraints[j]);
+            if (!(typeSetSpan(a).nTokens || typeSetSpan(b).nTokens
+                    ? typeSetFits(c,a,b,0) && typeSetFits(c,b,a,0) : identicalTypes(a,b))) return 0;
+        }
         for (size_t j = 0; j < required->nParams + required->nResults; j++) {
-            Type *a = typeOf(c, j < required->nParams ? required->paramTypeNames[j]
+            Type *a = parameter(c,&requirement,j < required->nParams ? required->paramTypeNames[j]
                                                     : required->resultTypes[j - required->nParams]);
             Type *b = parameter(c, &callable, j < provided->nParams ? provided->paramTypeNames[j]
                                                     : provided->resultTypes[j - provided->nParams]);
-            if (!identicalTypes(a, b)) return 0;
+            if (typeSetSpan(a).nTokens || typeSetSpan(b).nTokens) {
+                if (!typeSetFits(c,a,b,0) || !typeSetFits(c,b,a,0)) return 0;
+            } else if (!identicalTypes(a, b)) return 0;
         }
     }
     return 1;
@@ -1516,6 +1615,95 @@ static size_t sourcePackage(Context *c, const char *filename) {
     return 0;
 }
 #include "semantic_enum.inc"
+
+// Resolve operator capability universally, including unused generic bodies.
+static int numericType(Type *t) {
+    Type *base = representation(t);
+    return base == &integer || base == &signedByte || base == &floating;
+}
+static enum binaryExprType baseOperation(enum binaryExprType operation) {
+    static const enum binaryExprType operations[] = {
+        EXPR_ADD, EXPR_SUBTRACT,      EXPR_MULTIPLY,       EXPR_DIVIDE,      EXPR_MODULO,
+        EXPR_XOR, EXPR_BITSHIFT_LEFT, EXPR_BITSHIFT_RIGHT, EXPR_BITWISE_AND, EXPR_BITWISE_OR};
+    return operation >= EXPR_ADD_EQUALS && operation <= EXPR_BITWISE_OR_EQUALS
+               ? operations[operation - EXPR_ADD_EQUALS]
+               : operation;
+}
+static Type *operatorResult(Context *c, enum binaryExprType op, Type *a, Type *b, unsigned depth) {
+    if (depth > 32) return NULL;
+    typeTokens list = typeSetSpan(a);
+    if (list.nTokens) {
+        Type *result = NULL;
+        for (size_t start = 0; start < list.nTokens;) {
+            size_t end = constraintTermEnd(list, start);
+            Type *term = typeOf(c, constraintTerm(list, start, end));
+            Type *part =
+                operatorResult(c, op, term, a == b && a->abstractParameter ? term : b, depth + 1);
+            if (!part) return NULL;
+            if (!result)
+                result = part;
+            else if (!identicalTypes(result, part))
+                result = a;
+            start = end + 1;
+        }
+        // Arithmetic on one abstract T preserves its concrete specialization.
+        return a == b && op != EXPR_LOGICAL_AND && op != EXPR_LOGICAL_OR &&
+                       !(op >= EXPR_EQUALITY && op <= EXPR_GREATER_EQUALS)
+                   ? a
+                   : result;
+    }
+    list = typeSetSpan(b);
+    if (list.nTokens) {
+        Type *result = NULL;
+        for (size_t start = 0; start < list.nTokens;) {
+            size_t end = constraintTermEnd(list, start);
+            Type *part =
+                operatorResult(c, op, a, typeOf(c, constraintTerm(list, start, end)), depth + 1);
+            if (!part) return NULL;
+            if (!result)
+                result = part;
+            else if (!identicalTypes(result, part))
+                result = b;
+            start = end + 1;
+        }
+        return result;
+    }
+    if (a == &unknown || b == &unknown) return &unknown;
+    if (canonical(a) == &any || canonical(b) == &any || a->interface || b->interface) return NULL;
+    if (numericType(a) && numericType(b)) {
+        if (definedType(a) || definedType(b)) {
+            if (!identicalTypes(a, b)) return NULL;
+        }
+        int isFloat = representation(a) == &floating || representation(b) == &floating;
+        int arithmetic = op >= EXPR_ADD && op <= EXPR_DIVIDE;
+        int integral = op == EXPR_MODULO || op == EXPR_XOR || op == EXPR_AMPERSAND ||
+                       op == EXPR_BITWISE_AND || op == EXPR_BITWISE_OR ||
+                       op == EXPR_BITSHIFT_LEFT || op == EXPR_BITSHIFT_RIGHT;
+        int comparison = op >= EXPR_EQUALITY && op <= EXPR_GREATER_EQUALS;
+        if (!arithmetic && !comparison && !(integral && !isFloat)) return NULL;
+        int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);
+        if (!isFloat && aw && bw && au != bu && (au ? aw : bw) == 64) return NULL;
+        return comparison ? &boolean : identicalTypes(a, b) ? a : isFloat ? &floating : &integer;
+    }
+    if (canonical(a) == &boolean && canonical(b) == &boolean &&
+        (op == EXPR_LOGICAL_AND || op == EXPR_LOGICAL_OR || op == EXPR_EQUALITY ||
+         op == EXPR_NOT_EQUALS))
+        return &boolean;
+    if (representation(a)->immutableString && representation(b)->immutableString) {
+        if (op == EXPR_ADD) return &string;
+        if (op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) return &boolean;
+    }
+    if (op == EXPR_ADD && a->dynamicArray && b->dynamicArray && matchesTypeConstraint(a, b) &&
+        matchesTypeConstraint(b, a))
+        return a;
+    if ((op == EXPR_EQUALITY || op == EXPR_NOT_EQUALS) && !strcmp(a->name, "pointer") &&
+        identicalTypes(a, b))
+        return &boolean;
+    return NULL;
+}
+static int abstractOperand(Type *t) {
+    return t->abstractParameter || typeSetSpan(t).nTokens || t->interface || canonical(t) == &any;
+}
 
 static Type *expression(Context *c, expr *e) {
     token at = e ? e->location : (token){0};
@@ -1988,6 +2176,33 @@ static Type *expression(Context *c, expr *e) {
             typeIntegerLiteral(b, &v->left);
             a = b;
         }
+        int collectionAddition = (v->operation == EXPR_ADD || v->operation == EXPR_ADD_EQUALS) &&
+            (a->dynamicArray || b->dynamicArray || !strcmp(a->name,"fixed-array") || !strcmp(b->name,"fixed-array"));
+        if (v->operation != EXPR_ASSIGNMENT && v->operation != EXPR_COMMA && !collectionAddition &&
+            a != &nullValue && b != &nullValue && (abstractOperand(a) || abstractOperand(b))) {
+            enum binaryExprType op = baseOperation(v->operation);
+            v->operandTypes[0]=typeSetSpan(a);
+            v->operandTypes[1]=typeSetSpan(b);
+            Type *result = operatorResult(c, op, a, b, 0);
+            if (!result) {
+                error(c, at, "operator is not supported by every possible operand type");
+                return &unknown;
+            }
+            if (op != v->operation) {
+                if (!writable(c, &v->left)) mutationError(c, &v->left, at, "assignment requires a writable value");
+                check(c, a, result, at);
+                return a;
+            }
+            if (!typeSetSpan(result).nTokens && !result->abstractParameter &&
+                (numericType(result) || result == &boolean || result == &string)) {
+                v->checkedResult.nTokens = 1;
+                v->checkedResult.tokens = calloc(1,sizeof(token));
+                v->checkedResult.tokens[0] = at;
+                v->checkedResult.tokens[0].type = IDENTIFIER;
+                v->checkedResult.tokens[0].lexeme = (char *)(result == &string ? "string" : result->spelling ? result->spelling : result->name);
+            }
+            return result;
+        }
         Type *integerResult = NULL;
         int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);
         int stores = v->operation == EXPR_ASSIGNMENT ||
@@ -2123,6 +2338,12 @@ static Type *expression(Context *c, expr *e) {
         }
         if (v->operation == UNARY_SIZEOF)
             return &integer;
+        if (abstractOperand(t)) {
+            v->operandTypes=typeSetSpan(t);
+            enum binaryExprType op = v->operation == UNARY_BITWISE_NOT ? EXPR_XOR : EXPR_SUBTRACT;
+            if (!operatorResult(c, op, t, t, 0)) error(c, at, "operator is not supported by every possible operand type");
+            return t;
+        }
         if (representation(t) != &integer && representation(t) != &signedByte && representation(t) != &floating && t != &unknown && representation(t) != &any)
             error(c, at, "invalid unary operand");
         return t;
@@ -2222,6 +2443,15 @@ static Type *expression(Context *c, expr *e) {
             c->completionTypes=realloc(c->completionTypes,c->nCompletionTypes*sizeof(*c->completionTypes));
             c->completionUses=realloc(c->completionUses,c->nCompletionTypes*sizeof(*c->completionUses));
             c->completionTypes[n]=t; c->completionUses[n]=field;
+        }
+        if (t->interface && t->interface->nMethods) {
+            for (size_t i=0;i<t->interface->nMethods;i++) {
+                struct stmt_func *method=&t->interface->methods[i];
+                if (strcmp(method->name.lexeme,field.lexeme)) continue;
+                Type *callable=allocate(c,sizeof(*callable)); callable->name="function";
+                callable->function=method; callable->receiver=t; return callable;
+            }
+            error(c,field,"interface has no such method"); return &unknown;
         }
         if (t->dynamicArray && (!strcmp(field.lexeme, "length") || !strcmp(field.lexeme, "capacity"))) return &integer;
 

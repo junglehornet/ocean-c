@@ -53,6 +53,7 @@ static inline const char *programSource(parseResult *program, const char *filena
 
 parseResult parseTokens(tokenlist *tokens);
 parseResult parseTokensWithSource(tokenlist *tokens, const char *source);
+struct stmt_interface *parseInterfaceType(typeTokens span);
 expr *parseBufferDimension(typeTokens dimension);
 char parseTypeApplicationArguments(typeTokens span, typeTokens **arguments, size_t *count);
 

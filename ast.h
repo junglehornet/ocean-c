@@ -166,7 +166,7 @@ struct stmt_interface {
     token *typeParamNames;
     typeTokens *typeParamConstraints;
     size_t nConstraints;
-    typeTokens *constraints; // One span per embedded type/union, excluding ';'.
+    typeTokens *constraints; // Zero for method interfaces, otherwise one type-list span.
     size_t nMethods;
     struct stmt_func *methods;
     struct methodSignature {
@@ -299,6 +299,8 @@ struct expr_dot {
 struct expr_binary {
     expr left, right;
     enum binaryExprType operation;
+    typeTokens checkedResult; // Concrete result of a universally checked boxed operator.
+    typeTokens operandTypes[2]; // Borrowed type-list constraints for boxed dispatch.
 };
 
 struct expr_ternary {
@@ -332,6 +334,7 @@ struct expr_array_new {
 
 struct expr_unary {
     typeTokens sizeofType; // Present for sizeof(T), rather than sizeof(value).
+    typeTokens operandTypes; // Borrowed type-list constraint for boxed dispatch.
     expr child;
     enum unaryExprType operation;
 };
