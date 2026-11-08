@@ -201,6 +201,16 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { x: int; y: bool; if (!y) { x = 8; } return x; }", 8)
     program("func answer() (int result) { result = 23; return; } func main() int { return answer(); }", 23)
     program("func narrow(x i32) i32 { return x + 1; } func main() int { return narrow(40); }", 41)
+    program("func widen(x i32) int { return x; } func take(x i32) i32 { return x; } "
+            "func main() int { small: i8 = -128; unsigned: u8 = 255; "
+            "a := take(small); b: i16 = unsigned; "
+            "if (widen(a) != -128 || b != 255) return 1; "
+            "combined := unsigned + small; if (combined != 127) return 2; "
+            "wide := 255; narrowed := wide -> i8; if (narrowed != -1) return 3; "
+            "literal: i32 = -2147483648; if (widen(literal) != -2147483648) return 4; "
+            "same: u64 = 18446744073709551615; copy: uint = same; "
+            "if (copy != same) return 5; return 0; }", 0, optimize=True)
+
     program(COMPARE + 'func main() int { return strcmp("a", "b"); }', 255)
     program(PRINT + 'func main() { puts("quote: \\\" slash: \\\\ tab:\\t"); }', stdout='quote: " slash: \\ tab:\t\n')
 
@@ -419,7 +429,7 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program(PRINT + 'func main() { s := "hello" + " " + "world"; puts(s); }', stdout="hello world\n", optimize=True)
     program(PRINT + 'func main() { puts("a\\0b" + "c"); }', stdout="a\0bc\n", optimize=True)
     program('func sum(xs ...i8) int { total := 0; for (i := 0; i < len(xs); i++) { total += xs[i]; } return total; } func main() int { return sum("ab"...); }', 195, optimize=True)
-    program('func main() int { s: i8[] = {255}; return s[0]->int + 2; }', 1, optimize=True)
+    program('func main() int { s: i8[] = {255 -> i8}; return s[0]->int + 2; }', 1, optimize=True)
     program('func main() int { s: i8[] = {97, 98, 99, 100}; s.data = {65}; return s[0] + s[1] + s[3]; }', 65, optimize=True)
     program('func main() int { a := "ab"; b := "cd"; for (i := 0; i < 100000; i++) { c := a + b; if (len(c) != 4) { return 1; } } return 0; }', optimize=True)
 

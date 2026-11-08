@@ -152,6 +152,18 @@ not C `int`. Strings are immutable bytes; indexing reads a signed byte and `len`
 counts bytes. Character literals decode Unicode scalars. Identifiers support
 Unicode; exported names begin with Unicode uppercase letters.
 
+Integer variables convert implicitly only when the destination represents the full
+source range: `i8` to `i32`, `u8` to `u16`, and `u8` to `i16` work. Narrowing,
+signed-to-unsigned conversions, and unsigned-to-signed conversions without an
+extra destination bit require `value -> Type`. This applies to arguments,
+initializers, assignments, returns, and collection elements. Fitting integer
+literals may directly initialize or supply narrower types (`small: i8 = 42`);
+integer expressions and variables are checked by type, not their current value.
+Pointer and collection element storage types must match; scalar widening does
+not convert an `i8[]` into an `i32[]`. Mixed-width integer arithmetic promotes
+to 64 bits; fitting literals use the other operand's type. Mixed signed/unsigned
+arithmetic needs a cast if no signed 64-bit type can represent both ranges.
+
 Integer literals (including negative literals) automatically convert in float contexts,
 including typed initializers, assignments, arguments, returns, arithmetic, and
 comparisons such as `myFloat == 0`. Integer variables and integer expressions

@@ -234,6 +234,15 @@ The backend supports:
 - Native struct values, generic struct specialization, nested fields, pointers,
   composites, value copies, and structs in arrays, buffers, arguments, and returns.
 
+Integer values convert implicitly only when every source value fits the destination:
+`i8` to `i32` and `u8` to `i16` work. Narrowing, signed-to-unsigned conversion,
+and unsigned-to-signed conversion without an extra destination bit require an
+explicit `value -> Type` cast. This applies to arguments, assignments, initializers,
+returns, and collection elements. Fitting literals can directly supply narrow types
+(`small: i8 = 42`), while variables and integer expressions are checked by type.
+Pointer and collection element storage types must match; scalar widening does not
+convert `i8[]` to `i32[]`.
+
 Extern functions are file-scoped and must be called with `extern.name(...)`.
 Declare each external function in every file that calls it. A declaration in a
 sibling file or imported package does not make the external function available.

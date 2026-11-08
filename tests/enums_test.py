@@ -214,7 +214,8 @@ func main() int {
         (standard / name / (name + '.oc')).write_text((fixtures / (name + '.oc')).read_text())
     environment['OCEAN_SRC'] = str(standard)
     spec = Path(__file__).resolve().parents[1].joinpath('testcode/enums.oc').read_text()
-    program('import "io";\n' + spec + '''
+    spec = spec.removeprefix('package main;').split('\nfunc main() {', 1)[0]
+    program(spec + '''
 func main() {
     handleEvent(GuiEvent.GuiLoad);
     handleEvent(GuiEvent.KeyPress(65));

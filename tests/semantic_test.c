@@ -2,6 +2,7 @@
 #include "semantic.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <stdio.h>
 static parseResult analyze(char *source, int valid) {
     tokenlist *tokens = scanTokens(source, "semantic-test");
     parseResult p = parseTokens(tokens);
@@ -12,6 +13,51 @@ static parseResult analyze(char *source, int valid) {
     return p;
 }
 int main(void) {
+    // Every signed/unsigned width pair: implicit conversion must preserve the full range.
+    const char *integers[] = {"i8", "i16", "i32", "int", "i64", "u8", "u16", "u32", "uint", "u64"};
+    const int widths[] = {8, 16, 32, 64, 64, 8, 16, 32, 64, 64};
+    for (size_t from = 0; from < 10; from++) {
+        for (size_t to = 0; to < 10; to++) {
+            int fu = from >= 5, tu = to >= 5;
+            int fits = fu == tu ? widths[to] >= widths[from]
+                               : !tu && fu && widths[to] > widths[from];
+            char source[512];
+            snprintf(source, sizeof(source),
+                     "func take(x %s) {} func main() { value: %s = zero(%s); take(value); }",
+                     integers[to], integers[from], integers[from]);
+            analyze(source, fits);
+            snprintf(source, sizeof(source),
+                     "func main() { value: %s = zero(%s); result: %s = value -> %s; }",
+                     integers[from], integers[from], integers[to], integers[to]);
+            analyze(source, 1);
+        }
+    }
+    analyze("func main() { wide := 42; small: i8 = wide; }", 0);
+    analyze("func main() { wide := 42; small: i8; small = wide; }", 0);
+    analyze("func narrow(value int) i32 { return value; }", 0);
+    analyze("func narrow(value int) i32 { return value -> i32; }", 1);
+    analyze("func pair() (int, int) { return 1, 2; } func main() { a: i8; b: i16; a, b = pair(); }", 0);
+    analyze("func take<T>(value T) {} func main() { x := 1; take<i8>(x); }", 0);
+    analyze("type Small = i8; type Wide = int; func main() { x: Wide = 7; y: Small = x; }", 0);
+    analyze("type Small = i8; type Wide = int; func main() { x: Small = 7; y: Wide = x; }", 1);
+    analyze("func take(p *int) {} func main() { x: i32 = 7; take(&x); }", 0);
+    analyze("func take(xs int[]) {} func main() { xs := i32[]{7}; take(xs); }", 0);
+    analyze("func main() { xs: i8[] = {}; x := 1; xs.append(x); }", 0);
+    analyze("func main() { xs: i8[] = {}; xs.append(127, -128); xs.add(0, 1); }", 1);
+    analyze("func main() { xs: i8[] = {}; xs.append(128); }", 0);
+    analyze("func take(x i8) {} func main() { take(-128); take(127); }", 1);
+    analyze("func take(x i8) {} func main() { take(-129); }", 0);
+    analyze("func take(x i8) {} func main() { take(128); }", 0);
+    analyze("func take(x u8) {} func main() { take(255); }", 1);
+    analyze("func take(x u8) {} func main() { take(256); }", 0);
+    analyze("func take(x u8) {} func main() { take(-1); }", 0);
+    analyze("func take(x int) {} func main() { take(18446744073709551615); }", 0);
+    analyze("func take(x uint) {} func main() { take(18446744073709551615); }", 1);
+    analyze("func take(x uint) {} func main() { take(-18446744073709551615); }", 0);
+    analyze("func take(x int) {} func main() { take(-9223372036854775809); }", 0);
+    analyze("func take(x i8) {} func main() { take(1 + 2); }", 0);
+    analyze("func main() { a: u8 = 255; b: i16 = -1; result: int = a + b; }", 1);
+    analyze("func main() { a: uint = 1; b: int = -1; result := a + b; }", 0);
     analyze("struct Stack<T> { underlying T[]; top int; } func newStack<T>() Stack<T> { s: Stack<T> = {0->any, 0}; return s; } func main() {}", 0);
     analyze("struct Stack<T> { underlying T[]; top int; } func newStack<T>() Stack<T> { s: Stack<T> = {0->any, 0}; return s; } func main() { s := newStack<int>(); }", 0);
     analyze("func main() { xs: int[] = 0->any; }", 0);

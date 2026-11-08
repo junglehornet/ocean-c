@@ -36,7 +36,7 @@ struct Type {
     typeTokens dimension;
     typeTokens constraint; // Inherited from a receiver struct parameter, when present.
     const char *spelling; // Keep explicit numeric type names for diagnostics.
-    Type *semanticBase; // Numeric aliases still use the existing compatibility rules.
+    Type *semanticBase; // Numeric family used for operations; spelling retains storage width.
 };
 typedef struct Symbol {
     token name;
@@ -78,6 +78,7 @@ static Type unknown = {.name = "?"}, integer = {.name = "int"}, floating = {.nam
             signedByte = {.name = "i8"},
             string = {.name = "dynamic-array", .element = &signedByte, .dynamicArray = 1, .immutableString = 1},
             boolean = {.name = "bool"}, any = {.name = "any"}, nothing = {.name = "void"};
+static Type unsignedIntegerType = {.name = "int", .spelling = "uint", .semanticBase = &integer};
 static void *allocate(Context *c, size_t n) {
     void *p = calloc(1, n);
     Allocation *a = malloc(sizeof(*a));
@@ -196,7 +197,25 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
     const char *b = actual->spelling ? actual->spelling : actual->name;
     return !strcmp(a, b);
 }
+// Preserve numeric spelling before canonicalization erases integer storage widths.
+static int integerShape(Type *t, int *isUnsigned) {
+    if (definedType(t) || (canonical(t) != &integer && canonical(t) != &signedByte)) return 0;
+    const char *name = t->spelling ? t->spelling : t->name;
+    *isUnsigned = name[0] == 'u' || !strcmp(name, "byte");
+    if (!strcmp(name, "i8") || !strcmp(name, "u8") || !strcmp(name, "byte")) return 8;
+    if (!strcmp(name, "i16") || !strcmp(name, "u16")) return 16;
+    if (!strcmp(name, "i32") || !strcmp(name, "u32") || !strcmp(name, "rune")) return 32;
+    return 64;
+}
+static int integerFits(Type *expected, Type *actual) {
+    int eu, au;
+    int ew = integerShape(expected, &eu), aw = integerShape(actual, &au);
+    if (!ew || !aw) return 0;
+    return eu == au ? ew >= aw : (!eu && au && ew > aw);
+}
 static int compatibleTypes(Type *a, Type *b) {
+    int au, bu;
+    if (integerShape(a, &au) && integerShape(b, &bu)) return integerFits(a, b);
     a = canonical(a);
     // A boxed value does not establish the array shape or element type.
     // Require explicit narrowing before assigning it to an array destination.
@@ -235,8 +254,9 @@ static int compatibleTypes(Type *a, Type *b) {
         return 0;
     if (a->element || b->element)
         return a->element && b->element && !strcmp(a->name, b->name) &&
-               ((a->element == &signedByte || b->element == &signedByte)
-                    ? a->element == b->element : compatibleTypes(a->element, b->element)) &&
+               (compatibleTypes(a->element, b->element) &&
+                (integerShape(a->element, &au) && integerShape(b->element, &bu)
+                    ? integerFits(b->element, a->element) : 1)) &&
                (!strcmp(a->name, "buffer")
                     ? (a->bufferSize == 0 || (a->bufferSize == b->bufferSize &&
                        (a->bufferSize != 1 || a->count == b->count)))
@@ -678,6 +698,9 @@ static void check(Context *c, Type *expected, Type *actual, token at) {
     formatType(stderr, expected, 0);
     fputs(", got ", stderr);
     formatType(stderr, actual, 0);
+    int eu, au;
+    if (integerShape(expected, &eu) && integerShape(actual, &au))
+        fputs("; narrowing integer conversion requires an explicit -> cast", stderr);
     diagnosticEnd(programSource(c->program, at.filename), at);
     c->errors++;
 }
@@ -790,11 +813,61 @@ static int coerceFloatLiteral(Type *expected, expr *e) {
     literal->unsignedLiteral = 0;
     return 1;
 }
+// Untyped literal syntax may use a destination integer type when its value fits.
+static int integerLiteralFits(Type *expected, expr *e) {
+    int isUnsigned, width = integerShape(expected, &isUnsigned);
+    if (!width) return 0;
+    int negate = 0;
+    if (e->type == EXPR_TYPE_UNARY &&
+        ((struct expr_unary *)e->underlying)->operation == UNARY_NEGATE) {
+        negate = 1;
+        e = &((struct expr_unary *)e->underlying)->child;
+    }
+    if (e->type != EXPR_TYPE_LITERAL) return 0;
+    struct expr_literal *v = e->underlying;
+    if (v->type != LITERAL_TYPE_INT) return 0;
+    unsigned long magnitude;
+    if (v->unsignedLiteral) magnitude = *(unsigned long *)v->value;
+    else {
+        long number = *(long *)v->value;
+        if (number < 0) { negate = !negate; magnitude = 0UL - (unsigned long)number; }
+        else magnitude = (unsigned long)number;
+    }
+    if (negate && magnitude) return !isUnsigned && magnitude <= (1UL << (width - 1));
+    unsigned long maximum = isUnsigned ? (width == 64 ? ~0UL : (1UL << width) - 1)
+                                       : (1UL << (width - 1)) - 1;
+    return magnitude <= maximum;
+}
+static Type *contextualInteger(Context *c, Type *expected, Type *actual, expr *e, token at) {
+    int isUnsigned;
+    if (!integerShape(expected, &isUnsigned)) return actual;
+    expr *literal = e;
+    if (literal->type == EXPR_TYPE_UNARY &&
+        ((struct expr_unary *)literal->underlying)->operation == UNARY_NEGATE)
+        literal = &((struct expr_unary *)literal->underlying)->child;
+    if (literal->type != EXPR_TYPE_LITERAL ||
+        ((struct expr_literal *)literal->underlying)->type != LITERAL_TYPE_INT) return actual;
+    if (integerLiteralFits(expected, e)) return expected;
+    error(c, at, "integer literal is out of range; use an explicit -> cast to narrow");
+    return actual;
+}
+static void typeIntegerLiteral(Type *expected, expr *e) {
+    struct expr_typecast *cast = calloc(1, sizeof(*cast));
+    cast->child = *e;
+    cast->type.nTokens = 1;
+    cast->type.tokens = calloc(1, sizeof(token));
+    cast->type.tokens[0] = e->location;
+    cast->type.tokens[0].type = IDENTIFIER;
+    cast->type.tokens[0].lexeme = (char *)(expected->spelling ? expected->spelling : expected->name);
+    e->type = EXPR_TYPE_TYPECAST;
+    e->underlying = cast;
+}
 static Type *expectedExpression(Context *c, Type *expected, expr *e, token at) {
     coerceFloatLiteral(expected, e);
     if (e->type == EXPR_TYPE_COMPOSITE && !((struct expr_composite *)e->underlying)->type.type)
         return checkComposite(c, expected, e, at);
-    return expression(c, e);
+    Type *actual = expression(c, e);
+    return contextualInteger(c, expected, actual, e, at);
 }
 static void checkArrayDataLiteral(Context *c, Type *element, struct expr_composite *literal,
                                   token at) {
@@ -841,6 +914,8 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
                 return (TypeList){items, 2};
             }
         }
+        if (!assignmentContext && i < nExpected)
+            t = contextualInteger(c, expected[i], t, &values[i], values[i].location);
         if (t->enumeration && t->nArguments != t->enumeration->nTypeParams)
             error(c, at, "generic enum value requires explicit type arguments");
         if (!strcmp(t->name, "tuple")) {
@@ -1503,6 +1578,9 @@ static Type *expression(Context *c, expr *e) {
     case EXPR_TYPE_LITERAL: {
         struct expr_literal *v = e->underlying;
         if (v->type == LITERAL_TYPE_NULL) return &nullValue;
+        if (v->type == LITERAL_TYPE_INT && v->unsignedLiteral) {
+            return &unsignedIntegerType;
+        }
         return v->type == LITERAL_TYPE_STRING  ? &string
                : v->type == LITERAL_TYPE_FLOAT ? &floating
                                                : &integer;
@@ -1716,7 +1794,8 @@ static Type *expression(Context *c, expr *e) {
                         if (strcmp(actual->name, "dynamic-array") && strcmp(actual->name, "fixed-array"))
                             error(c, at, "expanded dynamic array argument must be a collection");
                         else check(c, parent->element, actual->element, at);
-                    } else check(c, parent->element, actual, at);
+                    } else check(c, parent->element,
+                        contextualInteger(c, parent->element, actual, &v->params[i], at), at);
                 }
                 return &nothing;
             }
@@ -1901,6 +1980,24 @@ static Type *expression(Context *c, expr *e) {
                                                   : expression(c, &v->right);
         if (coerceFloatLiteral(a, &v->right)) b = expression(c, &v->right);
         if (coerceFloatLiteral(b, &v->left)) a = expression(c, &v->left);
+        if (integerLiteralFits(a, &v->right) && !(integerFits(a, b) && integerFits(b, a))) {
+            typeIntegerLiteral(a, &v->right);
+            b = a;
+        }
+        if (integerLiteralFits(b, &v->left) && !(integerFits(a, b) && integerFits(b, a))) {
+            typeIntegerLiteral(b, &v->left);
+            a = b;
+        }
+        Type *integerResult = NULL;
+        int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);
+        int stores = v->operation == EXPR_ASSIGNMENT ||
+                     (v->operation >= EXPR_ADD_EQUALS && v->operation <= EXPR_BITWISE_OR_EQUALS);
+        if (aw && bw && !stores) {
+            if (aw == bw && au == bu) integerResult = a;
+            else if (au == bu) integerResult = au ? &unsignedIntegerType : &integer;
+            else if ((au ? aw : bw) < 64) integerResult = &integer;
+            else error(c, at, "mixed signed and unsigned integers require an explicit -> cast");
+        }
         if (recreated) recreated->freed = 0;
         if ((v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) && (a->enumeration || b->enumeration)) {
             if (a->enumeration != b->enumeration) error(c, at, "cannot compare variants from different enum types");
@@ -1936,8 +2033,8 @@ static Type *expression(Context *c, expr *e) {
             // operand's element type appends/prepends one nested value.
             if (leftArray && rightArray && matchesTypeConstraint(a, b))
                 result = canonical(b->element) == &any ? b : a;
-            else if (leftArray && compatible(a->element, b)) result = a;
-            else if (rightArray && compatible(b->element, a)) result = b;
+            else if (leftArray && (compatible(a->element, b) || integerLiteralFits(a->element, &v->right))) result = a;
+            else if (rightArray && (compatible(b->element, a) || integerLiteralFits(b->element, &v->left))) result = b;
             if (!result) {
                 error(c, at, "array addition requires matching arrays or a compatible element");
                 return a;
@@ -1956,7 +2053,7 @@ static Type *expression(Context *c, expr *e) {
         }
         if ((v->operation == EXPR_EQUALITY || v->operation == EXPR_NOT_EQUALS) && voidPointer(b))
             check(c, b, a, at);
-        else
+        else if (!integerResult)
             check(c, a, b, at);
         if ((a == &nullValue || b == &nullValue) &&
             v->operation != EXPR_ASSIGNMENT && v->operation != EXPR_EQUALITY &&
@@ -1981,7 +2078,7 @@ static Type *expression(Context *c, expr *e) {
             !(!strcmp(a->name, "dynamic-array") && a->element == &signedByte &&
               v->operation == EXPR_ADD))
             error(c, at, "invalid operands");
-        return a;
+        return integerResult ? integerResult : a;
     }
     case EXPR_TYPE_UNARY: {
         struct expr_unary *v = e->underlying;
@@ -2034,7 +2131,7 @@ static Type *expression(Context *c, expr *e) {
         struct expr_ternary *v = e->underlying;
         check(c, &boolean, expression(c, &v->condition), v->condition.location);
         Type *a = expression(c, &v->ifTrue);
-        Type *b = expression(c, &v->ifFalse);
+        Type *b = expectedExpression(c, a, &v->ifFalse, at);
         if (voidPointer(b)) {
             check(c, b, a, at);
             return b;
@@ -2503,7 +2600,7 @@ static void statement(Context *c, stmt *s) {
                 declare(c, v->binding, binding, 0);
             }
             for (size_t j = 0; j < v->cases[i].nValues; j++)
-                check(c, t, expression(c, &v->cases[i].values[j]), v->cases[i].values[j].location);
+                check(c, t, expectedExpression(c, t, &v->cases[i].values[j], at), v->cases[i].values[j].location);
             block(c, &v->cases[i].body, 0);
             c->scope = cs.parent;
         }

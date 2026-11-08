@@ -830,3 +830,10 @@ standard-library parser source and contains no native parsing dependency.
 errors at O0/O2, including native failures, short EOF payloads, stdout write
 errors, and Windows read/seek fault injection. Close and Setpos failures remain
 panics; Readall restores cursor and EOF state on recoverable read failures.
+
+Integer conversion coverage in `semantic_test.c` checks every signed/unsigned
+width pair for range-preserving implicit calls and explicit casts, plus narrowing
+in assignments, returns, generic calls, collection methods, and pointer/array
+storage. Fitting literals retain contextual typing; out-of-range literals and
+integer expressions require `->` for narrowing. `backend_test.py` verifies signed
+and unsigned widening, mixed-width arithmetic, and explicit truncation at runtime.

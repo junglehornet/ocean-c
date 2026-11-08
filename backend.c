@@ -1309,6 +1309,14 @@ static int unsignedInteger(Backend *b, Kind k) { k = representationKind(b, k); r
 static int integral(Backend *b, Kind k) { k = representationKind(b, k); return k == INT || k == I32 || k == I16 || k == I8 || unsignedInteger(b, k); }
 static int floating(Backend *b, Kind k) { k = representationKind(b, k); return k == FLOAT || k == F32; }
 static int integerWidth(Backend *b, Kind k) { k = representationKind(b, k); return (k == I8 || k == U8) ? 8 : (k == I16 || k == U16) ? 16 : (k == I32 || k == U32) ? 32 : 64; }
+// Mixed-width arithmetic uses 64-bit storage. Prefer signed storage when it
+// can represent both operand ranges; semantics rejects unsafe signed/u64 pairs.
+static Kind commonIntegerKind(Backend *b, Kind a, Kind c) {
+    if (unsignedInteger(b, a) && unsignedInteger(b, c)) return UINT;
+    if (!unsignedInteger(b, a) && !unsignedInteger(b, c)) return INT;
+    Kind unsignedKind = unsignedInteger(b, a) ? a : c;
+    return integerWidth(b, unsignedKind) < 64 ? INT : UINT;
+}
 static int implicitVoidPointer(Backend *b, Kind source, Kind target) {
     BufferKind *from = bufferKind(b, source), *to = bufferKind(b, target);
     return to && to->shape == 6 && to->element == VOID &&
@@ -1976,7 +1984,7 @@ static Kind expressionKind(Backend *b, expr *e) {
         if (v->operation == EXPR_ASSIGNMENT || v->operation >= EXPR_ADD_EQUALS)
             return a;
         return a == FLOAT || c == FLOAT ? FLOAT : a == F32 || c == F32 ? F32
-               : integral(b, a) && integral(b, c) && a != c ? INT : a;
+               : integral(b, a) && integral(b, c) && a != c ? commonIntegerKind(b, a, c) : a;
     }
     case EXPR_TYPE_TERNARY: {
         struct expr_ternary *v = e->underlying;
@@ -3295,7 +3303,7 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         return answer;
     }
     if (integral(b, a.kind) && integral(b, c.kind) && a.kind != c.kind) {
-        Kind common = unsignedInteger(b, a.kind) || unsignedInteger(b, c.kind) ? UINT : INT;
+        Kind common = commonIntegerKind(b, a.kind, c.kind);
         a = convert(b, a, common);
         c = convert(b, c, common);
     }

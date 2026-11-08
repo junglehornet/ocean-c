@@ -202,7 +202,7 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
           'func main() int { return abs(-3); }')
     invoke('build', scope, status=1, contains='extern.name')
     write(scope / 'library/library.oc', 'package library; extern i32 abs(i32 value); '
-          'func Absolute(value int) int { return extern.abs(value); }')
+          'func Absolute(value int) int { return extern.abs(value -> i32); }')
     write(scope / 'main.oc', 'package main; import "library"; '
           'func main() int { return library.abs(-3); }')
     invoke('build', scope, status=1, contains='has no declaration abs')
