@@ -101,8 +101,6 @@ struct stmt_struct {
     typeTokens *varParamTypes; // Non-owning view of the first nVarParams fieldTypes.
     token *varParamNames; // Non-owning view of the first nVarParams fieldNames.
 
-    size_t nOperatorMethods;
-    struct stmt_func *operatorMethods; // name holds the operator token; receiver is implicit self.
     size_t nFields; // Includes the immutable value-parameter prefix, in declaration order.
     typeTokens *fieldTypes;
     token *fieldNames;

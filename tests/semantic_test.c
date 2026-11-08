@@ -172,10 +172,6 @@ int main(void) {
     analyze("struct S(int size) { value int; } func main() { s := S{size: 1, size: 2}; }", 0);
     analyze("struct V(buffer<int>[] data) { tag int; } func main() { b: buffer<int>[2]; v := V{b, 1}; v.data[0] = 4; v.tag = 2; }", 1);
     analyze("struct V(buffer<int>[] data) { tag int; } func main() { b: buffer<int>[2]; v := V{b, 1}; v.data = b; }", 0);
-    analyze("struct S(int size) { value int; +(x int) { size = x; } }", 0);
-    analyze("struct S(int size) { value int; +(x int) { self.size = x; } }", 0);
-    analyze("struct S(int size) { value int; +(x int) { self.value = x; } }", 1);
-    analyze("struct S(int size) { value int; +(size int) { size++; self.value = size; } }", 1);
     analyze("struct S(int size) { value int; } func (self *S) change() { self.size = 4; }", 0);
     analyze("struct P { x int; } struct S(P p) {} func main() { s := S{P{1}}; s.p.x = 4; }", 0);
     analyze("func main() { a := int[2]; a.size = 8; }", 0);
@@ -231,7 +227,6 @@ int main(void) {
     analyze("struct Box<T any>(buffer<T>[] parameter) { data T[]; } func main() { b: Box<int> = {buffer<int>{1}, {true}}; }", 0);
     analyze("struct P { x int; } struct Box<T any>(T parameter) { value T; } func use(b Box<Box<P>>) { b.value.value.x = 4; }", 1);
     analyze("struct P { x int; } struct Box<T any>(T parameter) { value T; } func use(b Box<Box<P>>) { b.parameter.value.x = 4; }", 0);
-    analyze("struct Box<T any>(T parameter) { +(x int) { self.parameter.x = x; } }", 0);
     analyze("struct Box<T any>(T parameter) { data T; } func main() { b: Box<int> = {1, 2}; b.data = 3; }", 1);
     analyze("func use(a i8[]) {} func main() { s: string = i8[]{65}; a: i8[] = \"abc\"; use(s); s = a + s; s += a; n := len(s); }", 1);
     analyze("func main() { s := \"abc\"; s.size = 0; }", 0);

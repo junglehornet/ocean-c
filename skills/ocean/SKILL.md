@@ -249,6 +249,9 @@ Strings compare byte contents with `==`/`!=`. String-to-`i8[]` conversions copy.
 String `.data` in a call is an isolated temporary buffer valid for that call;
 create a named mutable byte array for persistent C access.
 
+Struct operator overloading is not supported. Use named receiver methods for
+custom struct operations. Interface operator requirements do not define overloads.
+
 ## User types and generics
 
 ```ocean
@@ -318,7 +321,7 @@ saved IR/objects using it requires `-lffi`.
 
 Do not assume Go or C features exist merely because syntax looks familiar.
 Current unsupported backend features include closures, function values, bound
-method values, interface method dispatch, operator dispatch, and `defer`.
+method values, interface method dispatch, and `defer`.
 Parameterized array-field layout and dynamic array ABI are compiler-specific;
 do not rely on their layout at native boundaries. Validate unfamiliar features
 with a minimal package and the target compiler before building on them.

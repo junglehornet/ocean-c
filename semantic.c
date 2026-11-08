@@ -63,7 +63,6 @@ typedef struct Context {
     parseResult *program;
     Scope *scope;
     struct stmt_func *function;
-    Type *implicitReceiver;
     Allocation *allocations;
     semanticIndex *index;
     Symbol **indexedSymbols;
@@ -1087,9 +1086,7 @@ static void function(Context *c, struct stmt_func *f) {
         declare(c, f->resultNames[i], typeOf(c, f->resultTypes[i]), 0);
     if (f->receiverName.type == IDENTIFIER)
         declare(c, f->receiverName,
-                f->receiverType.nTokens ? typeOf(c, f->receiverType)
-                : c->implicitReceiver   ? c->implicitReceiver
-                                        : &unknown,
+                typeOf(c, f->receiverType),
                 0);
     size_t errorsBeforeBody = c->errors;
     block(c, &f->body, 0);
@@ -2362,8 +2359,6 @@ static void statement(Context *c, stmt *s) {
     }
     case STMT_STRUCT: {
         struct stmt_struct *v = s->value;
-        Symbol *record = lookup(c, v->name.lexeme);
-        Type *receiverType = record ? record->type : &unknown;
         Scope scope = {c->scope, NULL};
         c->scope = &scope;
         for (size_t i = 0; i < v->nTypeParams; i++) {
@@ -2383,11 +2378,6 @@ static void statement(Context *c, stmt *s) {
         for (size_t i = 0; i < v->nFields; i++)
             checkBufferDimension(c, typeOf(c, v->fieldTypes[i]), v->fieldNames[i]);
         c->declaringMembers--; c->memberOwner=(token){0};
-        Type *oldReceiver = c->implicitReceiver;
-        c->implicitReceiver = receiverType;
-        for (size_t i = 0; i < v->nOperatorMethods; i++)
-            function(c, &v->operatorMethods[i]);
-        c->implicitReceiver = oldReceiver;
         c->scope = scope.parent;
         break;
     }

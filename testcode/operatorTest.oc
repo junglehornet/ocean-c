@@ -5,7 +5,8 @@ import "io";
 func main() {
     b1: bool = true;
     b2: bool = false;
-    if (b1 ^ b2) {
+    // Boolean exclusive-or uses inequality; bitwise ^ operates on integers.
+    if (b1 != b2) {
         io.Println("yes");
     }
     bp: bool* = &b1;

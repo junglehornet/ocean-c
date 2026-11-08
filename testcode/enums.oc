@@ -1,8 +1,12 @@
+package main;
+
+import "io";
+
 // ocean enums are like a combination of an enum and a union from C. this is similar to rust's system.
 // enum fields come in 3 forms:
 enum GuiEvent {
     GuiLoad, // carries no data. similar to a C enum
-    KeyPress(i8), // carries tuple data. this is ordered and named in the reciever.
+    KeyPress(i8), // carries tuple data. this is ordered and named in the receiver.
     Click{x i8, y i8} // carries struct data. this is unordered and named in the enum definition. note this could also be Click{x, y i8}
 } // trailing comma optional
 // IMPORTANT NOTE: any data is defined when the value is constructed, and it is immutable.
@@ -21,7 +25,7 @@ func handleEvent(event GuiEvent) {
         click := event.(GuiEvent.Click); // because GuiEvent.Click is a struct type that already has named fields, we don't have to set
         // a name like with a tuple type. you could also unpack the struct like so:
         // x, y := event.(GuiEvent.Click{x, y}); // in this syntax variable names must match struct names. you could also do:
-        // clickX, clickY := event.(GuiEvent.Click{clickY = y, clickX = x}) // notice that order doesn't matter because structs aren't ordered.
+        // clickX, clickY := event.(GuiEvent.Click{clickY = y, clickX = x}); // notice that order doesn't matter because structs aren't ordered.
         // this also goes for the first example, x, y := event.(GuiEvent.Click{y, x}); is still valid
         io.Printfln("Click at ({}, {})", click.x, click.y);
     }
@@ -37,7 +41,7 @@ func matchEvent(event GuiEvent) {
             io.Printfln("Key pressed: {}", key);
         }
         GuiEvent.Click{x, y} => io.Printfln("Click at ({}, {})", x, y);
-        // or, GuiEvent.Click{clickX = x, clickY = y} // notice the lack of := as we are assigning, not declaring.
+        // or, GuiEvent.Click{clickX = x, clickY = y} // match patterns introduce bindings without :=.
    }
 }
 
@@ -70,6 +74,13 @@ enum Number {
     Other(int),
 }
 
-on the backend:
-each enum values carry two tags
 */
+
+func main() {
+    handleEvent(GuiEvent.GuiLoad);
+    handleEvent(GuiEvent.KeyPress(65));
+    handleEvent(GuiEvent.Click{2, 3});
+    matchEvent(GuiEvent.GuiLoad);
+    matchEvent(GuiEvent.KeyPress(66));
+    matchEvent(GuiEvent.Click{x: 4, y: 5});
+}

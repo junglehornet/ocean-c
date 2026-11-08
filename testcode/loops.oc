@@ -1,29 +1,28 @@
-import (
-    "io"
-    "rand"
-);
+package main;
+
+import "io";
 
 func main() {
     // basic for loop
-    for (x := 0; x < 5; x++) io.Printf("x = %d\n", x);
+    for (x := 0; x < 5; x++) io.Printf("x = {}\n", x);
 
     // while loop
     y := 0;
     for (y < 3) {
-        io.Printf("y = %d\n", y);
+        io.Printf("y = {}\n", y);
         y++;
     }
 
     // range loop
     numbers := {5, 4, 3, 2, 1};
     for (i, value := range numbers) {
-        io.Printf("numbers[%d] = %d\n", i, value);
+        io.Printf("numbers[{}] = {}\n", i, value);
     }
 
     // do-while
-    z := 0;
-    for (defer x != 0) {
-        z = rand.Randint(0, 5);
+    z := 3;
+    for (defer z != 0) {
+        z--;
         io.Println(z);
     }
 

@@ -760,7 +760,7 @@ arguments. Generic functions can construct `Result<T>.value(item)` and return
 `Result[int]` is rejected.
 
 Unsupported backend features produce an error: calls through interface methods,
-other collection types, operator dispatch, closures,
+other collection types, closures,
 function values, and defer statements.
 The parser accepts more syntax than the backend currently implements.
 
@@ -784,7 +784,8 @@ specialization for each combination of concrete receiver and method type argumen
 Pointer receivers borrow addressable values automatically; value receivers copy
 the struct, including when invoked through a pointer. Recursive calls, variadic
 parameters, and multiple results work with receiver-bound types. Bound method
-values and operator dispatch remain unsupported.
+values remain unsupported. Struct operator overloading is not supported; use
+named receiver methods for custom operations.
 
 Generic declarations may omit constraints: `func myFunc<T>(thing T) {}` and
 `struct Box<T> { value T; }` both give `T` the `any` constraint. Grouped names

@@ -1,63 +1,47 @@
 package main;
 
-import (
-	"io",
-	"random",
-);
-
-func main() {
-	io.Println("Hello, world!");
-	x := random.RandInt(0, 11);
-	io.Printf("A random number between 0 and 10: %d\n", x);
-}
+import "io";
 
 struct Color {
-	red u8;
-	green u8;
-	blue u8;
-	alpha u8;
+    red, green, blue, alpha u8;
 }
 
 enum MazeObjType {
-	PLAYER = 0, WALL, TRAP, NONE,
+    PLAYER, WALL, TRAP, NONE,
 }
 
 struct MazeObj {
-	dispColor Color;
-	type MazeObjType;
+    dispColor Color;
+    kind MazeObjType;
 }
 
-interface MatrixScalar<T any> {
-	// this specifies that a MatrixScalar can not be a Matrix.
-	-Matrix;
-	// to specify that a MatrixScalar *must* be a Matrix, you could say
-	// =Matrix
-	// or, to specify that a MatrixScalar *can* be a Matrix, you could say
-	// +Matrix
-	// these examples also work with other interfaces?
-
-	// this specifies that a MatrixScalar must have the * operator defined
-	// for an other type of T
-	self * T;
-	// to specify that the + operator is defined for a this type of T and
-	// an other type of MatrixScalar you could say
-	// T + self;
+// Value parameters are immutable fields, followed by ordinary mutable fields.
+// Nested dynamic arrays own their rows; access them through the named field.
+struct Matrix<T>(width, height int) {
+    underlying T[][];
 }
 
-struct Matrix<T any> (u64 width, height) {
-	index underlying T[height][width];
-	// or, underlying can be declared normally and then on another line you can write:
-	// index underlying;
-	// notice that arrays are written type[length]
-	// dynamic arrays are similarly written as type[]
-
-	* (MatrixScalar<T> other) {
-		for (u64 row = 0; row < self[].length; row++) {
-			for (u64 col = 0; col < self[0].length; col++) {
-				self[row][col] *= other;
-			}
-		}
-	}
+// Custom struct operations use named receiver methods.
+func (matrix *Matrix<T>) Fill(value T) {
+    for (row := 0; row < len(matrix.underlying); row++) {
+        for (col := 0; col < len(matrix.underlying[row]); col++) {
+            matrix.underlying[row][col] = value;
+        }
+    }
 }
 
-type Maze Matrix<MazeObj>
+type Maze = Matrix<MazeObj>;
+
+func main() int {
+    matrix := Matrix<int>{2, 2, {{1, 2}, {3, 4}}};
+    matrix.Fill(5);
+    if (matrix.underlying[0][0] != 5 || matrix.underlying[1][1] != 5) {
+        return 1;
+    }
+
+    player := MazeObj{Color{255, 0, 0, 255}, MazeObjType.PLAYER};
+    maze := Maze{1, 1, {{player}}};
+    maze.Fill(player);
+    io.Printf("Matrix dimensions: {} by {}\n", matrix.width, matrix.height);
+    return 0;
+}

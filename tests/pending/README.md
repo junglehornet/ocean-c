@@ -1,13 +1,13 @@
 # Pending acceptance tests
 
 This inventory covers the incomplete compiler features documented in
-[the test README](../README.md). It defines **57 contracts across 18
+[the test README](../README.md). It defines **52 contracts across 17
 feature areas**, separate from the regression suites for implemented behavior.
 Completed parser contracts are covered by `parser_extensions_test` and the
 other parser regression suites.
 
 There are **6 executable probes** of current scanner/printer behavior
-and **51 semantic/ownership fixtures** awaiting test drivers. The latter are
+and **46 semantic/ownership fixtures** awaiting test drivers. The latter are
 acceptance specifications, not claims that missing compiler stages have been
 executed or tested successfully. Each fixture has a concrete source and expected
 acceptance, diagnostic category, and/or resolved facts.
@@ -76,10 +76,9 @@ CMake configure dependency, so changing cases refreshes test registration.
 | `label_resolution` | semantic | 5 | existing |
 | `extern_linkage` | semantic | 2 | existing |
 | `struct_value_application` | semantic | 3 | proposed |
-| `operator_resolution` | semantic | 4 | existing |
 | `custom_constraints` | semantic | 4 | existing |
 | `index_delegation` | semantic | 2 | existing |
-| `cleanup` | ownership | 3 | existing |
+| `cleanup` | ownership | 2 | existing |
 
 `existing` means fixtures use currently documented syntax, except for the
 specific missing capability. `proposed` means grammar, a spelling, a precedence
@@ -88,7 +87,7 @@ In particular, module marker spelling, struct value application, exponent
 notation, and new
 printer formats are **proposals, not silently adopted language rules**.
 Already implemented syntax and deliberately unsupported forms (e.g. variadic
-struct value parameters and generic operator methods) remain in the regression
+struct value parameters) remain in the regression
 suite; they are not automatically promised as future features here.
 
 ## Compiler-stage driver contract

@@ -532,36 +532,6 @@ int main(void) {
     e = expression("f[map[string]](x);");
     assert(e.type == EXPR_TYPE_CALL && ((struct expr_call*)e.underlying)->func.type == EXPR_TYPE_INDEX);
     truncatedInputs("result := pkg.pair[Box[int], []string,](x, y).field[0];");
-    r = valid("struct Number[T any] { value T; +(other T) T { return self.value + other; } *(other T) { self.value *= other; } -() T { return -self.value; } +(other Number[T]) Number[T] { return other; } }", 1);
-    point = r.statements[0].value;
-    assert(point->nFields == 1 && point->nOperatorMethods == 4 && point->nTypeParams == 1);
-    assert(point->operatorMethods[0].name.type == PLUS &&
-           point->operatorMethods[1].name.type == STAR &&
-           point->operatorMethods[2].name.type == MINUS);
-    assert(point->operatorMethods[0].nParams == 1 &&
-           point->operatorMethods[0].nResults == 1 &&
-           !strcmp(point->operatorMethods[0].receiverName.lexeme, "self") &&
-           point->operatorMethods[0].receiverType.nTokens == 0 &&
-           point->operatorMethods[0].body.stmts[0].type == STMT_RETURN);
-    assert(point->operatorMethods[2].nParams == 0);
-    valid("struct Operators { ==(other int) bool { return 1; } "
-          "<<(int amount) {} +=(int amount) {} !() bool { return 0; } ++() {} }", 1);
-    r = valid("struct Mixed { callback *(int)(int); *(other int) (int result) { defer cleanup(); return other; } tail int; }", 1);
-    point = r.statements[0].value;
-    assert(point->nFields == 2 && point->nOperatorMethods == 1 &&
-           point->fieldTypes[0].tokens[0].type == STAR &&
-           point->operatorMethods[0].nResults == 1);
-    invalid("struct Bad { +(other int); }");
-    invalid("struct Bad { +(other int more int) {} }");
-    invalid("struct Bad { +(self int) {} }");
-    invalid("struct Bad { +() (int self) {} }");
-    invalid("struct Bad { =() {} }"); invalid("struct Bad { ~=() {} }");
-    invalid("struct Bad { +[T any](other T) {} }");
-    invalid("struct Bad { +() { break; } }");
-    invalid("func f() { for (;;) { struct Bad { +() { continue; } } } }");
-    r = parse("struct Bad { +(other int); } struct Good { +() {} }");
-    assert(r.hasError && r.nStatements == 1 && r.statements[0].type == STMT_STRUCT &&
-           ((struct stmt_struct*)r.statements[0].value)->nOperatorMethods == 1);
     r = valid("interface Scalar[T any] { -Matrix; =Required[T]; +Optional; "
               "self * T; T + self; self == pkg.Value; self += T; Read() T; }", 1);
     iface = r.statements[0].value;
@@ -591,10 +561,8 @@ int main(void) {
     r = parse("interface Bad { self *; } interface Good { -Matrix; self * int; }");
     assert(r.hasError && r.nStatements == 1 && r.statements[0].type == STMT_INTERFACE &&
            ((struct stmt_interface*)r.statements[0].value)->nConstraints == 2);
-    valid("interface MatrixScalar[T any] { -Matrix; self * T; } struct Matrix[T any](u64 width, height) { index underlying T[height][width]; *(MatrixScalar[T] other) { for (row := 0; row < height; row++) { for (col := 0; col < width; col++) { self[row][col] *= other; } } } }", 2);
-    truncatedInputs("struct Number[T any] { value T; *(other T) T { return self.value * other; } }");
     truncatedInputs("interface Scalar[T any] { -Matrix; =Base[T]; +Other; self * T; T + self; }");
     fixture("testcode/helloWorld.oc", 2);
-    fixture("testcode/loops.oc", 3);
+    fixture("testcode/loops.oc", 2);
     printf("%zu parser feature checks passed\n", checks);
 }

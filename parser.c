@@ -1184,8 +1184,8 @@ static char parseTypeBrackets(parserState *state, size_t depth, char prefix) {
     return 1;
 }
 
-// Operators usable in custom requirements and struct operator methods.
-static char overloadableOperator(enum tokenType type) {
+// Operators usable in custom interface requirements.
+static char constraintOperator(enum tokenType type) {
     enum binaryExprType operation;
     return binaryOperator(type, &operation) != 0 || type == EXCLAMATION ||
            type == TILDE || type == PLUS_PLUS || type == MINUS_MINUS ||
@@ -1262,7 +1262,7 @@ static char parseInterfaceConstraint(parserState *state, size_t depth) {
                         !strcmp(state->tokens[start].lexeme, "self");
         char rightSelf = end == i + 2 && state->tokens[i + 1].type == IDENTIFIER &&
                          !strcmp(state->tokens[i + 1].lexeme, "self");
-        if (!nesting && (leftSelf || rightSelf) && overloadableOperator(type) &&
+        if (!nesting && (leftSelf || rightSelf) && constraintOperator(type) &&
             constraintTypeSpan(state, start, i, depth) &&
             constraintTypeSpan(state, i + 1, end, depth)) {
             state->tokenIndex = end;
@@ -1867,10 +1867,6 @@ static stmt parseFuncDeclaration(parserState *state, char isExtern, char hasKeyw
         function.name = tok;
         tok = advance(state);
     }
-    if (!hasKeyword && anonymous && (tok.type == LEFT_BRACKET || tok.type == LESS_THAN)) {
-        signatureError(state, "Operator methods cannot declare type parameters");
-        goto invalid;
-    }
     if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
     for (size_t i = 0; i < function.nReceiverTypeParams; i++) {
         token bound = function.receiverTypeParamNames[i];
@@ -2214,19 +2210,6 @@ static stmt parseTypeDeclaration(parserState *state) {
     return (stmt){.type = STMT_TYPE, .value = result};
 }
 
-static char startsOperatorMethod(parserState *state) {
-    token tok = state->tokens[state->tokenIndex];
-    if (!overloadableOperator(tok.type) || peek(state).type != LEFT_PAREN) return 0;
-    // A pointer to a function type can also start with '*('. Preserve fields.
-    if (tok.type == STAR) {
-        parserState trial = *state;
-        trial.quietErrors = 1;
-        if (parseSignatureType(&trial, 0) && !trial.isSynchronizing &&
-            trial.tokens[trial.tokenIndex].type == IDENTIFIER) return 0;
-    }
-    return 1;
-}
-
 static stmt parseStruct(parserState *state) {
     DEFINE_TOK;
     tok = advance(state);
@@ -2236,8 +2219,6 @@ static stmt parseStruct(parserState *state) {
         signatureError(state, "array is a reserved type name"); return (stmt){0};
     }
     token name = tok;
-    struct stmt_func *operatorMethods = nullptr;
-    size_t nOperatorMethods = 0;
     signatureFields fields = {0}, typeParams = {0}, valueParams = {0};
     tok = advance(state);
     if ((tok.type == LEFT_BRACKET || tok.type == LESS_THAN) && !parseTypeParameters(state, &typeParams)) goto invalid;
@@ -2273,34 +2254,6 @@ static stmt parseStruct(parserState *state) {
     tok = advance(state);
     token indexField = {.type = EOF_TOKEN};
     while (tok.type != RIGHT_CURLY_BRACE) {
-        if (startsOperatorMethod(state)) {
-            token operation = tok;
-            advance(state);
-            stmt method = parseFuncDeclaration(state, 0, 0, 1);
-            if (state->isSynchronizing) goto invalid;
-            struct stmt_func *signature = method.value;
-            signature->name = operation;
-            signature->receiverName = (token){.type = IDENTIFIER, .lexeme = "self",
-                .filename = operation.filename, .line = operation.line, .column = operation.column};
-            // The enclosing struct supplies the receiver's parameterized type.
-            for (size_t i = 0; i < signature->nParams + signature->nResults; i++) {
-                token param = i < signature->nParams ? signature->paramNames[i] :
-                    signature->resultNames[i - signature->nParams];
-                if (param.type == IDENTIFIER && !strcmp(param.lexeme, "self")) {
-                    free(signature);
-                    signatureError(state, "Parameter or result duplicates implicit self receiver");
-                    goto invalid;
-                }
-            }
-            struct stmt_func *grown = realloc(operatorMethods,
-                (nOperatorMethods + 1) * sizeof(*grown));
-            CHECK_MALLOC(grown);
-            operatorMethods = grown;
-            operatorMethods[nOperatorMethods++] = *signature;
-            free(signature);
-            SET_TOK;
-            continue;
-        }
         char indexModifier = isIndexName(tok) && peek(state).type == IDENTIFIER;
         if (indexModifier) {
             if (indexField.type != EOF_TOKEN) {
@@ -2340,8 +2293,6 @@ static stmt parseStruct(parserState *state) {
     struct stmt_struct *result = calloc(1, sizeof(*result));
     CHECK_MALLOC(result);
     result->name = name;
-    result->nOperatorMethods = nOperatorMethods;
-    result->operatorMethods = operatorMethods;
     result->nTypeParams = typeParams.count;
     result->typeParamNames = typeParams.names;
     result->typeParamConstraints = typeParams.types;
@@ -2368,8 +2319,6 @@ static stmt parseStruct(parserState *state) {
     }
     return (stmt){.type = STMT_STRUCT, .value = result};
 invalid:
-    // Recursive cleanup of method bodies/signatures remains separate AST work.
-    free(operatorMethods);
     freeSignatureFields(&valueParams);
     freeSignatureFields(&typeParams);
     freeSignatureFields(&fields);

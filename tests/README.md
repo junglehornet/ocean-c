@@ -316,17 +316,12 @@ mutable `data` storage supporting copy assignments and element writes.
 Value argument application remains unimplemented. Native struct values and
 concrete generic struct layouts are supported by the backend.
 
-## Operator methods and custom interface constraints
+## Custom interface constraints
 
-Struct bodies accept operator methods with an implicit `self` receiver:
+Struct operator overloading is not supported. Use named receiver methods.
+Interfaces retain custom requirement syntax:
 
 ```Ocean
-struct Number[T any] {
-    value T;
-    +(T other) T { return self.value + other; }
-    -() T { return -self.value; }
-}
-
 interface Scalar[T any] {
     -Matrix;
     =Required;
@@ -344,22 +339,6 @@ remain token spans in `stmt_interface.constraints` (or the enclosing inline
 type span), so semantic analysis can interpret their meaning later. Existing
 embedded types and union constraints take precedence over infix requirements.
 `self *;` is rejected as an incomplete multiplication requirement.
-
-Operator methods are stored in `stmt_struct.operatorMethods` with
-`nOperatorMethods`; each uses `stmt_func`, with the symbol token in `name` and
-`self` in `receiverName`. The enclosing struct supplies the receiver type;
-`receiverType` is empty. Parameters and results cannot redeclare `self`.
-Signatures use the existing function parameter/result grammar and require a
-body. Overloads can repeat an operator with different signatures; duplicate
-signature detection, operator arity/result rules, constraint satisfaction, and
-overload selection remain semantic work.
-
-Supported symbols are arithmetic, bitwise, comparison, shift, and logical
-operators, `!`, `~`, `++`, `--`, and supported compound assignments. Plain `=`,
-`~=`, indexing/call operators, and operator-specific generic parameter lists
-are not accepted as operator method names. Pointer/function fields keep their
-existing grammar. Angle-bracket parameters and empty-index expressions
-(`self[]`) are supported.
 
 ## Expanded coverage suites
 
@@ -432,11 +411,11 @@ printing, and incorrect command-line success statuses on errors.
 
 ## Pending incomplete features
 
-The [pending inventory](pending/README.md) defines 57 future acceptance
-contracts across 18 incomplete feature areas. CTest lists them individually
+The [pending inventory](pending/README.md) defines 52 future acceptance
+contracts across 17 incomplete feature areas. CTest lists them individually
 under the `pending` label. Unmet contracts are reported as skipped/XFAIL;
 unexpected successes fail so they can be promoted to regression tests.
-Twelve cases probe current APIs; 52 semantic/cleanup fixtures explicitly
+Six cases probe current APIs; 46 semantic/cleanup fixtures explicitly
 await compiler-stage adapters. Proposed syntax is marked in the inventory.
 
 ```sh
@@ -455,7 +434,7 @@ operators, initializers, assignments, call arguments, return values and struct
 fields. It rewrites ambiguous single-name bracket expressions to index nodes
 when the name resolves to a value, and substitutes explicit generic arguments
 in function signatures. Each input file is currently analyzed independently.
-Package loading, generic constraints, constant dimensions, overload selection,
+Package loading, generic constraints, constant dimensions,
 label validation and control-flow completeness are not implemented yet.
 
 `backend_test.py` compiles single-file programs through both the native driver
@@ -566,7 +545,7 @@ constraints default to `any`, and the method bindings are independent of receive
 bindings. Type arguments are resolved in the caller's scope, allowing recursive
 calls and calls between generic methods. Missing or incorrect type argument
 counts are diagnosed; argument inference is not implemented. Bound method values
-and operator dispatch remain unsupported by code generation. Backend tests exercise method calls with
+remain unsupported by code generation. Backend tests exercise method calls with
 both unoptimized and optimized LLVM IR and verify specialization reuse.
 
 ## Pointer null values

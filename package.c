@@ -778,7 +778,6 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
         for (size_t i = 0; i < v->nFields; i++) inner = bindLocal(r, inner, v->fieldNames[i]);
         for (size_t i = 0; i < v->nTypeParams; i++) rewriteType(r, inner, &v->typeParamConstraints[i]);
         for (size_t i = 0; i < v->nFields; i++) rewriteType(r, inner, &v->fieldTypes[i]);
-        for (size_t i = 0; i < v->nOperatorMethods; i++) rewriteFunction(r, inner, &v->operatorMethods[i], 0);
         break;
     }
     case STMT_FUNC:

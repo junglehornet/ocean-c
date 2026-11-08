@@ -1,1 +1,1 @@
-&(number) + (*int(offsetPtr))*(isNum ? 5 : 2)
+(*(&number)) + (*(offsetPtr -> (*int))) * (isNum ? 5 : 2)

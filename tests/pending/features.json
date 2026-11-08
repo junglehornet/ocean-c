@@ -504,49 +504,6 @@
       ]
     },
     {
-      "id": "operator_resolution",
-      "stage": "semantic",
-      "reason": "Overload selection and operator signature validation are not implemented.",
-      "syntax": "existing",
-      "cases": [
-        {
-          "id": "selection",
-          "source": "struct Number { value int; +(int rhs) Number { return self; } +(string rhs) string { return rhs; } } func main() { n := Number{value: 1}; result := n + 2; }",
-          "expected": {
-            "ok": true,
-            "facts": {
-              "result_type": "Number",
-              "selected_rhs_type": "int"
-            }
-          }
-        },
-        {
-          "id": "duplicate",
-          "source": "struct Number { +(int rhs) int { return rhs; } +(int rhs) int { return rhs; } }",
-          "expected": {
-            "ok": false,
-            "diagnostic": "duplicate_operator_signature"
-          }
-        },
-        {
-          "id": "arity",
-          "source": "struct Number { *(int x, int y) int { return x; } }",
-          "expected": {
-            "ok": false,
-            "diagnostic": "invalid_operator_arity"
-          }
-        },
-        {
-          "id": "result",
-          "source": "struct Number { ==(Number other) int { return 1; } }",
-          "expected": {
-            "ok": false,
-            "diagnostic": "invalid_operator_result"
-          }
-        }
-      ]
-    },
-    {
       "id": "custom_constraints",
       "stage": "semantic",
       "reason": "Membership and infix requirements are parsed but have no type-set semantics.",
@@ -631,17 +588,6 @@
         {
           "id": "recovery",
           "source": "func broken(y int x int) {} func good() {}",
-          "expected": {
-            "ok": false,
-            "facts": {
-              "live_allocations": 0,
-              "cleanup_available": true
-            }
-          }
-        },
-        {
-          "id": "partial_operator",
-          "source": "struct Broken { value int; +(int other) { return; } +(int other); }",
           "expected": {
             "ok": false,
             "facts": {

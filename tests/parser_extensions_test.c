@@ -160,7 +160,7 @@ int main(void) {
     assert(e.type == EXPR_TYPE_DOT && ((struct expr_dot*)e.underlying)->parent.type == EXPR_TYPE_INDEX);
     e = expression("self[][0];");
     assert(e.type == EXPR_TYPE_INDEX && ((struct expr_index*)e.underlying)->parent.type == EXPR_TYPE_INDEX);
-    valid("struct Values { index data []int; +() { use(self[].length); } }");
+    valid("struct Values { index data []int; }");
     invalid("self[;"); invalid("self[,];");
 
     struct stmt_switch *sw = switchNode("func f() { switch (x := next(); x) { case 1: return; default: return; } }");
@@ -222,7 +222,7 @@ int main(void) {
     strcat(deep, ";");
     invalid(deep);
 
-    truncated("struct Box<T Box<Box<int>>> { data Box<T>; +() { use(self[].length); } }");
+    truncated("struct Box<T Box<Box<int>>> { data Box<T>; }");
     truncated("callback := func<T any>(x T) T { return identity<Box<T>>(x); };");
     truncated("switch (init(); item := value.(type)) { case Box<Box<int>>, []string: use(item); default: break; }");
     parseResult recovery = parse("type Broken Box<int>>; func recovered() {}");
