@@ -9,6 +9,7 @@ typedef struct {
     char *directory;
     unsigned char *needed;
     int needsFFI;
+    int needsThreads;
 } llvmPackages;
 int createLLVMPackages(parseResult *program, llvmPackages *units);
 void freeLLVMPackages(llvmPackages *units);

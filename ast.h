@@ -180,7 +180,7 @@ struct stmt_interface {
     typeTokens *fieldTypes;
 };
 
-enum compilerIntrinsic { INTRINSIC_NONE, INTRINSIC_REFLECT_FIELDS, INTRINSIC_REFLECT_IS_STRUCT };
+enum compilerIntrinsic { INTRINSIC_NONE, INTRINSIC_REFLECT_FIELDS, INTRINSIC_REFLECT_IS_STRUCT, INTRINSIC_THREAD_SPAWN, INTRINSIC_THREAD_RETURN };
 
 struct stmt_func {
     enum compilerIntrinsic compilerIntrinsic; // Set only by the trusted standard-library loader.

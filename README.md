@@ -1769,3 +1769,33 @@ the existing system-call based I/O has no JavaScript implementation.
 WebAssembly host instead. `asm wasm { nop }` selects a Wasm assembly block;
 `asm wasm/js` is an error. Wasm `${variable}` assembly operands are not yet
 supported. Module/package resolution and build inputs otherwise stay the same.
+
+## Native threads
+
+The matching standard library provides `threads` (Spawn, Await, IsDone,
+CurrentID, Yield, Wake, Return, Kill), `sync` (Mutex and WaitGroup), and
+`os.Exit(code)`. Main has ID 0. Native threads use pthreads on Linux/macOS and
+Win32 APIs on Windows. Importing threads or sync for Wasm fails compilation.
+
+The compiler bridges Ocean function values to C thread entry points, supports
+concurrent closure allocation, and inserts cooperative cancellation checkpoints
+at function entries, loop iterations and goto jumps. Return and cancellation
+run deferred calls without becoming recoverable panics. Library synchronization
+waits check cancellation; arbitrary blocking native calls and long inline
+assembly wait until execution reaches another checkpoint. Deferred cleanup is
+not interrupted. os.Exit ends the process and every thread immediately, without
+defers or cleanup. Normal main return waits for workers before runtime cleanup;
+Return or Kill of main completes ID 0 while allowing workers to continue.
+
+CMake embeds `runtime_threads.c` in the compiler executable. When needed, Clang
+compiles it into the cached program support object; full cache hits only relink.
+POSIX `-pthread` is added only for native threading/synchronization programs,
+including checks, static builds, and cache hits. Windows uses its native APIs.
+Package cache keys distinguish programs with cancellation checkpoints from
+programs without them. When manually linking saved LLVM for a threaded program,
+also compile/link `runtime_threads.c` and add `-pthread` on POSIX.
+
+`threads_test` exercises the matching library's integration suite, including
+thread termination, synchronization, conditional linking and cache behavior,
+and Wasm rejection. Its Win32 shim exercises Windows runtime control flow on
+POSIX; real Windows and macOS hosts are still required to validate those ABIs.

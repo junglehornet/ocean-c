@@ -81,9 +81,10 @@ static int nativeBuild(buildCache *cache, parseResult *program, const char *outp
     if (metadataHit) {
         FILE *file = fopen(metadata, "r");
         int value = file ? fgetc(file) : EOF;
-        metadataHit = file && (value == '0' || value == '1') && fgetc(file) == EOF;
+        int threads = file ? fgetc(file) : EOF;
+        metadataHit = file && (value == '0' || value == '1') && (threads == '0' || threads == '1') && fgetc(file) == EOF;
         if (file) fclose(file);
-        if (metadataHit) units.needsFFI = value == '1';
+        if (metadataHit) { units.needsFFI = value == '1'; units.needsThreads = threads == '1'; }
     }
     if (!failed && (missing || !metadataHit)) {
         if (!metadataHit) units.needed[0] = 1;
@@ -98,13 +99,13 @@ static int nativeBuild(buildCache *cache, parseResult *program, const char *outp
         if (!failed && *metadataKey) {
             FILE *file = fopen(metadata, "w");
             if (file) {
-                int ok = fputc(units.needsFFI ? '1' : '0', file) != EOF;
+                int ok = fputc(units.needsFFI ? '1' : '0', file) != EOF && fputc(units.needsThreads ? '1' : '0', file) != EOF;
                 if (fclose(file)) ok = 0;
                 if (ok) storeBuildCache(cache, metadataKey, metadata);
             }
         }
     }
-    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, output, library, staticLink);
+    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, units.needsThreads, output, library, staticLink);
     if (metadata) { unlink(metadata); free(metadata); }
     if (objects) {
         for (size_t i = 0; i < units.count; i++)

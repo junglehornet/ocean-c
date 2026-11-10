@@ -1,0 +1,3 @@
+// Generated at compiler build time; the installed compiler is self-contained.
+static const char oceanThreadRuntimeSource[] =
+"@OCEAN_THREAD_RUNTIME_SOURCE@";

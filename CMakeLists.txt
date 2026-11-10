@@ -11,7 +11,14 @@ include_directories(.)
 
 find_path(OCEAN_FFI_INCLUDE_DIR ffi.h REQUIRED)
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime_threads.c")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/runtime_threads.c" OCEAN_THREAD_RUNTIME_SOURCE)
+string(REPLACE "\\" "\\\\" OCEAN_THREAD_RUNTIME_SOURCE "${OCEAN_THREAD_RUNTIME_SOURCE}")
+string(REPLACE "\"" "\\\"" OCEAN_THREAD_RUNTIME_SOURCE "${OCEAN_THREAD_RUNTIME_SOURCE}")
+string(REPLACE "\n" "\\n\"\n\"" OCEAN_THREAD_RUNTIME_SOURCE "${OCEAN_THREAD_RUNTIME_SOURCE}")
+configure_file(runtime_threads_source.h.in runtime_threads_source.h @ONLY)
 add_executable(ocean-c)
+target_include_directories(ocean-c PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(ocean-c PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
 
 target_sources(ocean-c
@@ -127,7 +134,7 @@ if(BUILD_TESTING)
 
     add_executable(asm_backend_probe c-hashmap/map.c tests/asm_backend_probe.c ast.c dynarray.c
         token.c scanner.c parser.c build_cache.c llvm_packages.c)
-    target_include_directories(asm_backend_probe PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
+    target_include_directories(asm_backend_probe PRIVATE "${OCEAN_FFI_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
     if(UNIX)
         target_link_libraries(asm_backend_probe PRIVATE m)
     endif()
@@ -186,6 +193,16 @@ if(BUILD_TESTING)
     add_test(NAME equality_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/equality_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(equality_test PROPERTIES TIMEOUT 90)
+    find_package(Threads REQUIRED)
+    add_executable(runtime_threads_test runtime_threads.c tests/runtime_threads_test.c)
+    target_link_libraries(runtime_threads_test PRIVATE Threads::Threads)
+    add_test(NAME runtime_threads_test COMMAND runtime_threads_test)
+    set_tests_properties(runtime_threads_test PROPERTIES TIMEOUT 30)
+    if(EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/threads/tests/test_threads.py")
+        add_test(NAME threads_test COMMAND ${CMAKE_COMMAND} -E env "OCEAN=$<TARGET_FILE:ocean-c>" "OCEAN_COMPILER_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}"
+            ${Python3_EXECUTABLE} "${OCEAN_STANDARD_LIBRARY_SOURCE}/threads/tests/test_threads.py")
+        set_tests_properties(threads_test PROPERTIES TIMEOUT 180)
+    endif()
     add_test(NAME closure_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/closure_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(closure_test PROPERTIES TIMEOUT 90)

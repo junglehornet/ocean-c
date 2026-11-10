@@ -236,6 +236,7 @@ static void finishNativeModules(Backend *b, FILE *support) {
     }
     free(line); hashmap_iterate(definitions, nativeFreeSet, NULL); hashmap_free(definitions);
     b->units->needsFFI = b->ffiUsed;
+    b->units->needsThreads = b->threadsUsed;
     for (size_t unit = 0; unit < b->units->count; unit++) {
         if (!b->units->needed[unit]) continue;
         FILE *out = fopen(b->units->paths[unit], "w");

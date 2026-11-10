@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "backend.h"
 #include "build_cache.h"
+#include "runtime_threads_source.h"
 #include <ctype.h>
 #include "diagnostic.h"
 #include "array_type.h"
@@ -246,6 +247,7 @@ typedef struct {
     ClosureCellType *closureCells;
     unsigned nClosures;
     int closuresUsed;
+    int threadsUsed;
     expr *deferCall;
     unsigned nDefers;
     Value deferFrame;
@@ -2176,6 +2178,8 @@ static Kind expressionKind(Backend *b, expr *e) {
         }
         if (v->func.type == EXPR_TYPE_IDENTIFIER) {
             const char *name = ((struct expr_identifier *)v->func.underlying)->lexeme.lexeme;
+            if (!strcmp(name, "compilerThreadSpawn") && b->function && b->function->compilerIntrinsic == INTRINSIC_THREAD_SPAWN) return INT;
+            if (!strcmp(name, "compilerThreadReturn") && b->function && b->function->compilerIntrinsic == INTRINSIC_THREAD_RETURN) return VOID;
             if (!strcmp(name, "recover") && !findFunction(b, "recover")) return SCALAR_ANY;
             if (!strcmp(name, "compilerReflectFields") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_FIELDS)
                 return resultType(b, b->function);
@@ -4214,6 +4218,24 @@ static Value expressionImpl(Backend *b, expr *e) {
             fail(b, "only direct function and method calls are supported");
             return value(b, BAD, "0");
         }
+        if (!strcmp(name, "compilerThreadSpawn") || !strcmp(name, "compilerThreadReturn")) {
+            int spawn = !strcmp(name, "compilerThreadSpawn");
+            if (!b->function || b->function->compilerIntrinsic != (spawn ? INTRINSIC_THREAD_SPAWN : INTRINSIC_THREAD_RETURN) ||
+                v->nParams != (size_t)spawn || v->spread) {
+                fail(b, "thread intrinsics are restricted to the standard library threads package"); return value(b, BAD, "0");
+            }
+            b->threadsUsed = b->closuresUsed = 1;
+            if (!spawn) {
+                fprintf(b->body, "  call void @ocean_runtime_thread_return()\n  unreachable\n");
+                b->terminated = 1; return value(b, VOID, "");
+            }
+            Value callback = expression(b, &v->params[0]);
+            Value code = closureParts(b, callback, 0), environment = closureParts(b, callback, 1);
+            requireClosureCode(b, code, v->location);
+            Value result = temp(b, INT);
+            fprintf(b->body, "  %s = call i64 @ocean_threads_spawn(ptr %s, ptr %s)\n", result.operand, code.operand, environment.operand);
+            return result;
+        }
         if (!strcmp(name, "compilerReflectFields") || !strcmp(name, "compilerReflectIsStruct")) {
             int fields = !strcmp(name, "compilerReflectFields");
             if (!b->function || b->function->compilerIntrinsic != (fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT) ||
@@ -4891,6 +4913,7 @@ static void blockLimit(Backend *b, struct stmt_block *v, size_t count) {
 static void block(Backend *b, struct stmt_block *v) { blockLimit(b, v, v->nStmts); }
 #include "backend_closure.inc"
 #include "backend_defer.inc"
+#include "backend_threads.inc"
 static void statementImpl(Backend *, stmt *);
 static void statement(Backend *b, stmt *s) {
     token previous = b->location;
@@ -5000,6 +5023,7 @@ static void statementImpl(Backend *b, stmt *s) {
         break;
     }
     case STMT_GOTO: {
+        if (b->threadsUsed) fprintf(b->body, "  call void @ocean_threads_checkpoint()\n");
         JumpTarget *target = jumpTarget(b->jumps, ((struct stmt_branch *)s->value)->label.lexeme);
         if (!target) { fail(b, "goto refers to an undefined label"); break; }
         for (Scope *scope = b->scope; scope && scope->jumpRegion != target->scope; scope = scope->parent)
@@ -5263,6 +5287,7 @@ static void statementImpl(Backend *b, stmt *s) {
         }
         jump(b, v->deferCondition ? body : condition);
         label(b, condition);
+        if (b->threadsUsed) fprintf(b->body, "  call void @ocean_threads_checkpoint()\n");
         if (v->range) {
             Value i = load(b, index), length = arrayLength(b, range), more = temp(b, BOOL);
             fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, length.operand);
@@ -5550,10 +5575,10 @@ static void emitBoundsRuntime(Backend *b) {
         "  %%previous = load ptr, ptr %%parent.slot\n"
         "  br label %%trace\n"
         "done:\n"
-        "  call void @exit(i32 1)\n"
+        "  call void @%s(i32 1)\n"
         "  unreachable\n"
         "}\n",
-        snippetFormat.operand, traceTitle.operand, frameFormat.operand);
+        snippetFormat.operand, traceTitle.operand, frameFormat.operand, b->threadsUsed ? "ocean_threads_panic_exit" : "exit");
     fprintf(b->out,
         "define internal void @__ocean.panic(ptr %%m, i64 %%n, ptr %%f, i64 %%l, i64 %%c, ptr %%s) noreturn {\n"
         "  call void @__ocean.unwind(ptr %%m, i64 %%n, i1 false)\n"
@@ -5721,6 +5746,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         unsigned startLabel = ++b->label;
         branch(b, recovering, recoverLabel, startLabel); label(b, startLabel);
     }
+    if (b->threadsUsed) fprintf(b->body, "  call void @ocean_threads_checkpoint()\n");
     JumpContext jumps = {0};
     JumpContext *previousJumps = b->jumps;
     prepareJumps(b, &jumps, &f->body);
@@ -6377,6 +6403,14 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     if (!units) emitTarget(output);
     Scope globals = {0};
     Backend b = {.program = program, .out = output, .globalScope = &globals, .scope = &globals, .units = units};
+    for (size_t i = 0; i < program->nStatements; i++) {
+        if (program->statements[i].type != STMT_FUNC) continue;
+        struct stmt_func *f = program->statements[i].value;
+        const char *name = f->externalName ? f->externalName : f->name.lexeme;
+        if (f->compilerIntrinsic == INTRINSIC_THREAD_SPAWN || f->compilerIntrinsic == INTRINSIC_THREAD_RETURN ||
+            (f->isExtern && !strncmp(name, "ocean_threads_", 14))) b.threadsUsed = b.closuresUsed = 1;
+    }
+    if (b.threadsUsed && backendWasm()) { fail(&b, "threads and sync are unavailable on WebAssembly"); return 1; }
     if (units) {
         b.nativeNames = hashmap_create();
         if (!b.nativeNames) { fail(&b, "could not create native symbol table"); return 1; }
@@ -6592,6 +6626,7 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     emitFFIRuntime(&b);
     if (b.nullChecksUsed || b.ffiUsed) fprintf(output, "declare void @llvm.trap() cold noreturn nounwind\n");
     emitClosureRuntime(&b);
+    emitThreadRuntime(&b);
     emitDeferRuntime(&b);
     emitBoundsRuntime(&b);
     if (fflush(output) || ferror(output))
@@ -6680,6 +6715,35 @@ int emitLLVMPackages(parseResult *program, llvmPackages *units) {
 }
 /* Stage beside the destination so a failed compiler/linker preserves old output.
  * exec arguments are passed directly; paths never become shell commands. */
+// Build the embedded platform runtime only for programs with native threading.
+// The runtime travels in the compiler executable; no installation path lookup
+// or system-wide runtime library is needed.
+static char *compileThreadRuntime(void) {
+    if (backendWasm()) { fprintf(stderr, "backend error: native threads are unavailable on WebAssembly\n"); return NULL; }
+    char source[] = "/tmp/ocean-thread-runtime-XXXXXX";
+    int fd = mkstemp(source);
+    if (fd < 0) { perror("thread runtime source"); return NULL; }
+    FILE *file = fdopen(fd, "w");
+    if (!file) { close(fd); unlink(source); return NULL; }
+    int failed = fputs(oceanThreadRuntimeSource, file) == EOF;
+    if (fclose(file)) failed = 1;
+    char *object = checked(strlen(source) + 3); sprintf(object, "%s.o", source);
+    pid_t child = failed ? -1 : fork();
+    if (!child) {
+        execlp("clang", "clang", "-std=c11", "-O2", "-ffunction-sections", "-fdata-sections", "-x", "c", "-c", source, "-o", object, (char *)NULL);
+        perror("compiling native thread runtime"); _exit(127);
+    }
+    int status = 0;
+    if (child < 0) failed = 1;
+    else {
+        while (waitpid(child, &status, 0) < 0) if (errno != EINTR) { failed = 1; break; }
+        if (!WIFEXITED(status) || WEXITSTATUS(status)) failed = 1;
+    }
+    unlink(source);
+    if (failed) { unlink(object); free(object); return NULL; }
+    return object;
+}
+
 static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath, int staticLink) {
     size_t len = strlen(outputPath) + 16;
     char *staged = checked(len);
@@ -6693,16 +6757,22 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     close(fd);
     // Ordinary programs retain their existing link requirements. Only modules
     // carrying runtime scalar metadata need the libffi runtime.
-    int needsFFI = 0;
+    int needsFFI = 0, needsThreads = 0, ownsThreadRuntime = 0;
     FILE *input = fopen(irPath, "r");
     if (input) {
         char line[1024];
-        while (fgets(line, sizeof(line), input))
-            if (strstr(line, "@ffi_type_")) { needsFFI = 1; break; }
+        while (fgets(line, sizeof(line), input)) {
+            if (strstr(line, "@ffi_type_")) needsFFI = 1;
+            if (strstr(line, "@ocean_threads_")) needsThreads = 1;
+            if (strstr(line, "define hidden void @ocean_runtime_thread_invoke")) ownsThreadRuntime = 1;
+        }
         fclose(input);
     }
+    char *threadObject = needsThreads && (!object || ownsThreadRuntime) ? compileThreadRuntime() : NULL;
+    if (needsThreads && (!object || ownsThreadRuntime) && !threadObject) { unlink(staged); free(staged); return 1; }
     pid_t child = fork();
     if (child < 0) {
+        if (threadObject) { unlink(threadObject); free(threadObject); }
         perror("could not start clang");
         unlink(staged);
         free(staged);
@@ -6726,15 +6796,26 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         if (staticLink && !object) args[n++] = "-static";
         if (objectPath) args[n++] = (char *)objectPath;
         else {
-            if (object) args[n++] = "-c";
+            if (object) {
+                if (threadObject) {
+                    args[n++] = "-r"; args[n++] = "-nostdlib";
+#if !defined(__APPLE__)
+                    args[n++] = "-no-pie";
+#endif
+                } else args[n++] = "-c";
+            }
             args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
         }
+        if (threadObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = threadObject; }
         args[n++] = "-o"; args[n++] = staged;
         if (!object) {
 #if defined(_WIN32)
             if (!backendWasm()) args[n++] = "-lkernel32";
 #endif
             if (needsFFI && !backendWasm()) args[n++] = "-lffi";
+#if !defined(_WIN32)
+            if (needsThreads && !backendWasm()) args[n++] = "-pthread";
+#endif
         }
         args[n] = NULL;
         execvp(args[0], args);
@@ -6757,6 +6838,7 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     }
     unlink(staged);
     free(staged);
+    if (threadObject) { unlink(threadObject); free(threadObject); }
     return failed;
 }
 
@@ -6786,17 +6868,17 @@ int checkBackend(parseResult *program) {
     }
     char *output = checked(strlen(units.directory) + 16);
     sprintf(output, "%s/check.out", units.directory);
-    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, output, program->isLibrary, 0);
+    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, units.needsThreads, output, program->isLibrary, 0);
     if (failed) diagnostic(program->sourceText, (token){.filename=(char *)program->sourceFilename,.line=1,.column=1},
                            "backend", "error", "LLVM compilation or linking failed during check");
     for (size_t i = 0; i < units.count; i++) if (objects[i]) { unlink(objects[i]); free(objects[i]); }
     free(objects); unlink(output); free(output); freeLLVMPackages(&units); return failed;
 }
 
-int linkLLVMObjects(const char **objects, size_t count, int ffi, const char *output, int library, int staticLink) {
+int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, const char *output, int library, int staticLink) {
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
-    char **args=checked(sizeof(char*)*(count+24));size_t n=0;
+    char **args=checked(sizeof(char*)*(count+28));size_t n=0;
     args[n++]="clang";args[n++]="-Wno-override-module";
     if (backendWasm()) {
         args[n++]="--target=wasm32-unknown-unknown";
@@ -6815,6 +6897,9 @@ int linkLLVMObjects(const char **objects, size_t count, int ffi, const char *out
     args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
 #if defined(_WIN32)
     if(!library&&!backendWasm())args[n++]="-lkernel32";
+#endif
+#if !defined(_WIN32)
+    if (threads && !library && !backendWasm()) args[n++]="-pthread";
 #endif
     args[n]=NULL;
     pid_t child=fork();if(!child){execvp(args[0],args);perror("could not execute clang");_exit(127);}

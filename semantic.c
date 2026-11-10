@@ -2059,6 +2059,19 @@ static Type *expression(Context *c, expr *e) {
         }
         if (v->func.type == EXPR_TYPE_IDENTIFIER) {
             const char *name = ((struct expr_identifier *)v->func.underlying)->lexeme.lexeme;
+            if (!strcmp(name, "compilerThreadSpawn") || !strcmp(name, "compilerThreadReturn")) {
+                int spawn = !strcmp(name, "compilerThreadSpawn");
+                if (!c->function || c->function->compilerIntrinsic != (spawn ? INTRINSIC_THREAD_SPAWN : INTRINSIC_THREAD_RETURN)) {
+                    error(c, at, "thread intrinsics are restricted to the standard library threads package");
+                    return &unknown;
+                }
+                if (v->nParams != (size_t)spawn || v->spread) error(c, at, "invalid thread intrinsic arguments");
+                for (size_t i = 0; i < v->nParams; i++) {
+                    Type *actual = expression(c, &v->params[i]);
+                    if (spawn) check(c, typeOf(c, c->function->paramTypeNames[0]), actual, at);
+                }
+                return spawn ? &integer : &nothing;
+            }
             int fields = !strcmp(name, "compilerReflectFields"), predicate = !strcmp(name, "compilerReflectIsStruct");
             if (fields || predicate) {
                 enum compilerIntrinsic required = fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT;

@@ -11,7 +11,7 @@ int emitLLVM(parseResult *program, FILE *output);
 int emitLLVMPackages(parseResult *program, llvmPackages *units);
 /* Validate lowering, LLVM verification, and the normal link contract without publishing output. */
 int checkBackend(parseResult *program);
-int linkLLVMObjects(const char **objects, size_t count, int needsFFI, const char *output, int library, int staticLink);
+int linkLLVMObjects(const char **objects, size_t count, int needsFFI, int needsThreads, const char *output, int library, int staticLink);
 /* Uses clang from PATH; OCOS=js OCARCH=wasm selects wasm32, otherwise host. */
 int compileLLVMExecutable(const char *irPath, const char *outputPath, int staticLink);
 int compileLLVM(const char *irPath, const char *outputPath);

@@ -88,7 +88,7 @@ if "saved" in record and os.environ.get("OCEAN_CACHE_TEST_FAIL"):
     for manifest in native_actions.values():
         digest = manifest.decode().strip()
         data = (cache / 'v1/data' / digest[:2] / digest).read_bytes()
-        assert data.startswith(b'\x7fELF') or data in (b'0', b'1')
+        assert data.startswith(b'\x7fELF') or data in (b'00', b'01', b'10', b'11')
     build_delta(0); built(7)
     assert actions() == native_actions
     invoke('run', source, status=7)

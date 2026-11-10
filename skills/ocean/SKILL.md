@@ -868,3 +868,50 @@ the existing system-call based I/O has no JavaScript implementation.
 WebAssembly host instead. `asm wasm { nop }` selects a Wasm assembly block;
 `asm wasm/js` is an error. Wasm `${variable}` assembly operands are not yet
 supported. Module/package resolution and build inputs otherwise stay the same.
+
+## Native threads and synchronization
+
+`threads.Spawn(job func()) int` starts an OS thread from a function or closure.
+`CurrentID() int` returns 0 for main; worker IDs are positive and never reused.
+`Await(id int)` waits for completion and joins the native thread; repeat and
+concurrent awaits work. `IsDone(id int) bool` reports completion. Invalid IDs
+panic; awaiting yourself panics. `Yield()` parks the caller until `Wake(id)`
+finds it yielded. Wake on running/completed threads does nothing and saves no
+wake token. Wake on an unknown ID panics.
+
+`threads.Return()` exits only the calling thread from any function depth and
+runs its defers. `Kill(id int)` requests cancellation; it returns without waiting.
+Cancellation runs defers at compiler checkpoints (function entries, loop
+iterations, goto jumps) or interruptible library waits. Follow with Await when
+completion is required. Deferred cleanup is not interrupted by cancellation.
+Arbitrary blocking native calls and long inline assembly cannot be interrupted
+until control returns to a checkpoint. Return and cancellation are not panics;
+recover does not stop them. An unrecovered worker panic exits the process.
+
+`sync.Mutex` provides Lock, Unlock and TryLock; `sync.WaitGroup` provides Add,
+Done and Wait. Zero values work. These types use pointer receivers; never copy
+them after first use. Add work before spawning it and reuse a WaitGroup only
+after preceding Wait calls return. Shared mutable data and existing library
+registries require caller synchronization. Closure capture does not make shared
+access safe. Register deferred Unlock/Done cleanup immediately after acquiring
+ownership so Return and Kill cannot strand locks or unfinished work.
+
+`os.Exit(code int)` immediately terminates the entire process and all threads;
+it does not run defers or process cleanup. The code is explicitly converted to
+a native C int, with the host OS's normal exit-code behavior.
+
+The threading runtime supports POSIX pthreads on Linux/macOS and Win32 APIs on
+Windows. Importing threads or sync for WebAssembly fails compilation. The native
+runtime and POSIX -pthread link option are included only for programs needing
+native threading/synchronization, including cached builds. C ABI bridges and
+closure registry atomic operations are compiler-owned; ordinary Ocean function
+values still cannot be passed directly to C callbacks. The runtime C source is
+embedded in the compiler at build time and compiled with Clang into the cached
+program support object. Full cache hits only relink. When manually linking saved
+LLVM for a threaded program, also compile/link runtime_threads.c and add -pthread
+on POSIX.
+
+Normal main return marks ID 0 complete, then shutdown waits for workers before
+closure/global cleanup. Wake yielded workers before returning from main.
+Return or Kill of ID 0 completes the main thread while allowing workers to
+continue. Await before leaving scopes containing borrowed pointers.

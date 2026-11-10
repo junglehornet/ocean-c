@@ -401,6 +401,20 @@ static void markReflectionIntrinsic(packageBuild *b, Package *p, File *file, str
     if (!valid) { error(b, file->path, "invalid standard reflect intrinsic signature: %s", f->name.lexeme); return; }
     f->compilerIntrinsic = fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT;
 }
+static void markThreadIntrinsic(packageBuild *b, Package *p, File *file, struct stmt_func *f) {
+    if (!standardPackageSource(b, p, file, "threads")) return;
+    int spawn = !strcmp(f->name.lexeme, "Spawn"), stop = !strcmp(f->name.lexeme, "Return");
+    if (!spawn && !stop) return;
+    typeTokens param = f->nParams == 1 ? f->paramTypeNames[0] : (typeTokens){0};
+    typeTokens result = f->nResults == 1 ? f->resultTypes[0] : (typeTokens){0};
+    int valid = !f->isExtern && !f->isVariadic && !f->receiverType.nTokens && !f->nTypeParams;
+    if (spawn) valid = valid && f->nParams == 1 && f->nResults == 1 && param.nTokens == 3 &&
+        param.tokens[0].type == FUNC && param.tokens[1].type == LEFT_PAREN && param.tokens[2].type == RIGHT_PAREN &&
+        result.nTokens == 1 && !strcmp(result.tokens[0].lexeme, "int");
+    else valid = valid && !f->nParams && !f->nResults;
+    if (!valid) { error(b, file->path, "invalid standard threads intrinsic signature: %s", f->name.lexeme); return; }
+    f->compilerIntrinsic = spawn ? INTRINSIC_THREAD_SPAWN : INTRINSIC_THREAD_RETURN;
+}
 static int compareNames(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 static Symbol *symbol(Package *package, const char *name) {
     for (Symbol *s = package->symbols; s; s = s->next) if (!strcmp(s->name, name)) return s;
@@ -498,6 +512,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
             if (s->type == STMT_FUNC) {
                 struct stmt_func *f = s->value;
                 markReflectionIntrinsic(b, p, file, f);
+                markThreadIntrinsic(b, p, file, f);
                 if (!strcmp(f->name.lexeme, "setArgs") && standardPackageSource(b, p, file, "os")) {
                     typeTokens stream = f->nParams ? f->paramTypeNames[0] : (typeTokens){0};
                     int valid = !f->isExtern && !f->isVariadic && !f->receiverType.nTokens &&

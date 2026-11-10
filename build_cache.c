@@ -186,6 +186,18 @@ int buildCachePackageKey(buildCache *cache, parseResult *program, size_t package
     Digest d = digest();
     string(&d, getenv("OCOS")); string(&d, getenv("OCARCH"));
     string(&d, "ocean source package action v3: native ABI v1; function/data sections");
+    // Checkpoint emission depends on the whole program's threading mode, even
+    // for packages that do not themselves import threads or sync.
+    int nativeThreads = 0;
+    for (size_t i = 0; i < program->nStatements; i++) {
+        if (program->statements[i].type != STMT_FUNC) continue;
+        struct stmt_func *f = program->statements[i].value;
+        const char *name = f->externalName ? f->externalName : f->name.lexeme;
+        if (f->compilerIntrinsic == INTRINSIC_THREAD_SPAWN || f->compilerIntrinsic == INTRINSIC_THREAD_RETURN ||
+            (f->isExtern && !strncmp(name, "ocean_threads_", 14))) nativeThreads = 1;
+    }
+    number(&d, nativeThreads);
+
     string(&d, cache->compilerHash); string(&d, tool); free(tool);
     number(&d, info.st_dev); number(&d, info.st_ino); number(&d, info.st_size); number(&d, info.st_mode);
 #ifdef __APPLE__
