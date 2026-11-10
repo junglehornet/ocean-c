@@ -805,8 +805,7 @@ arguments. Generic functions can construct `Result<T>.value(item)` and return
 `Result<T>`. Enum type parameters and arguments require angle brackets;
 `Result[int]` is rejected.
 
-Unsupported backend features produce an error: calls through interface methods,
-other collection types, and bound method values.
+Unsupported backend features, such as bound method values, produce an error.
 The parser accepts more syntax than the backend currently implements.
 
 Method receivers use `name type`. Generic receiver arguments bind type parameters
@@ -1163,7 +1162,7 @@ Use a type alias for arrays of functions, such as `type Callback = func() int;`
 then `callbacks: Callback[3];`. A suffix in `func() int[3]` belongs to the result
 type. An uninitialized function value panics if called. Function values use an
 Ocean closure ABI and cannot be passed directly as native C function pointers.
-Bound method values and calls through interface methods remain unsupported.
+Calls through interface methods dispatch to the boxed concrete receiver. Bound method values remain unsupported.
 
 ```ocean
 func map(data array<int>, closure func(int) int) int[] {
@@ -1260,7 +1259,8 @@ Named type-list parameters use boxed runtime dispatch; generic calls specialize
 normally. Generic interface method implementations must match the required
 signature and constraints, independently of parameter names. Generic methods
 still require explicit type arguments at calls. Calls through a boxed method
-interface still require narrowing to a concrete type first.
+interface dispatch to its concrete receiver, including generic methods with explicit
+type arguments, variadic methods, embedded methods, and deferred calls.
 
 Interface operator requirements (`self * T`) and signed membership prefixes
 (`-Type`, `+Type`, `=Type`) are no longer part of the language. Use type lists
@@ -1314,8 +1314,8 @@ type. Runtime violations terminate execution, like failed type assertions.
 A type-switch `case any[]` matches homogeneous array types such as `int[]` and
 `string[]`. `case mixed any[]` accepts both homogeneous and mixed array types.
 Assertions `.(any[])` and `.(mixed any[])` expose boxed elements for iteration;
-interface bounds such as `.(mixed Value[])` also check each element. Calling
-methods through an interface value still requires narrowing to a concrete type.
+interface bounds such as `.(mixed Value[])` also check each element. Method calls
+through an interface value dispatch to its concrete receiver.
 
 Variadic `...any` packs have type `mixed any[]`, so calls such as
 `Println("count", 3)` remain valid. `...Value` packs likewise allow different

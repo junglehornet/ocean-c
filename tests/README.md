@@ -871,3 +871,8 @@ native identities for boxed structs/generics/closures/defers/maps, toolchain and
 environment invalidation, corrupt artifacts, concurrent writers, and unavailable
 caches. Native package objects retain ordinary functions; executable linkers prune
 unreachable sections. Merged `--emit-llvm` remains an inspection artifact.
+
+`interface_dispatch_test.py` exercises boxed method calls through parameters,
+returns, mixed arrays, maps and embedded interfaces, pointer mutation and value
+receivers, explicit generic specializations, variadic packing/spread, string
+ownership, deferred calls, optimized LLVM, and package builds with cache reuse.

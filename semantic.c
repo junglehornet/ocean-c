@@ -1454,6 +1454,22 @@ static int identicalTypes(Type *a, Type *b) {
     if (!strcmp(right, "f64")) right = "float";
     return !strcmp(left, right);
 }
+static struct stmt_func *interfaceMethod(Context *c, Type *t, const char *name, unsigned depth) {
+    if (!t || !t->interface || depth>32) return NULL;
+    struct stmt_interface *contract=t->interface;
+    for (size_t i=0;i<contract->nMethods;i++)
+        if (!strcmp(contract->methods[i].name.lexeme,name)) return &contract->methods[i];
+    for (size_t i=0;i<contract->nConstraints;i++) {
+        typeTokens span=contract->constraints[i];
+        // Only embedded interfaces contribute methods; union terms do not.
+        int unionTerm=0;
+        for (size_t j=0;j<span.nTokens;j++) if (span.tokens[j].type==BITWISE_OR) unionTerm=1;
+        if (unionTerm || !span.nTokens || span.tokens[0].type==TILDE) continue;
+        struct stmt_func *method=interfaceMethod(c,typeOf(c,span),name,depth+1);
+        if (method) return method;
+    }
+    return NULL;
+}
 static int interfaceFits(Context *c, Type *expected, Type *actual, unsigned depth) {
     if (depth > 32 || !c) return 0;
     if (actual == &unknown || canonical(actual) == &any || actual->interface) return 1;
@@ -2613,11 +2629,11 @@ static Type *expression(Context *c, expr *e) {
             c->completionUses=realloc(c->completionUses,c->nCompletionTypes*sizeof(*c->completionUses));
             c->completionTypes[n]=t; c->completionUses[n]=field;
         }
-        if (t->interface && t->interface->nMethods) {
-            for (size_t i=0;i<t->interface->nMethods;i++) {
-                struct stmt_func *method=&t->interface->methods[i];
-                if (strcmp(method->name.lexeme,field.lexeme)) continue;
+        if (t->interface) {
+            struct stmt_func *method=interfaceMethod(c,t,field.lexeme,0);
+            if (method) {
                 Type *callable=allocate(c,sizeof(*callable)); callable->name="function";
+                v->interfaceMethod=method;
                 callable->function=method; callable->receiver=t; return callable;
             }
             error(c,field,"interface has no such method"); return &unknown;

@@ -242,7 +242,7 @@ Use a type alias for arrays of functions, such as `type Callback = func() int;`
 then `callbacks: Callback[3];`. A suffix in `func() int[3]` belongs to the result
 type. An uninitialized function value panics if called. Function values use an
 Ocean closure ABI and cannot be passed directly as native C function pointers.
-Bound method values and calls through interface methods remain unsupported.
+Calls through interface methods dispatch to the boxed concrete receiver. Bound method values remain unsupported.
 
 ```ocean
 func map(data array<int>, closure func(int) int) int[] {
@@ -515,7 +515,8 @@ Named type-list parameters use boxed runtime dispatch; generic calls specialize
 normally. Generic interface method implementations must match the required
 signature and constraints, independently of parameter names. Generic methods
 still require explicit type arguments at calls. Calls through a boxed method
-interface still require narrowing to a concrete type first.
+interface dispatch to its concrete receiver, including generic methods with explicit
+type arguments, variadic methods, embedded methods, and deferred calls.
 
 Interface operator requirements (`self * T`) and signed membership prefixes
 (`-Type`, `+Type`, `=Type`) are no longer part of the language. Use type lists
@@ -544,7 +545,14 @@ Generic constraints include interfaces, unions, `~T` underlying types, and struc
 families (`Box` versus `Box<int>`). Boxed `any` values support type assertions
 and type switches. `mixed any[]` allows heterogeneous elements; ordinary
 interface arrays require one concrete element type. Interface method calls
-require narrowing to a concrete type first.
+dispatch to the boxed concrete receiver.
+
+Interface calls preserve value receivers as snapshots and pointer receivers as
+borrowed pointers. A concrete value only satisfies a pointer-method requirement
+when boxed as a pointer. An interface with no concrete implementation traps on
+method invocation. `any` has no callable methods; assert a method interface or a
+concrete type first. Module/package resolution, build commands, standard-library
+requirements, and native linking dependencies are unchanged by method dispatch.
 
 ```ocean
 enum Result<T> { value(T), error(string), }
@@ -588,8 +596,7 @@ unsupported; use pointers. C variadic forwarding uses libffi; manually linking
 saved IR/objects using it requires `-lffi`.
 
 Do not assume Go or C features exist merely because syntax looks familiar.
-Current unsupported backend features include bound method values and interface
-method dispatch. Generic function values require explicit type arguments.
+Current unsupported backend features include bound method values. Generic function values require explicit type arguments.
 Parameterized array-field layout and dynamic array ABI are compiler-specific;
 do not rely on their layout at native boundaries. Validate unfamiliar features
 with a minimal package and the target compiler before building on them.
@@ -915,3 +922,11 @@ Normal main return marks ID 0 complete, then shutdown waits for workers before
 closure/global cleanup. Wake yielded workers before returning from main.
 Return or Kill of ID 0 completes the main thread while allowing workers to
 continue. Await before leaving scopes containing borrowed pointers.
+
+Thread IDs remain valid after completion. Unknown IDs (including negative IDs)
+panic for all ID-taking APIs; CurrentID panics on unregistered native threads.
+Spawn panics on an uninitialized function or native creation failure. Mutexes
+are nonrecursive and have no fairness guarantee; unlocking an unlocked mutex
+panics, and another thread may unlock a mutex. Native synchronization state is
+initialized lazily and retained until process shutdown. These APIs require the
+matching `threads` and `sync` standard-library sources.

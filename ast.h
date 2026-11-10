@@ -296,6 +296,7 @@ struct expr_instantiation {
 };
 
 struct expr_dot {
+    struct stmt_func *interfaceMethod; // Resolved signature for dynamic method calls.
     expr parent;
     expr field;
 };

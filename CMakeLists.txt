@@ -203,6 +203,9 @@ if(BUILD_TESTING)
             ${Python3_EXECUTABLE} "${OCEAN_STANDARD_LIBRARY_SOURCE}/threads/tests/test_threads.py")
         set_tests_properties(threads_test PROPERTIES TIMEOUT 180)
     endif()
+    add_test(NAME interface_dispatch_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/interface_dispatch_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(interface_dispatch_test PROPERTIES TIMEOUT 90)
     add_test(NAME closure_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/closure_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(closure_test PROPERTIES TIMEOUT 90)

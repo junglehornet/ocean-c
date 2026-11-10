@@ -108,6 +108,7 @@ typedef struct TypeBinding {
     struct TypeBinding *next;
 } TypeBinding;
 typedef struct MethodInstance {
+    struct stmt_func *interfaceMethod; // Non-null for a boxed dispatch adapter.
     struct stmt_func *function;
     Kind record, receiver;
     Kind *arguments;
@@ -1384,6 +1385,49 @@ static MethodInstance *methodInstance(Backend *b, Kind receiver, const char *nam
     b->lastMethod = m;
     return m;
 }
+// Dispatch adapters use the ordinary method ABI, including defer capture.
+static MethodInstance *interfaceInstance(Backend *b, struct stmt_func *required,
+                                        typeTokens *spans, size_t count) {
+    Kind *arguments = checked(sizeof(Kind) * (count + 1));
+    if (count != required->nTypeParams) {
+        free(arguments); fail(b, "interface method type argument count mismatch"); return NULL;
+    }
+    for (size_t i=0;i<count;i++) arguments[i]=type(b,spans[i]);
+    for (MethodInstance *m=b->methods;m;m=m->next)
+        if (m->interfaceMethod==required && m->nArguments==count &&
+            (!count || !memcmp(arguments,m->arguments,count*sizeof(Kind)))) {
+            free(arguments); return m;
+        }
+    if (b->nMethods >= 256) {
+        free(arguments); fail(b, "method specialization limit exceeded"); return NULL;
+    }
+    MethodInstance *m=checked(sizeof(*m));
+    m->interfaceMethod=required;
+    m->function=checked(sizeof(*m->function)); *m->function=*required;
+    // A signature has no receiver syntax; borrow its name to mark the adapter ABI.
+    m->function->receiverType=(typeTokens){1,&required->name};
+    m->receiver=SCALAR_ANY; m->record=BAD; m->id=++b->nMethods;
+    m->arguments=arguments; m->nArguments=m->nBindings=count;
+    m->bindings=checked(sizeof(TypeBinding)*(count+1));
+    for (size_t i=0;i<count;i++)
+        m->bindings[i]=(TypeBinding){required->typeParamNames[i].lexeme,arguments[i],
+                                    i+1<count ? &m->bindings[i+1] : NULL};
+    if (b->lastMethod) b->lastMethod->next=m; else b->methods=m;
+    b->lastMethod=m;
+    return m;
+}
+static MethodInstance *dispatchTarget(Backend *b, MethodInstance *adapter, Kind kind) {
+    struct stmt_interface contract={.nMethods=1,.methods=adapter->interfaceMethod};
+    if (!matchesInterface(b,&contract,kind)) return NULL;
+    TypeBinding *previous=b->typeBindings;
+    b->typeBindings=adapter->nBindings ? adapter->bindings : NULL;
+    typeTokens *spans=checked(sizeof(*spans)*(adapter->nArguments+1));
+    for (size_t i=0;i<adapter->nArguments;i++)
+        spans[i]=(typeTokens){1,&adapter->interfaceMethod->typeParamNames[i]};
+    MethodInstance *target=methodInstance(b,kind,adapter->function->name.lexeme,spans,adapter->nArguments);
+    free(spans); b->typeBindings=previous;
+    return target;
+}
 // Direct generic functions share the concrete-specialization queue with methods.
 static MethodInstance *functionInstance(Backend *b, struct stmt_func *f,
                                         typeTokens *spans, size_t count) {
@@ -2173,7 +2217,7 @@ static Kind expressionKind(Backend *b, expr *e) {
                 return runtimeArrayKind(b, arrayReceiver->element);
             if (parent && parent->dynamicArray && (!strcmp(name, "remove") || !strcmp(name, "pop"))) return parent->element;
             if (parent && parent->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add"))) return VOID;
-            return methodResult(b, methodInstance(b, expressionKind(b, &dot->parent),
+            return methodResult(b, dot->interfaceMethod ? interfaceInstance(b, dot->interfaceMethod, typeArguments, count) : methodInstance(b, expressionKind(b, &dot->parent),
                 ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme, typeArguments, count));
         }
         if (v->func.type == EXPR_TYPE_IDENTIFIER) {
@@ -4177,12 +4221,15 @@ static Value expressionImpl(Backend *b, expr *e) {
                 return removeDynamicArray(b, dot, v);
             if (dynamicArray && dynamicArray->dynamicArray && (!strcmp(name, "append") || !strcmp(name, "prepend") || !strcmp(name, "add")))
                 return mutateDynamicArray(b, dot, v);
-            method = methodInstance(b, actual, name, typeArguments, count);
+            method = dot->interfaceMethod ? interfaceInstance(b, dot->interfaceMethod, typeArguments, count)
+                                          : methodInstance(b, actual, name, typeArguments, count);
             if (!method) return value(b, BAD, "0");
             f = method->function;
             BufferKind *actualType = bufferKind(b, actual);
             BufferKind *wantedType = bufferKind(b, method->receiver);
-            if (wantedType && wantedType->shape == 6 && !wantedType->definition && !(actualType && actualType->shape == 6 && !actualType->definition)) {
+            if (method->interfaceMethod) {
+                receiver = coerce(b, expression(b, &dot->parent), SCALAR_ANY);
+            } else if (wantedType && wantedType->shape == 6 && !wantedType->definition && !(actualType && actualType->shape == 6 && !actualType->definition)) {
                 if (!addressable(&dot->parent)) {
                     fail(b, "pointer receiver requires an addressable value");
                     return value(b, BAD, "0");
@@ -5944,6 +5991,60 @@ static void emitGlobals(Backend *b, FILE *output) {
         b->initializingGlobals = 0;
     }
 }
+// Prepare to a fixed point: dispatched implementations can box new concrete types
+// or call further interface methods. Do not freeze adapters until reachability settles.
+static int prepareInterfaceDispatch(Backend *b) {
+    unsigned before=b->nMethods;
+    for (MethodInstance *m=b->methods;m;m=m->next) if (m->interfaceMethod)
+        for (AnyType *a=b->anyTypes;a;a=a->next) dispatchTarget(b,m,a->kind);
+    return before!=b->nMethods;
+}
+static void emitInterfaceDispatch(Backend *b, FILE *out) {
+    for (MethodInstance *m=b->methods;m;m=m->next) {
+        if (!m->interfaceMethod) continue;
+        b->typeBindings=m->nBindings ? m->bindings : NULL;
+        struct stmt_func *f=m->function;
+        Kind result=resultType(b,f);
+        fprintf(out,"define %s ",irType(b,result)); methodName(out,m);
+        fprintf(out,"({ ptr, i64 } %%receiver");
+        for (size_t i=0;i<f->nParams;i++)
+            fprintf(out,", %s %%arg%zu",irType(b,parameterKind(b,f,i)),i);
+        fputs(") {\nentry:\n  %tag = extractvalue { ptr, i64 } %receiver, 0\n  %bits = extractvalue { ptr, i64 } %receiver, 1\n  %storage = alloca i64\n  store i64 %bits, ptr %storage\n",out);
+        unsigned index=0;
+        for (AnyType *a=b->anyTypes;a;a=a->next) {
+            MethodInstance *target=dispatchTarget(b,m,a->kind);
+            if (!target) continue;
+            unsigned n=++index;
+            fprintf(out,"  %%test%u = icmp eq ptr %%tag, @__ocean.any.type.%u\n  br i1 %%test%u, label %%call%u, label %%next%u\ncall%u:\n",n,(unsigned)a->kind,n,n,n,n);
+            BufferKind *t=bufferKind(b,a->kind);
+            int aggregate=t && (t->shape==4 || t->shape==5 || t->shape==17 || !t->shape || (t->definition && representationKind(b,a->kind)==SCALAR_ANY));
+            if (aggregate)
+                fprintf(out,"  %%value%u = call %s @__ocean.any.unbox.%u(i64 %%bits)\n",n,irType(b,a->kind),(unsigned)a->kind);
+            else if (representationKind(b,a->kind)==F32)
+                fprintf(out,"  %%wide%u = load double, ptr %%storage\n  %%value%u = fptrunc double %%wide%u to float\n",n,n,n);
+            else fprintf(out,"  %%value%u = load %s, ptr %%storage\n",n,irType(b,a->kind));
+            const char *receiver=value(b,a->kind,"%%value%u",n).operand;
+            if (a->kind!=target->receiver) {
+                // A boxed pointer also exposes its value-receiver methods.
+                fprintf(out,"  %%nonnull%u = icmp ne ptr %s, null\n  br i1 %%nonnull%u, label %%load%u, label %%null%u\nnull%u:\n  call void @llvm.trap()\n  unreachable\nload%u:\n",n,receiver,n,n,n,n,n);
+                fprintf(out,"  %%loaded%u = load %s, ptr %s\n",n,irType(b,target->receiver),receiver);
+                receiver=value(b,target->receiver,"%%loaded%u",n).operand;
+            }
+            if (result!=VOID) fprintf(out,"  %%result%u = ",n); else fputs("  ",out);
+            fprintf(out,"call %s ",irType(b,result)); methodName(out,target);
+            fprintf(out,"(%s %s",irType(b,target->receiver),receiver);
+            for (size_t i=0;i<f->nParams;i++)
+                fprintf(out,", %s %%arg%zu",irType(b,parameterKind(b,f,i)),i);
+            fputs(")\n",out);
+            if (result==VOID) fputs("  ret void\n",out);
+            else fprintf(out,"  ret %s %%result%u\n",irType(b,result),n);
+            fprintf(out,"next%u:\n",n);
+        }
+        fputs("  call void @llvm.trap()\n  unreachable\n}\n",out);
+        b->nullChecksUsed=1;
+    }
+    b->typeBindings=NULL;
+}
 // Generate per-concrete-type operations so dynamic any copies retain value semantics.
 static void emitAnyType(Backend *b, Kind kind) {
     BufferKind *t = bufferKind(b, kind);
@@ -6525,15 +6626,20 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
         } else if (method) {
             b.closure = NULL; b.method = method;
             b.typeBindings = method->nBindings ? method->bindings : NULL;
-            emitFunction(&b, method->function, output); emittedMethod = method;
+            if (!method->interfaceMethod) emitFunction(&b, method->function, output);
+            emittedMethod = method;
         } else if (closure) {
             b.closure = closure; b.method = NULL;
             b.typeBindings = closure->nBindings ? closure->bindings : NULL;
             if (closure->adapter) emitClosureAdapter(&b, closure, output);
             else emitFunction(&b, closure->function, output);
             emittedClosure = closure;
-        } else break;
+        } else {
+            prepareReflectionTypes(&b);
+            if (!prepareInterfaceDispatch(&b)) break;
+        }
     }
+    emitInterfaceDispatch(&b, output);
     b.closure = NULL;
     emitClosureCellDrops(&b, output);
     b.method = NULL;
@@ -6691,6 +6797,7 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     }
     while (b.methods) {
         MethodInstance *next = b.methods->next;
+        if (b.methods->interfaceMethod) free(b.methods->function);
         free(b.methods->bindings);
         free(b.methods->arguments);
         free(b.methods);
