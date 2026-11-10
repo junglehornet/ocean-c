@@ -165,7 +165,7 @@ static void scheduleDefer(Backend *b, struct stmt_func *f, MethodInstance *metho
             fprintf(b->body, "%s...) ", fixed ? ", " : "");
         }
         if (indirect) fprintf(b->body, "%s", code.operand);
-        else if (method) methodName(b->body, method); else functionName(b->body, f);
+        else if (method) methodName(b->body, method); else functionName(b, b->body, f);
         fputc('(', b->body);
         if (indirect) fprintf(b->body, "ptr %s", environment.operand);
         for (size_t i = indirect ? 1 : 0; i < callCount; i++) fprintf(b->body, "%s%s %s", (i > (indirect ? 1 : 0) || indirect) ? ", " : "", irType(b, captures[i].kind), captures[i].operand);

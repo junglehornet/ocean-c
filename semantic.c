@@ -17,6 +17,7 @@ struct Type {
     struct Scope *declarationScope;
     unsigned resolutionState, resolutionDepth;
     Type *element;
+    Type *mapKey;
     Type *receiver;
     struct stmt_func *function;
     Type **functionParams, **functionResults; // Resolved while lexical type bindings are live.
@@ -220,6 +221,9 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
     }
     if (!strcmp(expected->name, "dynamic-array") && !strcmp(actual->name, "dynamic-array") &&
         !expected->mixed && actual->mixed) return 0;
+    if (expected->mapKey || actual->mapKey)
+        return expected->mapKey && actual->mapKey && identicalTypes(expected->mapKey, actual->mapKey) &&
+               identicalTypes(expected->element, actual->element);
     if (expected->element || actual->element)
         return expected->element && actual->element && !strcmp(expected->name, actual->name) &&
                expected->count == actual->count && expected->bufferSize == actual->bufferSize &&
@@ -253,7 +257,7 @@ static int compatibleTypes(Type *a, Type *b) {
     // A boxed value does not establish the array shape or element type.
     // Require explicit narrowing before assigning it to an array destination.
     // Abstract generic parameters are checked when specialized, not boxed values.
-    if (!strcmp(a->name, "dynamic-array") && b == &any)
+    if ((!strcmp(a->name, "dynamic-array") || a->mapKey) && b == &any)
         return 0;
     b = canonical(b);
     if (a == &nullValue || b == &nullValue) {
@@ -285,6 +289,9 @@ static int compatibleTypes(Type *a, Type *b) {
         return !strcmp(b->name, "fixed-array") && matchesTypeConstraint(a->element, b->element);
     if (!strcmp(a->name, "fixed-array") && !strcmp(b->name, "fixed-array") && b->bufferFamily == 2)
         return 0;
+    if (a->mapKey || b->mapKey)
+        return a->mapKey && b->mapKey && identicalTypes(a->mapKey, b->mapKey) &&
+               identicalTypes(a->element, b->element);
     if (a->element || b->element)
         return a->element && b->element && !strcmp(a->name, b->name) &&
                (compatibleTypes(a->element, b->element) &&
@@ -391,6 +398,16 @@ static Type *typeOf(Context *c, typeTokens span) {
         if (named && named->enumeration && named->enumeration->nTypeParams) {
             error(c, span.tokens[1], "Enum type arguments require angle brackets <...>"); return &unknown;
         }
+    }
+    typeTokens mapKey, mapValue;
+    if (mapTypeParts(span, &mapKey, &mapValue)) {
+        Type *v = allocate(c, sizeof(*v)); v->name = "map";
+        c->typeIndirection++;
+        v->mapKey = typeOf(c, mapKey); v->element = typeOf(c, mapValue);
+        c->typeIndirection--;
+        if (v->mapKey == &nothing || v->element == &nothing)
+            error(c, t, "void is not a map storage type");
+        return v;
     }
     if (span.nTokens > 1 && span.tokens[span.nTokens - 1].type == STAR) {
         Type *pointer = allocate(c, sizeof(*pointer));
@@ -695,6 +712,9 @@ static void formatType(FILE *out, Type *t, unsigned depth) {
             if (f->nResults > 1)
                 fputc(')', out);
         }
+    } else if (t->mapKey) {
+        fputs("map[", out); formatType(out, t->mapKey, depth + 1);
+        fputc(']', out); formatType(out, t->element, depth + 1);
     } else if (!strcmp(t->name, "pointer")) {
         fputc('*', out);
         formatType(out, t->element, depth + 1);
@@ -789,6 +809,14 @@ static Type *checkComposite(Context *c, Type *target, expr *e, token at) {
             error(c, at, "null array elements require an explicit pointer element type");
         v->inferredArray = 1;
         target = array;
+    }
+    if (target->mapKey) {
+        for (size_t i = 0; i < v->nEntries; i++) {
+            if (!v->keys[i].type) { error(c, at, "map literals require key: value entries"); continue; }
+            check(c, target->mapKey, expectedExpression(c, target->mapKey, &v->keys[i], at), v->keys[i].location);
+            check(c, target->element, expectedExpression(c, target->element, &v->values[i], at), v->values[i].location);
+        }
+        return target;
     }
     if (!strcmp(target->name, "buffer") || !strcmp(target->name, "dynamic-array") || !strcmp(target->name, "fixed-array")) {
         if ((!strcmp(target->name, "buffer") || !strcmp(target->name, "fixed-array")) && target->bufferSize == 1 &&
@@ -991,7 +1019,7 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
         if (assignmentContext && count == 1 && nExpected == 2 && values[i].type == EXPR_TYPE_INDEX) {
             struct expr_index *index = values[i].underlying;
             Type *parent = expression(c, &index->parent);
-            if (!strcmp(parent->name, "dynamic-array") || !strcmp(parent->name, "fixed-array")) {
+            if (parent->mapKey || !strcmp(parent->name, "dynamic-array") || !strcmp(parent->name, "fixed-array")) {
                 index->tryIndex = 1;
                 Type **items = allocate(c, 2 * sizeof(*items));
                 items[0] = t; items[1] = &boolean;
@@ -1408,6 +1436,9 @@ static int identicalTypes(Type *a, Type *b) {
             if (!identicalTypes(a->arguments[i], b->arguments[i])) return 0;
         return 1;
     }
+    if (a->mapKey || b->mapKey)
+        return a->mapKey && b->mapKey && identicalTypes(a->mapKey, b->mapKey) &&
+               identicalTypes(a->element, b->element);
     if (a->element || b->element)
         return a->element && b->element && !strcmp(a->name, b->name) &&
                a->count == b->count && a->bufferSize == b->bufferSize &&
@@ -1794,7 +1825,7 @@ static Type *expression(Context *c, expr *e) {
     case EXPR_TYPE_MAKE: case EXPR_TYPE_NEW: {
         Type *t = typeOf(c, ((struct expr_zero *)e->underlying)->type);
         if (e->type == EXPR_TYPE_MAKE) {
-            if (!t->dynamicArray) error(c, at, "make requires a dynamic array type T[]");
+            if (!t->dynamicArray && !t->mapKey) error(c, at, "make requires a dynamic array type T[] or map[K]V");
             return t;
         }
         if (!strcmp(t->name, "fixed-array") && t->bufferFamily == 2)
@@ -1901,7 +1932,7 @@ static Type *expression(Context *c, expr *e) {
         if (v->nTypeArguments == 1 && v->typeArguments[0].nTokens == 1) {
             token arg = v->typeArguments[0].tokens[0];
             Symbol *s = lookup(c, arg.lexeme);
-            if (s && !s->isType) {
+            if ((s && !s->isType) || !strcmp(arg.lexeme, "true") || !strcmp(arg.lexeme, "false")) {
                 struct expr_index *idx = malloc(sizeof(*idx));
                 struct expr_identifier *id = malloc(sizeof(*id));
                 if (!idx || !id)
@@ -1953,6 +1984,10 @@ static Type *expression(Context *c, expr *e) {
             return expression(c, e);
         }
         Type *p = expression(c, &v->parent);
+        if (p->mapKey) {
+            check(c, p->mapKey, expectedExpression(c, p->mapKey, &v->index, v->index.location), v->index.location);
+            return p->element;
+        }
         check(c, &integer, expression(c, &v->index), v->index.location);
         if (!strcmp(p->name, "buffer") && p->bufferFamily == 1) {
             error(c, at, "narrow buffer to an element type before indexing");
@@ -2099,13 +2134,25 @@ static Type *expression(Context *c, expr *e) {
 
         if (v->func.type == EXPR_TYPE_IDENTIFIER &&
             !((struct expr_identifier *)v->func.underlying)->externReference &&
+            !strcmp(((struct expr_identifier *)v->func.underlying)->lexeme.lexeme, "delete") && !lookup(c, "delete")) {
+            if (v->nParams != 2 || v->spread) { error(c, at, "delete requires a map and key"); return &nothing; }
+            Type *map = expression(c, &v->params[0]);
+            if (!map->mapKey) error(c, at, "delete requires a map");
+            else {
+                check(c, map->mapKey, expectedExpression(c, map->mapKey, &v->params[1], at), at);
+                if (!writable(c, &v->params[0])) mutationError(c, &v->params[0], at, "delete requires a writable map");
+            }
+            return &nothing;
+        }
+        if (v->func.type == EXPR_TYPE_IDENTIFIER &&
+            !((struct expr_identifier *)v->func.underlying)->externReference &&
             !strcmp(((struct expr_identifier *)v->func.underlying)->lexeme.lexeme, "len") &&
             !lookup(c, "len")) {
             if (v->nParams != 1 || v->spread)
                 error(c, at, "len requires exactly one array argument");
             for (size_t i = 0; i < v->nParams; i++) {
                 Type *arg = expression(c, &v->params[i]);
-                if (strcmp(arg->name, "dynamic-array") && strcmp(arg->name, "fixed-array") &&
+                if (!arg->mapKey && strcmp(arg->name, "dynamic-array") && strcmp(arg->name, "fixed-array") &&
                     (strcmp(arg->name, "buffer") || !arg->bufferSize))
                     error(c, at, "len requires an array, dynamic array, string, or buffer with known length");
             }
@@ -2416,6 +2463,8 @@ static Type *expression(Context *c, expr *e) {
             !writable(c, &v->child))
             mutationError(c, &v->child, at, "increment requires a writable value");
         if (v->operation == UNARY_ADDRESS_OF) {
+            if (v->child.type == EXPR_TYPE_INDEX && expression(c, &((struct expr_index *)v->child.underlying)->parent)->mapKey)
+                error(c, at, "cannot take the address of a map entry");
             if (arrayDataTarget(c, &v->child))
                 error(
                     c, at,
@@ -2871,7 +2920,7 @@ static void statement(Context *c, stmt *s) {
             Type *t = expression(c, v->range);
             for (size_t i = 0; i < v->nBindings; i++)
                 declare(c, v->bindings[i],
-                        i == 0       ? &integer
+                        i == 0       ? (t->mapKey ? t->mapKey : &integer)
                         : t->element ? t->element
                                      : &unknown,
                         0);

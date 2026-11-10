@@ -54,6 +54,13 @@ output. Fix errors and inspect warnings before using `run` for behavior checks.
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
 
+Executable builds lower only functions reachable from `main`, global initializers,
+standard-library startup hooks, and referenced function values (including closures,
+methods, and deferred calls). Semantic checking still covers the source graph.
+Non-main library builds retain ordinary functions for downstream callers. Native
+compilation uses function/data sections, and executable linking removes unused
+sections (`--gc-sections`, or `-dead_strip` on macOS).
+
 Use `ocean build --static . -o application` (or `ocean build -s .`) to
 statically link a main package executable. This passes `-static` to Clang and
 requires a host toolchain with static system libraries (and static libffi when
@@ -290,6 +297,7 @@ Choose the collection explicitly; these types have different storage and APIs:
 | `buffer<T>[n]` | Raw unchecked storage with lexical length metadata. |
 | `buffer<T>` / `buffer<T>[]` | Raw pointer view, without stored length or ownership. |
 | `string` | Immutable heap-backed bytes; capacity equals length. |
+| `map[K]V` | Hash map with independently typed keys and values; interface sides always allow mixed concrete types. |
 
 ```ocean
 fixed: int[3] = {1, 2, 3};
@@ -392,6 +400,60 @@ func main() int {
 
 Struct operator overloading is not supported. Use named receiver methods for
 custom struct operations.
+
+### Maps
+
+`map[K]V` is a built-in hash map from keys of type `K` to values of type `V`.
+Use `map[string]int{"Ocean": 1}` or a contextual initializer such as
+`counts: map[string]int = {"Ocean": 1};`. A declaration without an initializer,
+`zero(map[K]V)`, and `make(map[K]V)` create an empty map.
+
+```ocean
+counts := map[string]int{"Ocean": 1};
+counts["Ocean"] += 1;
+counts["compiler"] = 3;
+value, present := counts["missing"]; // 0, false; reading does not insert
+size := len(counts);                  // 2
+for (key, value := range counts) {
+    // key is string, value is int; iteration order is unspecified
+}
+delete(counts, "compiler");           // missing keys are harmless
+```
+
+A single-value read such as `value := counts[key]` panics if the key is absent.
+Use `value, present := counts[key]` for a checked read: it returns the value
+type's zero value and `false` when absent, or the stored value and `true` when
+present. The boolean reports success. Neither form inserts an entry.
+Indexed assignment inserts or replaces an entry. `len` counts entries. Range
+loops bind keys, or keys and values, from a snapshot of the map. Map entries
+cannot have their addresses taken, since insertion may move buckets.
+
+Interfaces, including `any`, can be keys, values, or both. Maps always permit
+mixed concrete types independently on each interface side; there is no
+homogeneous-map mode and no `mixed` modifier. Every entry must satisfy its key
+and value interface constraints; boxed values receive runtime checks.
+
+```ocean
+items := map[any]any{1: "one", "two": 2, true: false};
+items["three"] = true;
+```
+
+Keys use Ocean equality: strings and aggregates compare contents, pointers
+compare addresses, and boxed primitive numbers use existing numeric equality.
+For example, keys `1` and `1.0` refer to the same entry in `map[any]V`.
+Positive and negative floating zero are equal; NaN keys are unequal to themselves.
+Copies of maps own independent keys and values recursively. Maps compare equal
+when they have the same entries, regardless of insertion order or capacity.
+Mutable map types require identical key and value types; map conversion does
+not implicitly widen an existing concrete map to an interface map.
+
+Array and pointer suffixes after `map[K]` belong to the value type:
+`map[string]int[]` maps strings to dynamic arrays and `map[string]*int` maps
+strings to pointers. Use an alias to make an array of maps. Maps support normal
+parameters, results, struct fields, explicit generics, and boxed type assertions.
+Map storage is managed automatically and has no public `.data` or capacity API.
+No standard-library import or build/module configuration change is required.
+
 
 ## User types and generics
 

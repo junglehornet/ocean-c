@@ -2,8 +2,24 @@
 #define OCEAN_ARRAY_TYPE_H
 #include "buffer_type.h"
 
+/* Split map[K]V while respecting nested key types. Suffixes belong to V. */
+static inline int mapTypeParts(typeTokens t, typeTokens *key, typeTokens *value) {
+    if (t.nTokens < 5 || t.tokens[0].type != IDENTIFIER ||
+        strcmp(t.tokens[0].lexeme, "map") || t.tokens[1].type != LEFT_BRACKET) return 0;
+    size_t depth = 1, i = 2;
+    for (; i < t.nTokens; i++) {
+        if (t.tokens[i].type == LEFT_BRACKET) depth++;
+        if (t.tokens[i].type == RIGHT_BRACKET) { if (!--depth) break; }
+    }
+    if (i == 2 || i + 1 >= t.nTokens) return 0;
+    *key = (typeTokens){i - 2, t.tokens + 2};
+    *value = (typeTokens){t.nTokens - i - 1, t.tokens + i + 1};
+    return 1;
+}
 /* A buffer<T>[] remains a raw buffer; buffer<T>[N][] is an array of buffers. */
 static inline int arrayElementType(typeTokens t, typeTokens *element) {
+    typeTokens key, value;
+    if (mapTypeParts(t, &key, &value)) return 0;
     if (t.nTokens && t.tokens[0].type == MIXED) { t.tokens++; t.nTokens--; }
     // A leading pointer applies to the complete array type: *T[] is a pointer
     // to an array, while T*[] is an array whose elements are pointers.
@@ -20,6 +36,8 @@ static inline int arrayElementType(typeTokens t, typeTokens *element) {
 }
 /* Split the outer sized suffix, preserving nested dimensions and generic types. */
 static inline int sizedArrayTypeParts(typeTokens t, typeTokens *element, typeTokens *dimension) {
+    typeTokens key, value;
+    if (mapTypeParts(t, &key, &value)) return 0;
     if (t.nTokens < 4 || t.tokens[0].type == STAR ||
         t.tokens[t.nTokens - 1].type != RIGHT_BRACKET) return 0;
     typeTokens ignored;

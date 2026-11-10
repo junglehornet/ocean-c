@@ -118,10 +118,11 @@ with tempfile.TemporaryDirectory(prefix='ocean build cache ') as temporary:
     assert counts() == (c + 2, l + 2) and run([str(output)]).returncode == 9
     extra = dependency / 'extra.oc'; extra.write_text('package dependency; func Extra() int { return 6; }')
     invoke('build', source, '-o', output)
-    assert counts() == (c + 5, l + 3)
+    # An unreachable declaration changes source identity but not emitted IR.
+    assert counts() == (c + 2, l + 3)
     extra.unlink()
     invoke('build', source, '-o', output)
-    assert counts() == (c + 5, l + 4)
+    assert counts() == (c + 2, l + 4)
 
     # Tool/environment identities invalidate objects, without invalidating IR.
     before = actions(); c, l = counts()

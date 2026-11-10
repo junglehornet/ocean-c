@@ -160,7 +160,7 @@ static void emitClosureAdapter(Backend *b, ClosureInstance *instance, FILE *out)
     fputs(") {\nentry:\n  ", out);
     if (kind->element != VOID) fputs("%result = ", out);
     fprintf(out, "call %s ", irType(b, kind->element));
-    if (instance->method) methodName(out, instance->method); else functionName(out, function);
+    if (instance->method) methodName(out, instance->method); else functionName(b, out, function);
     fputc('(', out);
     for (size_t i = 0; i < kind->nArguments; i++) fprintf(out, "%s%s %%arg%zu", i ? ", " : "", irType(b, kind->arguments[i]), i);
     fputs(")\n", out);

@@ -220,6 +220,18 @@ static expr atomicImpl(parserState *state) {
         case UNDERSCORE:
         case ANY:
         case IDENTIFIER: {
+            if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "map") && peek(state).type == LEFT_BRACKET) {
+                parserState trial = *state; trial.quietErrors = 1;
+                if (parseSignatureType(&trial, 0) && currentToken(&trial).type == LEFT_CURLY_BRACE) {
+                    size_t start = state->tokenIndex;
+                    if (!parseSignatureType(state, 0)) return (expr){0};
+                    struct expr_zero *prefix = calloc(1, sizeof(*prefix));
+                    CHECK_MALLOC(prefix);
+                    prefix->type = copySignatureSpan(state, start, state->tokenIndex);
+                    expr name = {.type = EXPR_TYPE_TYPE_NAME, .underlying = prefix, .location = tok};
+                    return parseComposite(state, name);
+                }
+            }
             parserState constructorTrial = *state;
             constructorTrial.quietErrors = 1;
             char constructorSyntax = 0;
@@ -231,7 +243,8 @@ static expr atomicImpl(parserState *state) {
             }
             if (tok.type == IDENTIFIER && (!strcmp(tok.lexeme, "zero") || (constructorSyntax &&
                  ((!strcmp(tok.lexeme, "make") && constructorTrial.tokenIndex >= 2 &&
-                   constructorTrial.tokens[constructorTrial.tokenIndex - 1].type == RIGHT_BRACKET) ||
+                   (constructorTrial.tokens[constructorTrial.tokenIndex - 1].type == RIGHT_BRACKET ||
+                    !strcmp(state->tokens[state->tokenIndex + 2].lexeme, "map"))) ||
                   !strcmp(tok.lexeme, "new")))) &&
                 peek(state).type == LEFT_PAREN) {
                 enum exprType constructor = !strcmp(tok.lexeme, "make") ? EXPR_TYPE_MAKE :

@@ -165,7 +165,7 @@ int buildCacheObjectKey(buildCache *cache, const char *irPath, char key[65]) {
     if (!cache) return 0;
     char *tool = executable("clang"); struct stat info;
     if (!tool || stat(tool, &info)) { free(tool); return 0; }
-    Digest d = digest(); string(&d, "ocean native object action v1: clang -Wno-override-module -c -x ir");
+    Digest d = digest(); string(&d, "ocean native object action v2: clang -Wno-override-module -ffunction-sections -fdata-sections -c -x ir");
     string(&d, cache->compilerHash); string(&d, tool); free(tool);
     number(&d, info.st_dev); number(&d, info.st_ino); number(&d, info.st_size); number(&d, info.st_mode);
 #ifdef __APPLE__

@@ -18,6 +18,7 @@ typedef struct {
     Kind kind;
     const char *operand; // Backend-owned text; aggregate constants can be arbitrarily long.
     struct Scope *owner;
+    int ownedBox; // A map bucket owns its box outside lexical temporary regions.
     int closureCell; // Shared capture storage, owned by the closure runtime.
     int throughPointer;
     const char *homogeneousArray; // Indexed writes retain the array element identity.
@@ -52,6 +53,9 @@ typedef struct Scope {
 } Scope;
 typedef struct BufferKind {
     Kind kind, element;
+    int map;
+    int mapEntry;
+    Kind mapKey, mapValue, mapKeyRequirement, mapValueRequirement;
     struct stmt_type *definition;
     Kind underlying;
     Kind requirement; // Element interface constraint for boxed arrays.
@@ -146,7 +150,7 @@ typedef struct EqualityKind {
 typedef struct AnyType {
     Kind kind;
     struct AnyType *next;
-    int emitted, arrayEmitted;
+    int emitted, arrayEmitted, reflectionPrepared, reflectable;
 } AnyType;
 typedef struct DeclaredKind {
     struct stmt_type *declaration;
@@ -170,11 +174,18 @@ typedef struct OperandText {
     char *text;
     struct OperandText *next;
 } OperandText;
+typedef struct FunctionUse {
+    struct stmt_func *function;
+    int emitted;
+    struct FunctionUse *next;
+} FunctionUse;
 typedef struct {
+    FunctionUse *functions;
     OperandText *operands;
     AnyType *anyTypes;
     EqualityKind *equalities;
     int boxedEqualityUsed;
+    int mapHashUsed;
     TypeConstraint *constraints;
     unsigned nConstraints;
     int arrayViewUsed, homogeneousUsed;
@@ -454,7 +465,7 @@ static Kind fixedArrayKind(Backend *b, Kind element, size_t count) {
 }
 static Kind structKind(Backend *b, int shape, Kind element, Kind *members, size_t count) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->shape == shape && v->element == element && v->count == count &&
+        if (!v->definition && !v->mapEntry && v->shape == shape && v->element == element && v->count == count &&
             !memcmp(v->members, members, sizeof(Kind) * count))
             return v->kind;
     BufferKind *v = checked(sizeof(*v));
@@ -522,13 +533,33 @@ static Kind runtimeArrayKind(Backend *b, Kind element) {
 }
 static Kind dynamicArrayKind(Backend *b, Kind element) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (v->dynamicArray && !v->immutableString && !v->definition && v->element == element) return v->kind;
+        if (v->dynamicArray && !v->map && !v->immutableString && !v->definition && v->element == element) return v->kind;
     Kind base = arrayValueKind(b, element);
     BufferKind *v = checked(sizeof(*v)); *v = *bufferKind(b, base);
     v->kind = (Kind)(BUFFER + b->nBuffers++); v->dynamicArray = 1;
     v->ir = strdup(v->ir); v->layout = strdup("{ i64, i64, ptr }");
     v->next = b->buffers; b->buffers = v;
     return v->kind;
+}
+static Kind mapKind(Backend *b, Kind key, Kind item, Kind kr, Kind vr) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (v->map && !v->definition && v->mapKey == key && v->mapValue == item &&
+            v->mapKeyRequirement == kr && v->mapValueRequirement == vr) return v->kind;
+    Kind members[] = {BOOL, key, item};
+    Kind tuple = structKind(b, 2, VOID, members, 3);
+    BufferKind *bucket = checked(sizeof(*bucket)); *bucket = *bufferKind(b, tuple);
+    bucket->kind = (Kind)(BUFFER + b->nBuffers++); bucket->mapEntry = 1;
+    bucket->members = checked(sizeof(members)); memcpy(bucket->members, members, sizeof(members));
+    bucket->ir = strdup(bucket->ir); bucket->zeroOperand = NULL;
+    bucket->next = b->buffers; b->buffers = bucket;
+    Kind entry = bucket->kind;
+    Kind base = dynamicArrayKind(b, entry);
+    BufferKind *v = checked(sizeof(*v)); *v = *bufferKind(b, base);
+    v->kind = (Kind)(BUFFER + b->nBuffers++); v->map = 1;
+    v->mapKey = key; v->mapValue = item; v->mapKeyRequirement = kr; v->mapValueRequirement = vr;
+    v->ir = strdup(v->ir); v->layout = strdup(v->layout);
+    v->zeroOperand = NULL; v->emptyEmitted = 0;
+    v->next = b->buffers; b->buffers = v; return v->kind;
 }
 static Kind stringKind(Backend *b) {
     for (BufferKind *v = b->buffers; v; v = v->next)
@@ -838,6 +869,8 @@ static Kind constraintKind(Backend *b, typeTokens span) {
     }
     if (isBufferType(span) && span.nTokens == 1)
         return constraintShape(b, 9, SCALAR_ANY, 0);
+    typeTokens mapKey, mapValue;
+    if (mapTypeParts(span, &mapKey, &mapValue)) return type(b, span);
     typeTokens element, dimension;
     if (bufferTypeParts(span, &element, &dimension) &&
         span.tokens[span.nTokens - 1].type == GREATER_THAN)
@@ -905,6 +938,7 @@ static int matchesConstraint(Backend *b, Kind pattern, Kind actual) {
     if (p && p->shape == 12) return matchesInterface(b, p->contract, actual);
     if ((p && p->definition) || (a && a->definition)) return 0;
     if (!p || !a) return 0;
+    if (p->map || a->map) return p->map && a->map && pattern == actual;
     if (p->fixedArray && p->shape == 4)
         return a->fixedArray && matchesConstraint(b, p->element, a->element);
     if (p->shape == 4 && a->shape == 4) {
@@ -965,6 +999,12 @@ static Kind type(Backend *b, typeTokens t) {
         return closureKind(b, signature);
     }
     if (t.tokens[0].type == TILDE || typeListEnd(t, 0) < t.nTokens) return SCALAR_ANY;
+    typeTokens mapKey, mapValue;
+    if (mapTypeParts(t, &mapKey, &mapValue)) {
+        Kind key = type(b, mapKey), item = type(b, mapValue);
+        return mapKind(b, key, item, key == SCALAR_ANY ? constraintKind(b, mapKey) : VOID,
+                       item == SCALAR_ANY ? constraintKind(b, mapValue) : VOID);
+    }
     if (t.nTokens > 1 && t.tokens[t.nTokens - 1].type == STAR)
         return pointerKind(b, type(b, (typeTokens){t.nTokens - 1, t.tokens}));
     typeTokens arrayElement;
@@ -1222,7 +1262,16 @@ static struct stmt_func *findFunction(Backend *b, const char *name) {
     return NULL;
 }
 /* Internal functions are mangled so the C ABI entry point can wrap Ocean main. */
-static void functionName(FILE *out, struct stmt_func *f) {
+static void requireFunction(Backend *b, struct stmt_func *f) {
+    if (!f || f->isExtern || f->receiverType.nTokens || f->nTypeParams) return;
+    for (FunctionUse *use = b->functions; use; use = use->next)
+        if (use->function == f) return;
+    FunctionUse *use = checked(sizeof(*use));
+    *use = (FunctionUse){.function = f, .next = b->functions};
+    b->functions = use;
+}
+static void functionName(Backend *b, FILE *out, struct stmt_func *f) {
+    requireFunction(b, f);
     fprintf(out, "@\"%s%s\"", f->isExtern ? "" : "ocean.",
             f->isExtern && f->externalName ? f->externalName : f->name.lexeme);
 }
@@ -1534,6 +1583,13 @@ static void store(Backend *b, Value address, Value v) {
         v = coerce(b, v, address.kind);
     if (address.kind == SCALAR_ANY) v = coerce(b, v, SCALAR_ANY);
     if (address.elementRequirement) checkElementRequirement(b, v, address.elementRequirement);
+    if (address.ownedBox) {
+        int previous = b->copyTransport; b->copyTransport = 1;
+        Value replacement = copyValue(b, v, 0);
+        b->copyTransport = 3; copyValue(b, load(b, address), 0);
+        b->copyTransport = previous;
+        rawStore(b, address, replacement); return;
+    }
     if (address.homogeneousArray) {
         b->homogeneousUsed = 1;
         fprintf(b->body, "  call void @__ocean.array.check_write(ptr %s, { ptr, i64 } %s)\n",
@@ -1634,6 +1690,17 @@ static Value anyMetadata(Backend *b, Kind kind) {
     b->anyTypes = t;
     return value(b, RAW_POINTER, "@__ocean.any.type.%u", (unsigned)kind);
 }
+static void reflectionInput(Backend *b, Kind kind) {
+    // An any field/element keeps its dynamic tag; there is no tag for any itself.
+    if (kind == SCALAR_ANY) return;
+    anyMetadata(b, kind);
+    for (AnyType *a = b->anyTypes; a; a = a->next)
+        if (a->kind == kind) {
+            if (!a->reflectable) a->reflectionPrepared = 0;
+            a->reflectable = 1;
+            break;
+        }
+}
 static Value boxRegion(Backend *b) {
     if (!b->boxRegion.operand) {
         b->boxRegion = slot(b, RAW_POINTER);
@@ -1649,7 +1716,9 @@ static Value trackBox(Backend *b, Value box) {
 }
 static Value boxScalar(Backend *b, Value v, int promote) {
     if (v.kind == SCALAR_ANY) return v;
-    (void)promote;
+    // Mode 2 boxes private enum storage, which cannot itself escape to a
+    // reflection call. Ordinary boxing of a payload still registers its type.
+    if (promote != 2) reflectionInput(b, v.kind);
     Kind identity = v.kind;
     // Preserve Ocean identity while keeping small scalars ready for C varargs.
     if (representationKind(b, v.kind) == BOOL || representationKind(b, v.kind) == I8 || representationKind(b, v.kind) == I16 || representationKind(b, v.kind) == U8 || representationKind(b, v.kind) == U16) v = convert(b, v, I32);
@@ -1932,6 +2001,11 @@ static Value allocateCollection(Backend *b, Kind kind, Value count) {
     trackDynamicArrays(b, result);
     return result;
 }
+static Value mapCountAddress(Backend *b, Value map) {
+    Value result = temp(b, INT);
+    fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 1\n", result.operand, map.operand);
+    return result;
+}
 static Value collectionCopy(Backend *b, Value source, Kind target) {
     Value count = arrayLength(b, source), result = allocateCollection(b, target, count);
     Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
@@ -1943,6 +2017,7 @@ static Value collectionCopy(Backend *b, Value source, Kind target) {
     store(b, elementAddress(b, result, i), load(b, elementAddress(b, source, i)));
     Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
     rawStore(b, cursor, next); jump(b, condition); label(b, end);
+    if (bufferKind(b, target)->map) rawStore(b, mapCountAddress(b, result), load(b, mapCountAddress(b, source)));
     return result;
 }
 // Select the result array before evaluating operands, including nested arrays.
@@ -2019,7 +2094,7 @@ static Kind expressionKind(Backend *b, expr *e) {
     case EXPR_TYPE_INDEX: {
         BufferKind *t =
             bufferKind(b, expressionKind(b, &((struct expr_index *)e->underlying)->parent));
-        return t ? t->element : BAD;
+        return t ? (t->map ? t->mapValue : t->element) : BAD;
     }
     case EXPR_TYPE_DOT: {
         struct expr_dot *v = e->underlying;
@@ -2271,6 +2346,10 @@ static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
     if (depth >= 32) { fail(b, "nested dynamic array ownership is too deep"); return; }
     BufferKind *t = bufferKind(b, item.kind);
     if (!t) return;
+    if (t->mapEntry) {
+        int previous = b->copyTransport; b->copyTransport = 3;
+        copyValue(b, item, depth); b->copyTransport = previous; return;
+    }
     if (t->dynamicArray) { dropDynamicArrayPayload(b, item); return; }
     if (t->shape == 4) {
         Value zero = emptyValue(b, item.kind), allocated = temp(b, BOOL);
@@ -2461,11 +2540,14 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
         return result;
     }
     Value result = source;
+    int previousTransport = b->copyTransport;
+    if (t->mapEntry && b->copyTransport != 3) b->copyTransport = 1;
     for (size_t i = 0; i < t->count; i++) {
         Kind member = t->shape ? t->members[i] : t->element;
         if (ownsArrays(b, member))
             result = insert(b, result, copyValue(b, extract(b, source, i), depth + 1), i);
     }
+    b->copyTransport = previousTransport;
     return result;
 }
 static void initializeArray(Backend *b, Value array, Value count) {
@@ -2606,12 +2688,25 @@ static Value parameterArrayValue(Backend *b, typeTokens span, Kind kind, expr *i
     }
     return result;
 }
+static Value binary(Backend *, enum binaryExprType, Value, Value);
+#include "backend_map.inc"
 static Value constructComposite(Backend *b, expr *e, Kind kind) {
     struct expr_composite *v = e->underlying;
     BufferKind *t = bufferKind(b, kind);
     if (!t) {
         fail(b, "literal needs a supported array, buffer, or struct type");
         return value(b, BAD, "0");
+    }
+    if (t->map) {
+        Value storage = slot(b, kind); rawStore(b, storage, emptyValue(b, kind));
+        for (size_t i = 0; i < v->nEntries; i++) {
+            Value key = coerce(b, expectedValue(b, &v->keys[i], t->mapKey), t->mapKey);
+            Value item = expectedValue(b, &v->values[i], t->mapValue);
+            Value destination = mapWriteAddress(b, storage, key);
+            store(b, destination, coerce(b, item, t->mapValue));
+        }
+        Value result = load(b, storage); rawStore(b, storage, emptyValue(b, kind));
+        trackDynamicArrays(b, result); return result;
     }
     if (t->shape == 4) {
         Value array = allocateCollection(b, kind, value(b, INT, "%zu", v->nEntries));
@@ -2738,9 +2833,18 @@ typedef struct {
     size_t count;
 } ValueList;
 static Value materialize(Backend *, expr *);
+static int pureIndex(expr *);
 static ValueList tryIndexValues(Backend *b, struct expr_index *v) {
     Value base = materialize(b, &v->parent);
     BufferKind *t = bufferKind(b, base.kind);
+    if (t->map) {
+        Value parent = load(b, base);
+        if (!pureIndex(&v->index)) parent = copyValue(b, parent, 0);
+        Value key = coerce(b, expectedValue(b, &v->index, t->mapKey), t->mapKey), found;
+        Value result = mapRead(b, parent, key, &found);
+        Value *items = checked(2 * sizeof(*items)); items[0] = result; items[1] = found;
+        return (ValueList){items, 2};
+    }
     Value parent = t->shape ? load(b, base) : base;
     if (t->dynamicArray) parent = copyValue(b, parent, 0);
     Value index = coerce(b, expression(b, &v->index), INT);
@@ -3168,6 +3272,20 @@ static Value address(Backend *b, expr *e) {
         struct expr_index *v = e->underlying;
         Value base = materialize(b, &v->parent);
         BufferKind *t = bufferKind(b, base.kind);
+        if (t && t->map) {
+            Value map = load(b, base);
+            if (b->readingIndex && !pureIndex(&v->index)) map = copyValue(b, map, 0);
+            int previous = b->readingIndex; b->readingIndex = 0;
+            Value key = coerce(b, expectedValue(b, &v->index, t->mapKey), t->mapKey);
+            b->readingIndex = previous;
+            if (previous) {
+                Value result = slot(b, t->mapValue), found;
+                Value item = mapRead(b, map, key, &found);
+                requireMapKey(b, found, v->location);
+                rawStore(b, result, item); return result;
+            }
+            return mapWriteAddress(b, base, key);
+        }
         if (!t || (t->shape && t->shape != 3 && t->shape != 4)) {
             fail(b, "indexing requires a buffer or array");
             return value(b, BAD, "null");
@@ -3738,7 +3856,7 @@ static Value enumExpression(Backend *b, struct expr_enum *v) {
         }
         else if (v->operation == ENUM_CONSTRUCT) payload = constructComposite(b, &v->child, kind);
         else { fail(b, "enum payload variant requires construction"); return result; }
-        result = insert(b, result, boxScalar(b, coerce(b, payload, kind), 1), 1);
+        result = insert(b, result, boxScalar(b, coerce(b, payload, kind), 2), 1);
     }
     return result;
 }
@@ -4076,7 +4194,7 @@ static Value expressionImpl(Backend *b, expr *e) {
             }
             return result;
         }
-        if (!f && b->deferCall == e && (!strcmp(name, "recover") || !strcmp(name, "free") || !strcmp(name, "len")))
+        if (!f && b->deferCall == e && (!strcmp(name, "recover") || !strcmp(name, "free") || !strcmp(name, "len") || !strcmp(name, "delete")))
             return scheduleIntrinsicDefer(b, e);
         if (!f && !strcmp(name, "recover")) {
             Value header = temp(b, stringKind(b)), present = temp(b, BOOL), result = slot(b, SCALAR_ANY);
@@ -4087,6 +4205,13 @@ static Value expressionImpl(Backend *b, expr *e) {
             rawStore(b, result, coerce(b, header, SCALAR_ANY)); jump(b, done);
             label(b, no); rawStore(b, result, coerce(b, value(b, NULL_VALUE, "null"), SCALAR_ANY));
             jump(b, done); label(b, done); return load(b, result);
+        }
+        if (!f && !strcmp(name, "delete")) {
+            Value binding = address(b, &v->params[0]);
+            BufferKind *map = bufferKind(b, binding.kind);
+            Value key = coerce(b, expectedValue(b, &v->params[1], map->mapKey), map->mapKey);
+            mapDelete(b, load(b, binding), key);
+            return value(b, VOID, "");
         }
         if (!f && !strcmp(name, "free")) {
             Value item = expression(b, &v->params[0]);
@@ -4114,6 +4239,7 @@ static Value expressionImpl(Backend *b, expr *e) {
                 fail(b, "len requires a collection with known length");
                 return value(b, BAD, "0");
             }
+            if (t->map) return load(b, mapCountAddress(b, array));
             return arrayLength(b, array);
         }
         if (!f) {
@@ -4205,7 +4331,7 @@ static Value expressionImpl(Backend *b, expr *e) {
             }
             Value result = slot(b, INT);
             store(b, result, value(b, INT, "0"));
-            fprintf(b->body, "  call void @__ocean.ffi_call(ptr "); functionName(b->body, f);
+            fprintf(b->body, "  call void @__ocean.ffi_call(ptr "); functionName(b, b->body, f);
             fprintf(b->body, ", i32 %zu, i64 %s, ptr %s, ptr %s, ptr %s)\n", fixed, total.operand, boxes.operand, ffiType(b, resultKind), result.operand);
             fprintf(b->body, "  call void @llvm.stackrestore.p0(ptr %s)\n", saved.operand);
             free(evaluated.items); free(parameterKinds);
@@ -4316,7 +4442,7 @@ static Value expressionImpl(Backend *b, expr *e) {
         }
         if (indirectKind) fprintf(b->body, "%s", code.operand);
         else if (method) methodName(b->body, method);
-        else functionName(b->body, f);
+        else functionName(b, b->body, f);
         fprintf(b->body, "(");
         if (indirectKind) fprintf(b->body, "ptr %s", environment.operand);
         if (method && f->receiverType.nTokens)
@@ -5091,6 +5217,7 @@ static void statementImpl(Backend *b, stmt *s) {
         if (v->range) {
             // Evaluate the iterable before introducing its loop bindings.
             range = expression(b, v->range);
+            if (rangeType->map) range = copyValue(b, range, 0);
             index = slot(b, INT);
             store(b, index, value(b, INT, "0"));
         }
@@ -5108,20 +5235,33 @@ static void statementImpl(Backend *b, stmt *s) {
         } else
             jump(b, body);
         label(b, body);
+        if (v->range && rangeType->map) {
+            Value bucket = elementAddress(b, range, load(b, index));
+            Value occupied = load(b, mapField(b, bucket, 0, BOOL));
+            unsigned present = ++b->label;
+            branch(b, occupied, present, update); label(b, present);
+        }
         Scope bodyScope = {.parent = b->scope, .jumpRegion = v->body};
         b->scope = &bodyScope;
         saveStack(b, &bodyScope, v->range || statementAllocatesStack(v->body));
         if (v->range) {
             // The visible binding is a per-iteration value, not the loop counter.
-            Value binding = localSlot(b, INT, v->bindings[0].lexeme);
-            store(b, binding, load(b, index));
+            Kind keyKind = rangeType->map ? rangeType->mapKey : INT;
+            Value binding = localSlot(b, keyKind, v->bindings[0].lexeme);
+            Value key = load(b, index);
+            if (rangeType->map) key = load(b, mapField(b, elementAddress(b, range, key), 1, keyKind));
+            store(b, binding, key);
             bind(b, v->bindings[0].lexeme, binding);
+            b->scope->bindings->autoRelease = !binding.closureCell;
         }
         if (v->range && v->nBindings == 2) {
-            Value item = localSlot(b, rangeType->element, v->bindings[1].lexeme);
+            Kind itemKind = rangeType->map ? rangeType->mapValue : rangeType->element;
+            Value item = localSlot(b, itemKind, v->bindings[1].lexeme);
             Value i = load(b, index);
             checkArrayIndex(b, range, i, v->range->location);
-            store(b, item, load(b, elementAddress(b, range, i)));
+            Value entry = elementAddress(b, range, i);
+            if (rangeType->map) entry = mapField(b, entry, 2, itemKind);
+            store(b, item, load(b, entry));
             bind(b, v->bindings[1].lexeme, item);
             b->scope->bindings->autoRelease = !item.closureCell;
         }
@@ -5302,7 +5442,7 @@ static void signature(Backend *b, struct stmt_func *f, FILE *out) {
             irType(b, result));
     if (b->closure) fprintf(out, "@__ocean.closure.%u", b->closure->id);
     else if (b->method) methodName(out, b->method);
-    else functionName(out, f);
+    else functionName(b, out, f);
     fprintf(out, "(");
     int hasReceiver = b->method && f->receiverType.nTokens;
     if (b->closure) fputs("ptr %environment", out);
@@ -5846,10 +5986,31 @@ static void emitAnyType(Backend *b, Kind kind) {
 }
 // Only trusted reflect wrappers can call these internal entry points. Dispatch
 // uses the existing concrete any tags; no raw layout API is exposed to Ocean.
+static void prepareReflectionTypes(Backend *b) {
+    // A reflected field or array element may itself contain a struct. Discover
+    // this closure before emitting dispatch, without registering unused types.
+    if (!b->reflectionUsed && !b->arrayViewUsed) return;
+    // Library callers are outside this source graph. Keep their locally known
+    // layouts available rather than assuming only local boxing sites can call.
+    if (b->program->isLibrary && b->reflectionUsed)
+        for (BufferKind *t = b->buffers; t; t = t->next)
+            if (t->shape == 5 && t->record && !t->record->enumStorage)
+                reflectionInput(b, t->kind);
+    for (;;) {
+        AnyType *a = b->anyTypes;
+        while (a && a->reflectionPrepared) a = a->next;
+        if (!a) break;
+        a->reflectionPrepared = 1;
+        BufferKind *t = bufferKind(b, a->kind);
+        if (!t) continue;
+        if (b->reflectionUsed && a->reflectable && t->shape == 5 && t->record && !t->record->enumStorage)
+            for (size_t i = 0; i < t->count; i++) reflectionInput(b, t->members[i]);
+        if ((t->shape == 4 || t->fixedArray) && !t->immutableString)
+            reflectionInput(b, t->element);
+    }
+}
 static void emitReflection(Backend *b) {
     if (!b->reflectionUsed) return;
-    for (BufferKind *t = b->buffers; t; t = t->next)
-        if (t->shape == 5 && t->record) anyMetadata(b, t->kind);
     FILE *previousBody = b->body, *previousSlots = b->slots;
     Scope *previousScope = b->scope;
     struct stmt_func *previousFunction = b->function;
@@ -5871,11 +6032,10 @@ static void emitReflection(Backend *b) {
         DynamicArrayTemporary *mark = dynamicArrayTempMark(b);
         Value input = value(b, SCALAR_ANY, "%%input"), tag = temp(b, RAW_POINTER);
         fprintf(b->body, "  %s = extractvalue { ptr, i64 } %%input, 0\n", tag.operand);
-        // All concrete struct specializations are registered above, including
-        // named types and structs only encountered while reflecting a field.
+        // Only types reachable through boxed values and their fields are registered.
         for (AnyType *a = b->anyTypes; a; a = a->next) {
             BufferKind *record = bufferKind(b, a->kind);
-            if (!record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
+            if (!a->reflectable || !record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
             Value matches = temp(b, BOOL);
             fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)a->kind);
             unsigned body = ++b->label, next = ++b->label;
@@ -5917,7 +6077,7 @@ static void emitReflection(Backend *b) {
     unsigned count = 0;
     for (AnyType *a = b->anyTypes; a; a = a->next) {
         BufferKind *record = bufferKind(b, a->kind);
-        if (!record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
+        if (!a->reflectable || !record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
         fprintf(b->out, "  %%m%u = icmp eq ptr %%tag, @__ocean.any.type.%u\n", count, (unsigned)a->kind);
         if (count) fprintf(b->out, "  %%r%u = or i1 %s%u, %%m%u\n", count, count == 1 ? "%m" : "%r", count - 1, count);
         count++;
@@ -6018,6 +6178,7 @@ static void emitAnyRuntime(Backend *b) {
         if (!pending) break;
     }
     emitBoxedEquality(b);
+    emitMapHash(b);
     fputs(
         "define internal { ptr, i64 } @__ocean.any.copy({ ptr, i64 } %box) {\nentry:\n"
         "  %tag = extractvalue { ptr, i64 } %box, 0\n"
@@ -6120,7 +6281,7 @@ static void emitFFIRuntime(Backend *b) {
 }
 
 /* Copy each argv string, including its terminator, into the stream os expects. */
-static void emitOSArgs(FILE *out, struct stmt_func *hook) {
+static void emitOSArgs(Backend *b, FILE *out, struct stmt_func *hook) {
     fputs("  %args.count = zext i32 %argc to i64\n"
           "  br label %args.size\nargs.size:\n"
           "  %args.i = phi i64 [0, %entry], [%args.next, %args.size.done]\n"
@@ -6165,7 +6326,7 @@ static void emitOSArgs(FILE *out, struct stmt_func *hook) {
           "  %args.j.next = add i64 %args.j, 1\n"
           "  br label %args.copy\nargs.ready:\n"
           "  call void ", out);
-    functionName(out, hook);
+    functionName(b, out, hook);
     fputs("(ptr %args.stream, i64 %args.count)\n", out);
 }
 
@@ -6200,6 +6361,10 @@ int emitLLVM(parseResult *program, FILE *output) {
     }
     b.globalOutput = output;
     emitGlobals(&b, output);
+    if (!program->isLibrary) {
+        requireFunction(&b, main);
+        requireFunction(&b, program->osSetArgs);
+    }
     for (size_t i = 0; i < program->nStatements; i++) {
         stmt *s = &program->statements[i];
         if (s->type == STMT_PACKAGE || s->type == STMT_NULL || s->type == STMT_STRUCT || s->type == STMT_INTERFACE || s->type == STMT_TYPE || s->type == STMT_ENUM || s->type == STMT_VAR)
@@ -6244,14 +6409,20 @@ int emitLLVM(parseResult *program, FILE *output) {
             fprintf(output, "\n");
             continue;
         }
-        emitFunction(&b, f, output);
+        if (program->isLibrary) requireFunction(&b, f);
     }
     MethodInstance *emittedMethod = NULL;
     ClosureInstance *emittedClosure = NULL;
     for (;;) {
         MethodInstance *method = emittedMethod ? emittedMethod->next : b.methods;
         ClosureInstance *closure = emittedClosure ? emittedClosure->next : b.closures;
-        if (method) {
+        FunctionUse *pending = b.functions;
+        while (pending && pending->emitted) pending = pending->next;
+        if (pending) {
+            pending->emitted = 1; // Mark before lowering recursive calls.
+            b.closure = NULL; b.method = NULL; b.typeBindings = NULL;
+            emitFunction(&b, pending->function, output);
+        } else if (method) {
             b.closure = NULL; b.method = method;
             b.typeBindings = method->nBindings ? method->bindings : NULL;
             emitFunction(&b, method->function, output); emittedMethod = method;
@@ -6274,7 +6445,7 @@ int emitLLVM(parseResult *program, FILE *output) {
         if (!b.body || !b.slots)
             fail(&b, "could not create entry point buffers");
         else {
-            if (program->osSetArgs) emitOSArgs(b.body, program->osSetArgs);
+            if (program->osSetArgs) emitOSArgs(&b, b.body, program->osSetArgs);
             Value previous = pushTraceFrame(&b, main, main->name);
             if (!main->nResults)
                 fprintf(b.body, "  call void @\"ocean.main\"()\n");
@@ -6298,6 +6469,7 @@ int emitLLVM(parseResult *program, FILE *output) {
     output = b.out;
     FILE *anyRuntime = tmpfile();
     b.out = anyRuntime;
+    prepareReflectionTypes(&b);
     emitReflection(&b);
     emitArrayView(&b);
     emitHomogeneousRuntime(&b);
@@ -6371,6 +6543,10 @@ int emitLLVM(parseResult *program, FILE *output) {
     while (b.constraints) {
         TypeConstraint *next = b.constraints->next;
         free(b.constraints); b.constraints = next;
+    }
+    while (b.functions) {
+        FunctionUse *next = b.functions->next;
+        free(b.functions); b.functions = next;
     }
     while (b.anyTypes) {
         AnyType *next = b.anyTypes->next;
@@ -6448,8 +6624,16 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         return 1;
     }
     if (!child) {
-        char *args[16]; size_t n = 0;
+        char *args[20]; size_t n = 0;
         args[n++] = "clang"; args[n++] = "-Wno-override-module";
+        args[n++] = "-ffunction-sections"; args[n++] = "-fdata-sections";
+        if (!object) {
+#if defined(__APPLE__)
+            args[n++] = "-Wl,-dead_strip";
+#else
+            args[n++] = "-Wl,--gc-sections";
+#endif
+        }
         if (staticLink && !object) args[n++] = "-static";
         if (objectPath) args[n++] = (char *)objectPath;
         else {
@@ -6520,8 +6704,15 @@ int linkLLVMObjects(const char **objects, size_t count, const char *irPath, cons
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
     int ffi=0;FILE *ir=fopen(irPath,"r");char line[1024];if(ir){while(fgets(line,sizeof(line),ir))if(strstr(line,"@ffi_type_"))ffi=1;fclose(ir);}
-    char **args=checked(sizeof(char*)*(count+12));size_t n=0;
+    char **args=checked(sizeof(char*)*(count+16));size_t n=0;
     args[n++]="clang";args[n++]="-Wno-override-module";
+    if (!library) {
+#if defined(__APPLE__)
+        args[n++] = "-Wl,-dead_strip";
+#else
+        args[n++] = "-Wl,--gc-sections";
+#endif
+    }
     if(staticLink&&!library)args[n++]="-static";
     if(library){args[n++]="-r";args[n++]="-nostdlib";args[n++]="-no-pie";}
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];

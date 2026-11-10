@@ -852,3 +852,14 @@ Run `ctest -R "closure_test|defer_test|panic_test" --output-on-failure` after bu
 unconstrained generic searches, nested owned values, numeric edge cases, operand
 side effects, and lexicographic string ordering at `-O0` and `-O2`.
 Run `ctest -R "equality_test|type_lists_test|backend_test" --output-on-failure` after building.
+
+`maps_test.py` exercises built-in `map[K]V` literals and zero values, insertion,
+replacement, collision-heavy growth and deletion, snapshot range loops, recoverable panics for missing
+single-value reads, zero/false two-binding lookup, structural equality, generic/boxed transport,
+nested ownership, mixed interface keys/values, and conformance diagnostics and
+runtime checks at both `-O0` and `-O2`.
+
+`reachability_test.py` checks unused-function pruning, initializer/recursive/deferred
+and function-value dependencies, library entry-point preservation, reflection
+(including nested structs, arrays, and Result payloads), rejection of the removed
+reflection-omission option, and native section garbage-collection flags.

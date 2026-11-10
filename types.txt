@@ -135,6 +135,37 @@ and automatically release its old backing storage. String/i8[] conversions
 copy bytes; mutable copies cannot modify the original string. String .data
 passed to a function is a separate temporary byte buffer valid for that call.
 
+Maps: map[K]V
+
+A map is a built-in hash table. K and V are storage types; void is invalid.
+map[string]int{"a": 1} and a contextual initializer {"a": 1} construct maps.
+Uninitialized declarations, zero(map[K]V), and make(map[K]V) start empty.
+Single-value index reads panic for missing keys. Two-binding indexing returns
+(value, true) for a present key, or (zero(V), false) for an absent key; the
+boolean reports success. The panic supports defer/recover. Indexed assignment
+inserts or replaces; reads never insert.
+len reports live entries. delete(map, key) removes an entry, or does nothing
+if missing. for (key, value := range map) iterates a snapshot in unspecified
+order; a single binding receives keys. Entry addresses cannot be taken.
+
+Interface keys and values always allow mixed concrete types independently;
+there is no homogeneous mode or mixed modifier. Each key/value must conform to
+its declared interface. Runtime boxed inputs receive conformance checks.
+
+Map copies recursively own keys and values. Map equality compares entries,
+ignoring bucket order and capacity. Key hashing is consistent with Ocean
+structural equality, pointer identity, and boxed numeric equality. Consequently,
+1 and 1.0 name the same entry in a map[any]V; floating -0 and +0 are equal.
+NaN is unequal to itself. Map types are invariant in both K and V.
+
+The backend uses open addressing and linear probing, grows at half occupancy,
+and closes probe clusters on deletion. Integer, floating, string, pointer,
+array, struct, and boxed keys are hashed by value; maps and enums currently
+share a collision seed and use equality to resolve collisions. The indirect
+bucket header and storage are internal, with no public data or capacity view.
+Array/pointer suffixes after map[K] belong to V. Use aliases for arrays of maps.
+Maps require no standard-library package, compiler flag, or build change.
+
 Ownership and allocation
 
 Array, dynamic array, and string value copies are independent, including owned

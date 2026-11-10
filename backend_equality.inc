@@ -34,6 +34,35 @@ static int equalityCollection(BufferKind *kind) {
 static void emitEqualityBody(Backend *b, EqualityKind *entry) {
     Value left = value(b, entry->left, "%%left"), right = value(b, entry->right, "%%right");
     BufferKind *a = bufferKind(b, left.kind), *c = bufferKind(b, right.kind);
+    if ((a && a->map) || (c && c->map)) {
+        if (!a || !c || !a->map || !c->map || left.kind != right.kind) {
+            fputs("  ret i1 false\n", b->body); b->terminated = 1; return;
+        }
+        Value al = load(b, mapCountAddress(b, left)), cl = load(b, mapCountAddress(b, right)), same = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp eq i64 %s, %s\n", same.operand, al.operand, cl.operand);
+        unsigned start = ++b->label, check = ++b->label, inspect = ++b->label, probe = ++b->label,
+                 compare = ++b->label, advance = ++b->label, unequal = ++b->label, equal = ++b->label;
+        branch(b, same, start, unequal); label(b, start);
+        Value cursor = slot(b, INT), count = arrayLength(b, left);
+        rawStore(b, cursor, value(b, INT, "0")); jump(b, check); label(b, check);
+        Value i = load(b, cursor), more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp ult i64 %s, %s\n", more.operand, i.operand, count.operand);
+        branch(b, more, inspect, equal); label(b, inspect);
+        Value entry = elementAddress(b, left, i), occupied = load(b, mapField(b, entry, 0, BOOL));
+        branch(b, occupied, probe, advance); label(b, probe);
+        Value key = load(b, mapField(b, entry, 1, a->mapKey)), index = mapProbe(b, right, key), valid = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp ne i64 %s, -1\n", valid.operand, index.operand);
+        unsigned found = ++b->label;
+        branch(b, valid, found, unequal); label(b, found);
+        Value other = elementAddress(b, right, index), present = load(b, mapField(b, other, 0, BOOL));
+        branch(b, present, compare, unequal); label(b, compare);
+        Value sameValue = binary(b, EXPR_EQUALITY, load(b, mapField(b, entry, 2, a->mapValue)), load(b, mapField(b, other, 2, c->mapValue)));
+        branch(b, sameValue, advance, unequal); label(b, advance);
+        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, check);
+        label(b, unequal); fputs("  ret i1 false\n", b->body); b->terminated = 1;
+        label(b, equal); fputs("  ret i1 true\n", b->body); b->terminated = 1; return;
+    }
     if (equalityCollection(a) && equalityCollection(c)) {
         if (a->element != c->element &&
             !(equalityCollection(bufferKind(b, a->element)) && equalityCollection(bufferKind(b, c->element)))) {
@@ -178,4 +207,29 @@ static Value stringComparison(Backend *b, enum binaryExprType op, Value left, Va
     fprintf(b->body, "  %s = select i1 %s, i1 %s, i1 %s\n", result.operand, prefixSame.operand, lengthResult.operand, prefixResult.operand);
     b->stringComparisonUsed = 1;
     return result;
+}
+
+/* Dynamic keys use the same structural hash as concrete keys. Primitive boxed
+ * numbers normalize to double because boxed equality compares numeric widths. */
+static void emitMapHash(Backend *b) {
+    if (!b->mapHashUsed) return;
+    Scope scope = {.parent = b->globalScope}; b->scope = &scope;
+    b->body = tmpfile(); b->slots = tmpfile(); b->terminated = 0;
+    fputs("  %tag = extractvalue { ptr, i64 } %key, 0\n"
+          "  %bits = extractvalue { ptr, i64 } %key, 1\n", b->body);
+    for (AnyType *type = b->anyTypes; type; type = type->next) {
+        Value matches = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp eq ptr %%tag, @__ocean.any.type.%u\n", matches.operand, (unsigned)type->kind);
+        unsigned selected = ++b->label, next = ++b->label;
+        branch(b, matches, selected, next); label(b, selected);
+        Value key = equalityBits(b, type->kind, "%bits");
+        if (!definedKind(b, key.kind) && (integral(b, key.kind) || floating(b, key.kind))) key = convert(b, key, FLOAT);
+        Value hash = mapHash(b, key);
+        fprintf(b->body, "  ret i64 %s\n", hash.operand); b->terminated = 1;
+        label(b, next);
+    }
+    fputs("  ret i64 0\n", b->body); b->terminated = 1;
+    fputs("define internal i64 @__ocean.map.hash({ ptr, i64 } %key) {\nentry:\n", b->out);
+    copy(b->slots, b->out); copy(b->body, b->out); fputs("}\n", b->out);
+    fclose(b->slots); fclose(b->body); clearScope(&scope); b->scope = NULL;
 }
