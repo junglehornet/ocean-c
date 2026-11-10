@@ -125,7 +125,7 @@ if(BUILD_TESTING)
     set_tests_properties(recoverable_io_test PROPERTIES TIMEOUT 180)
 
 
-    add_executable(asm_backend_probe tests/asm_backend_probe.c ast.c dynarray.c
+    add_executable(asm_backend_probe c-hashmap/map.c tests/asm_backend_probe.c ast.c dynarray.c
         token.c scanner.c parser.c build_cache.c llvm_packages.c)
     target_include_directories(asm_backend_probe PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
     if(UNIX)

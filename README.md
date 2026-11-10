@@ -36,12 +36,14 @@ packages default to an executable named after their directory; other packages
 default to `<package>.o`. `-o` overrides the destination. Compiler/linker failures
 preserve previous output and cannot overwrite a source file in the package graph.
 
-Executable builds lower only functions reachable from `main`, global initializers,
-standard-library startup hooks, and referenced function values (including closures,
-methods, and deferred calls). Semantic checking still covers the source graph.
-Non-main library builds retain ordinary functions for downstream callers. Native
-compilation uses function/data sections, and executable linking removes unused
-sections (`--gc-sections`, or `-dead_strip` on macOS).
+Native builds emit LLVM directly into one module per source package and a shared
+support module for globals, startup, concrete specializations, and runtime helpers.
+Each source package compiles all its ordinary functions, so the same cached object
+can serve callers using different functions. Executable linking removes unreachable
+functions and data using function/data sections (`--gc-sections`, or `-dead_strip`
+on macOS). Non-main library builds retain callable functions for downstream users.
+`--emit-llvm` remains a single merged inspection file, with reachable executable
+functions, rather than the native package-module format.
 
 Use `ocean build --static . -o application` (or `ocean build -s .`) to
 statically link a main package executable. This passes `-static` to Clang and
@@ -191,25 +193,32 @@ directory cannot enable them. Other standard-library packages also have no
 intrinsic access. Ordinary Ocean code can import the public reflection API.
 `OCEAN_SRC` is an explicit override of that trusted root for development.
 
-Builds automatically cache generated LLVM IR and native object files in
-`~/.cache/ocean-build`. Cache keys include the compiler executable, source
-contents throughout the resolved import graph, source paths, and the working
-directory. Object keys also include the IR, Clang identity, host target, and
-environment. Changing a source or dependency invalidates the relevant action;
-returning to previous contents can reuse the earlier result. Output filenames
-and `ocean run` arguments do not invalidate the cache.
+Native builds cache one object per source package and a shared support object in
+`~/.cache/ocean-build`. Native action keys come from **source inputs**, not emitted
+LLVM: package source contents and paths, transitive dependency sources, compiler
+identity, native toolchain/host, working directory, and environment. Dependency
+invalidation is conservative: even a private implementation edit rebuilds its
+importers. Output filenames, link-only `--static`, and program arguments do not
+invalidate native objects. Returning to previous inputs can reuse earlier results.
 
-Generated LLVM is partitioned into one native object per source package and a
-shared runtime/data object. Each object has an independent content key, so editing
-a dependency reuses unaffected package objects. Changes to shared types, globals,
-or generated specializations can also invalidate objects that depend on them.
-Merged IR remains cached for `--emit-llvm`.
-Parsing and semantic checks still run on every invocation. Executables are
-always relinked against the current system libraries. Library `.o` builds and
-`--emit-llvm` also reuse their cached artifacts; `ocean run` reuses the same
-build cache. Failed artifacts are never published. Checksums and atomic writes
-protect against corrupt entries and concurrent builds. An unavailable cache
-silently falls back to compilation.
+Objects are looked up before backend emission. If every object and the support
+link metadata are cached, native builds skip LLVM generation and Clang compilation
+and only relink. On misses, the backend writes separate package LLVM files directly;
+there is no merged-IR splitter. Only missing objects get new Clang input files and
+native compilation. Rebuilding shared support still lowers the source graph to collect
+its type/runtime requirements, including requirements from cached packages. The
+support object has a whole-program source key because it owns global initialization,
+concrete specializations, and type-dependent runtime dispatch. Stable native symbol
+names let unchanged package objects link against freshly rebuilt support.
+
+`--emit-llvm` separately caches the merged inspection output using source inputs.
+Parsing and semantic checks still run on every invocation. `check` validates the
+same direct package-module pipeline in temporary files without publishing output.
+Executables always relink against current system libraries. Library `.o` builds
+and `run` share the native cache. Successful objects can be cached even if a later
+link fails; failed compilation and linking never replace the requested output.
+Checksums and atomic writes protect against corrupt entries and concurrent builds.
+An unavailable cache silently falls back to compilation.
 
 Set `OCEAN_BUILD_CACHE=/path/to/cache` to override its location, or
 `OCEAN_BUILD_CACHE=off` to disable caching. `ocean clean --cache` (also

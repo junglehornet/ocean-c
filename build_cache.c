@@ -64,6 +64,9 @@ static void finish(Digest d, char out[65]) {
     update(&d, padding, 8);
     for (unsigned i = 0; i < 8; i++) snprintf(out + 8*i, 9, "%08x", d.h[i]);
 }
+void buildHashBytes(const void *data, size_t size, char hash[65]) {
+    Digest d = digest(); update(&d, data, size); finish(d, hash);
+}
 static void number(Digest *d, uint64_t n) {
     unsigned char bytes[8];
     for (unsigned i = 0; i < 8; i++) bytes[i] = (unsigned char)(n >> (56-8*i));
@@ -161,11 +164,26 @@ void closeBuildCache(buildCache *cache) { if (cache) { free(cache->directory); f
 const char *buildCacheIRKey(buildCache *cache) { return cache ? cache->irKey : NULL; }
 extern char **environ;
 static int compareStrings(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
-int buildCacheObjectKey(buildCache *cache, const char *irPath, char key[65]) {
+static void dependencySources(Digest *d, parseResult *program, size_t packageId, unsigned char *seen) {
+    for (size_t i = 0; i < program->nPackages; i++) {
+        packageInfo *p = &program->packages[i];
+        if (p->id != packageId || seen[i]) continue;
+        seen[i] = 1;
+        string(d, p->directory);
+        for (size_t j = 0; j < program->nSources; j++)
+            if (program->sources[j].packageId == packageId) {
+                string(d, program->sources[j].filename); string(d, program->sources[j].text);
+            }
+        for (size_t j = 0; j < p->nDependencies; j++)
+            dependencySources(d, program, p->dependencies[j], seen);
+    }
+}
+int buildCachePackageKey(buildCache *cache, parseResult *program, size_t packageId, int metadata, char key[65]) {
     if (!cache) return 0;
     char *tool = executable("clang"); struct stat info;
     if (!tool || stat(tool, &info)) { free(tool); return 0; }
-    Digest d = digest(); string(&d, "ocean native object action v2: clang -Wno-override-module -ffunction-sections -fdata-sections -c -x ir");
+    Digest d = digest();
+    string(&d, "ocean source package action v3: native ABI v1; function/data sections");
     string(&d, cache->compilerHash); string(&d, tool); free(tool);
     number(&d, info.st_dev); number(&d, info.st_ino); number(&d, info.st_size); number(&d, info.st_mode);
 #ifdef __APPLE__
@@ -178,7 +196,29 @@ int buildCacheObjectKey(buildCache *cache, const char *irPath, char key[65]) {
     struct utsname host;
     if (uname(&host)) return 0;
     string(&d, host.sysname); string(&d, host.release); string(&d, host.machine);
-    if (!hashFile(&d, irPath)) return 0;
+    char *cwd = getcwd(NULL, 0); if (!cwd) return 0;
+    string(&d, cwd); free(cwd);
+    number(&d, metadata);
+    if (!packageId) string(&d, cache->irKey); // Complete source graph for shared support.
+    else {
+        unsigned char *seen = calloc(program->nPackages + 1, 1);
+        if (!seen) return 0;
+        dependencySources(&d, program, packageId, seen); free(seen);
+        size_t root = 0;
+        for (size_t i = 0; i < program->nSources; i++)
+            if (!strcmp(program->sourceFilename, program->sources[i].filename)) root = program->sources[i].packageId;
+        number(&d, root == packageId); number(&d, root == packageId && program->isLibrary);
+        // Whether trusted intrinsics are enabled is an input as well as source.
+        for (size_t i = 0; i < program->nStatements; i++) {
+            stmt *s = &program->statements[i];
+            if (s->type != STMT_FUNC) continue;
+            struct stmt_func *f = s->value;
+            if (!f->compilerIntrinsic) continue;
+            for (size_t j = 0; j < program->nSources; j++)
+                if (f->name.filename && !strcmp(f->name.filename, program->sources[j].filename) &&
+                    program->sources[j].packageId == packageId) number(&d, f->compilerIntrinsic);
+        }
+    }
     size_t count = 0; while (environ[count]) count++;
     char **environment = malloc((count + 1) * sizeof(*environment)); if (!environment) return 0;
     memcpy(environment, environ, count * sizeof(*environment)); qsort(environment, count, sizeof(*environment), compareStrings);

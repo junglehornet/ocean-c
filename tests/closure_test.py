@@ -25,8 +25,11 @@ with tempfile.TemporaryDirectory(prefix="ocean closure ") as directory:
         source.write_text(PREFIX + body)
         emitted = run([compiler, "build", "--emit-llvm", str(source), "-o", str(ir)])
         assert emitted.returncode == 0, emitted.stderr
-        for optimization in ("-O0", "-O2"):
-            built = run([clang, "-Wno-override-module", optimization, "-x", "ir", str(ir), "-o", str(executable), "-lffi"])
+        for optimization in ("native packages", "-O0", "-O2"):
+            if optimization == "native packages":
+                built = run([compiler, "build", str(source), "-o", str(executable)])
+            else:
+                built = run([clang, "-Wno-override-module", optimization, "-x", "ir", str(ir), "-o", str(executable), "-lffi"])
             assert built.returncode == 0, built.stderr
             result = run([str(executable)])
             assert (result.returncode, result.stdout) == (status, output), result

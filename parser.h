@@ -23,6 +23,13 @@ typedef struct sourceFile {
     size_t packageId; // Zero outside a merged package graph.
 } sourceFile;
 
+typedef struct packageInfo {
+    size_t id;
+    const char *directory;
+    size_t nDependencies;
+    size_t *dependencies;
+} packageInfo;
+
 struct parseResult {
     size_t nStatements;
     size_t statementsCapacity;
@@ -36,6 +43,8 @@ struct parseResult {
     const char *sourceFilename;
     size_t nSources;
     sourceFile *sources;
+    size_t nPackages;
+    packageInfo *packages;
     int isLibrary;
     struct stmt_func *osSetArgs; // Trusted standard-library startup hook, borrowed from the AST.
 };

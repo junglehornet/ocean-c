@@ -45,24 +45,59 @@ static int sameFile(const char *a, const char *b) {
     struct stat x, y;
     return !stat(a, &x) && !stat(b, &y) && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
 }
-static int nativeBuild(buildCache *cache, parseResult *program, const char *irPath, const char *output, int library, int staticLink) {
-    char key[65];
-    if (!buildCacheObjectKey(cache,irPath,key)) return library?compileLLVMObject(irPath,output):compileLLVMExecutable(irPath,output,staticLink);
-    llvmPackages units={0};
-    if(splitLLVMPackages(program,irPath,&units))return 1;
-    char **objects=calloc(units.count,sizeof(char*));int failed=!objects;
-    for(size_t i=0;!failed&&i<units.count;i++){
-        objects[i]=malloc(strlen(units.paths[i])+3);if(!objects[i]){failed=1;break;}
-        sprintf(objects[i],"%s.o",units.paths[i]);
-        if(!buildCacheObjectKey(cache,units.paths[i],key)){failed=1;break;}
-        if(!readBuildCache(cache,key,objects[i])){
-            failed=compileLLVMObject(units.paths[i],objects[i]);char after[65];
-            if(!failed&&buildCacheObjectKey(cache,units.paths[i],after)&&!strcmp(key,after))storeBuildCache(cache,key,objects[i]);
+static int nativeBuild(buildCache *cache, parseResult *program, const char *output, int library, int staticLink) {
+    llvmPackages units = {0};
+    if (createLLVMPackages(program, &units)) { perror("native package directory"); return 1; }
+    char **objects = calloc(units.count, sizeof(char *));
+    char (*keys)[65] = calloc(units.count, sizeof(*keys));
+    int failed = !objects || !keys, missing = 0;
+    for (size_t i = 0; !failed && i < units.count; i++) {
+        objects[i] = malloc(strlen(units.paths[i]) + 3);
+        if (!objects[i]) { failed = 1; break; }
+        sprintf(objects[i], "%s.o", units.paths[i]);
+        size_t owner = i ? program->packages[i - 1].id : 0;
+        int keyed = buildCachePackageKey(cache, program, owner, 0, keys[i]);
+        if (keyed && readBuildCache(cache, keys[i], objects[i])) units.needed[i] = 0;
+        else missing = 1;
+    }
+    char metadataKey[65] = {0}, *metadata = malloc(strlen(units.directory) + 16);
+    if (!metadata) failed = 1;
+    else sprintf(metadata, "%s/link.info", units.directory);
+    int metadataHit = !failed && buildCachePackageKey(cache, program, 0, 1, metadataKey) && readBuildCache(cache, metadataKey, metadata);
+    if (metadataHit) {
+        FILE *file = fopen(metadata, "r");
+        int value = file ? fgetc(file) : EOF;
+        metadataHit = file && (value == '0' || value == '1') && fgetc(file) == EOF;
+        if (file) fclose(file);
+        if (metadataHit) units.needsFFI = value == '1';
+    }
+    if (!failed && (missing || !metadataHit)) {
+        if (!metadataHit) units.needed[0] = 1;
+        failed = emitLLVMPackages(program, &units);
+        for (size_t i = 0; !failed && i < units.count; i++) {
+            if (!units.needed[i]) continue;
+            failed = compileLLVMObject(units.paths[i], objects[i]);
+            char after[65]; size_t owner = i ? program->packages[i - 1].id : 0;
+            if (!failed && *keys[i] && buildCachePackageKey(cache, program, owner, 0, after) && !strcmp(keys[i], after))
+                storeBuildCache(cache, keys[i], objects[i]);
+        }
+        if (!failed && *metadataKey) {
+            FILE *file = fopen(metadata, "w");
+            if (file) {
+                int ok = fputc(units.needsFFI ? '1' : '0', file) != EOF;
+                if (fclose(file)) ok = 0;
+                if (ok) storeBuildCache(cache, metadataKey, metadata);
+            }
         }
     }
-    if(!failed)failed=linkLLVMObjects((const char**)objects,units.count,irPath,output,library,staticLink);
-    if(objects){for(size_t i=0;i<units.count;i++){if(objects[i]){unlink(objects[i]);free(objects[i]);}}free(objects);}
-    freeLLVMPackages(&units);return failed;
+    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, output, library, staticLink);
+    if (metadata) { unlink(metadata); free(metadata); }
+    if (objects) {
+        for (size_t i = 0; i < units.count; i++)
+            if (objects[i]) { unlink(objects[i]); free(objects[i]); }
+        free(objects);
+    }
+    free(keys); freeLLVMPackages(&units); return failed;
 }
 static int packageMain(int argc, char **argv) {
     int run = !strcmp(argv[1], "run"), check = !strcmp(argv[1], "check"), emit = 0, staticLink = 0, argumentStart = argc, programArgumentCount = 0;
@@ -151,10 +186,10 @@ static int packageMain(int argc, char **argv) {
         }
     buildCache *cache = failed ? NULL : openBuildCache(argv[0], program, packageDirectory(build));
     char irPath[] = "/tmp/ocean-ir-XXXXXX";
-    int fd = failed ? -1 : mkstemp(irPath);
-    if (!failed && fd < 0) { perror("ocean: could not create IR file"); failed = 1; }
+    int fd = failed || !emit ? -1 : mkstemp(irPath);
+    if (!failed && emit && fd < 0) { perror("ocean: could not create IR file"); failed = 1; }
     if (fd >= 0) close(fd);
-    if (!failed && !readBuildCache(cache, buildCacheIRKey(cache), irPath)) {
+    if (!failed && emit && !readBuildCache(cache, buildCacheIRKey(cache), irPath)) {
         FILE *ir = fopen(irPath, "w");
         if (!ir) { perror("ocean: could not create IR file"); failed = 1; }
         else {
@@ -163,8 +198,9 @@ static int packageMain(int argc, char **argv) {
             if (!failed) storeBuildCache(cache, buildCacheIRKey(cache), irPath);
         }
     }
-    if (!failed) failed = emit ? writeIR(irPath, output) : nativeBuild(cache, program, irPath, output, program->isLibrary, staticLink);
-    unlink(irPath); closeBuildCache(cache);
+    if (!failed) failed = emit ? writeIR(irPath, output) : nativeBuild(cache, program, output, program->isLibrary, staticLink);
+    if (emit) unlink(irPath);
+    closeBuildCache(cache);
     freePackage(build);
     int status = failed ? 1 : 0;
     if (run && !failed && !interrupted) {

@@ -913,6 +913,22 @@ packageBuild *loadPackageWithSources(const char *location, const packageSource *
             }
         }
       }
+    b->program.nPackages = b->nPackages;
+    b->program.packages = alloc(b, sizeof(packageInfo) * b->nPackages);
+    for (Package *p = b->packages; p; p = p->next) {
+        packageInfo *info = &b->program.packages[p->order];
+        info->id = p->id + 1; info->directory = p->directory;
+        size_t count = 0;
+        for (File *file = p->files; file; file = file->next)
+            for (Import *import = file->imports; import; import = import->next) count++;
+        info->dependencies = alloc(b, sizeof(size_t) * (count + 1));
+        for (File *file = p->files; file; file = file->next)
+            for (Import *import = file->imports; import; import = import->next) {
+                size_t id = import->package->id + 1, j = 0;
+                while (j < info->nDependencies && info->dependencies[j] != id) j++;
+                if (j == info->nDependencies) info->dependencies[info->nDependencies++] = id;
+            }
+    }
     if (b->program.nSources) {
         b->program.sourceFilename = b->root->files->displayPath;
         b->program.sourceText = b->root->files->text;

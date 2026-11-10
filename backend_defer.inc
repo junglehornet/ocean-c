@@ -65,6 +65,7 @@ static void scheduleDefer(Backend *b, struct stmt_func *f, MethodInstance *metho
                           Value receiver, Value *args, size_t nArgs, Kind result,
                           size_t fixed, Kind *parameterKinds, expr *intrinsic, Value callable) {
     unsigned id = ++b->nDefers;
+    nativeDeferredIdentity(b, id);
     int consuming = intrinsic && ((struct expr_call *)intrinsic->underlying)->func.type == EXPR_TYPE_IDENTIFIER &&
         !strcmp(((struct expr_identifier *)((struct expr_call *)intrinsic->underlying)->func.underlying)->lexeme.lexeme, "free");
     int indirect = callable.kind != BAD;

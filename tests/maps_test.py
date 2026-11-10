@@ -19,9 +19,12 @@ with tempfile.TemporaryDirectory(prefix='ocean maps ') as directory:
         source.write_text('package main;\n' + body)
         built = run(compiler, 'build', str(source), '--emit-llvm', '-o', str(ir))
         assert built.returncode == 0, built.stderr
-        for optimization in ('-O0', '-O2'):
-            built = run(clang, optimization, '-Wno-override-module', '-x', 'ir', str(ir),
-                        '-o', str(executable), '-lffi')
+        for optimization in ('native packages', '-O0', '-O2'):
+            if optimization == 'native packages':
+                built = run(compiler, 'build', str(source), '-o', str(executable))
+            else:
+                built = run(clang, optimization, '-Wno-override-module', '-x', 'ir', str(ir),
+                            '-o', str(executable), '-lffi')
             assert built.returncode == 0, built.stderr
             result = run(str(executable))
             assert result.returncode == status, (result, body, optimization)
@@ -107,9 +110,12 @@ with tempfile.TemporaryDirectory(prefix='ocean maps ') as directory:
         source.write_text('package main;\n' + body)
         built = run(compiler, 'build', str(source), '--emit-llvm', '-o', str(ir))
         assert built.returncode == 0, built.stderr
-        for optimization in ('-O0', '-O2'):
-            built = run(clang, optimization, '-Wno-override-module', '-x', 'ir', str(ir),
-                        '-o', str(executable), '-lffi')
+        for optimization in ('native packages', '-O0', '-O2'):
+            if optimization == 'native packages':
+                built = run(compiler, 'build', str(source), '-o', str(executable))
+            else:
+                built = run(clang, optimization, '-Wno-override-module', '-x', 'ir', str(ir),
+                            '-o', str(executable), '-lffi')
             assert built.returncode == 0, built.stderr
             result = run(str(executable))
             assert result.returncode == 1, result

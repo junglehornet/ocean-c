@@ -863,3 +863,11 @@ runtime checks at both `-O0` and `-O2`.
 and function-value dependencies, library entry-point preservation, reflection
 (including nested structs, arrays, and Result payloads), rejection of the removed
 reflection-omission option, and native section garbage-collection flags.
+
+`build_cache_test.py` verifies source/dependency action keys (including source edits
+that leave package IR byte-identical), direct per-package modules, warm hits before
+emission, reuse across new callers and unrelated package/type additions, stable
+native identities for boxed structs/generics/closures/defers/maps, toolchain and
+environment invalidation, corrupt artifacts, concurrent writers, and unavailable
+caches. Native package objects retain ordinary functions; executable linkers prune
+unreachable sections. Merged `--emit-llvm` remains an inspection artifact.
