@@ -262,7 +262,8 @@ static int compatibleTypes(Type *a, Type *b) {
     b = canonical(b);
     if (a == &nullValue || b == &nullValue) {
         Type *other = a == &nullValue ? b : a;
-        return other == &nullValue || other == &unknown || other == &any ||
+        return other == &nullValue || other == &unknown || other == &any || other->interface ||
+               (other->enumeration && other->enumeration->isBuiltin && !strcmp(other->enumeration->name.lexeme, OCEAN_BUILTIN_OPTIONAL_NAME)) ||
                !strcmp(other->name, "pointer");
     }
     if (a == &unknown || b == &unknown || a == &any || (b == &any && !definedType(a)))
@@ -529,8 +530,9 @@ static Type *typeOf(Context *c, typeTokens span) {
             error(c, t, "expected a type");
             return &unknown;
         }
-        if (s->type->enumeration && s->type->enumeration->isBuiltin)
-            span.tokens[0].lexeme = OCEAN_BUILTIN_RESULT_NAME;
+        if (s->type->enumeration && s->type->enumeration->isBuiltin &&
+            (!strcmp(n, "Result") || !strcmp(n, "Optional")))
+            span.tokens[0].lexeme = s->type->enumeration->name.lexeme;
         if (s->type->enumeration && span.nTokens == 3 && span.tokens[1].type == DOT)
             return enumMemberType(c, s->type, span.tokens[2]);
         if (s->type->declaration) {
@@ -674,7 +676,8 @@ static void formatTypeSpan(FILE *out, typeTokens span, Type *callable, unsigned 
                     }
         }
         if (!substituted)
-            fputs(t.lexeme && !strcmp(t.lexeme, OCEAN_BUILTIN_RESULT_NAME) ? "Result" :
+            fputs(t.lexeme && !strcmp(t.lexeme, OCEAN_BUILTIN_OPTIONAL_NAME) ? "Optional" :
+                  t.lexeme && !strcmp(t.lexeme, OCEAN_BUILTIN_RESULT_NAME) ? "Result" :
                   t.lexeme ? t.lexeme : getTokenTypeStr(t.type), out);
     }
 }
@@ -1888,7 +1891,7 @@ static Type *expression(Context *c, expr *e) {
         captureReference(c, s);
         indexReference(c,t,s);
         if (s->isType && s->type->enumeration && s->type->enumeration->isBuiltin)
-            identifier->lexeme.lexeme = OCEAN_BUILTIN_RESULT_NAME;
+            identifier->lexeme.lexeme = s->type->enumeration->name.lexeme;
         if (s->freed) error(c, t, "dynamic array has been freed; re-create it before use");
         return s->type;
     }
@@ -3028,10 +3031,8 @@ static void statement(Context *c, stmt *s) {
 }
 static void finishIndex(Context *c);
 // Install compiler-owned definitions after package qualification, so a package's
-// own Result declaration shadows the builtin without changing other packages.
-static void prepareBuiltinResult(parseResult *program) {
-    if (program->builtinsPrepared) return;
-    program->builtinsPrepared = 1;
+// own declaration shadows the builtin without changing other packages.
+static void prepareBuiltinEnum(parseResult *program, const char *publicName, const char *internalName, const char *filename, const char *source) {
     for (size_t i=0; i<program->nStatements; i++) {
         stmt *s = &program->statements[i];
         token name = {0};
@@ -3041,17 +3042,16 @@ static void prepareBuiltinResult(parseResult *program) {
         if (s->type == STMT_INTERFACE) name = ((struct stmt_interface *)s->value)->name;
         if (s->type == STMT_FUNC && !((struct stmt_func *)s->value)->receiverType.nTokens)
             name = ((struct stmt_func *)s->value)->name;
-        if (name.lexeme && !strcmp(name.lexeme, "Result")) return;
+        if (name.lexeme && !strcmp(name.lexeme, publicName)) return;
     }
-    const char *source = oceanBuiltinResultSource();
-    tokenlist *tokens = scanTokens((char *)source, OCEAN_BUILTIN_RESULT_FILE);
+    tokenlist *tokens = scanTokens((char *)source, filename);
     for (size_t i=0; i<tokens->top; i++) {
         token *name = &tokens->arr[i];
-        if (name->type == IDENTIFIER && !strcmp(name->lexeme, "Result")) name->lexeme = OCEAN_BUILTIN_RESULT_NAME;
+        if (name->type == IDENTIFIER && !strcmp(name->lexeme, publicName)) name->lexeme = (char *)internalName;
     }
     parseResult builtin = parseTokensWithSource(tokens, source);
     free(tokens);
-    if (builtin.hasError || builtin.nStatements != 4) abort();
+    if (builtin.hasError) abort();
     if (program->statementsCapacity < program->nStatements + builtin.nStatements) {
         program->statementsCapacity = program->nStatements + builtin.nStatements;
         program->statements = realloc(program->statements, sizeof(stmt) * program->statementsCapacity);
@@ -3069,7 +3069,11 @@ static void prepareBuiltinResult(parseResult *program) {
 static semanticResult analyzeIndexed(parseResult *program, semanticIndex *index) {
     if (!program || program->hasError)
         return (semanticResult){1};
-    prepareBuiltinResult(program);
+    if (!program->builtinsPrepared) {
+        program->builtinsPrepared = 1;
+        prepareBuiltinEnum(program, "Result", OCEAN_BUILTIN_RESULT_NAME, OCEAN_BUILTIN_RESULT_FILE, oceanBuiltinResultSource());
+        prepareBuiltinEnum(program, "Optional", OCEAN_BUILTIN_OPTIONAL_NAME, OCEAN_BUILTIN_OPTIONAL_FILE, oceanBuiltinOptionalSource());
+    }
     Scope root = {0};
     Context c = {.scope = &root, .program = program};
     // Give extern declarations private semantic names while retaining C linkage.
@@ -3092,6 +3096,11 @@ static semanticResult analyzeIndexed(parseResult *program, semanticIndex *index)
     if (builtinResult && !lookup(&c, "Result")) {
         token alias = builtinResult->name; alias.lexeme = "Result";
         declare(&c, alias, builtinResult->type, 1);
+    }
+    Symbol *builtinOptional = lookup(&c, OCEAN_BUILTIN_OPTIONAL_NAME);
+    if (builtinOptional && !lookup(&c, "Optional")) {
+        token alias = builtinOptional->name; alias.lexeme = "Optional";
+        declare(&c, alias, builtinOptional->type, 1);
     }
     for (size_t i = 0; i < program->nStatements; i++)
         if (program->statements[i].type == STMT_TYPE) {

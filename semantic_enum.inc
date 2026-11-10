@@ -28,7 +28,7 @@ static void prepareEnum(struct stmt_enum *v) {
 static Type *enumType(Context *c, struct stmt_enum *v) {
     prepareEnum(v);
     Type *t = allocate(c, sizeof(*t));
-    t->name = v->isBuiltin ? "Result" : v->name.lexeme; t->enumeration = v; t->record = &v->storage;
+    t->name = v->isBuiltin ? (!strcmp(v->name.lexeme, OCEAN_BUILTIN_OPTIONAL_NAME) ? "Optional" : "Result") : v->name.lexeme; t->enumeration = v; t->record = &v->storage;
     return t;
 }
 static Type *enumPayloadType(Context *c, Type *owner, size_t i) {

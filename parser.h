@@ -5,6 +5,7 @@
 #include "dynarray.h"
 #include "ast.h"
 #include "builtin_result.h"
+#include "builtin_optional.h"
 #include <string.h>
 
 #include "c-hashmap/map.h"
@@ -50,6 +51,7 @@ struct parseResult {
 };
 
 static inline const char *programSource(parseResult *program, const char *filename) {
+    if (filename && !strcmp(filename, OCEAN_BUILTIN_OPTIONAL_FILE)) return oceanBuiltinOptionalSource();
     if (filename && !strcmp(filename, OCEAN_BUILTIN_RESULT_FILE)) return oceanBuiltinResultSource();
     if (filename)
         for (size_t i = 0; i < program->nSources; i++) {

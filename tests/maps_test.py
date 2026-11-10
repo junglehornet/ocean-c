@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='ocean maps ') as directory:
         if (!ok || value != "") return 5;
         boxed := map[any]any{};
         box, boxPresent := boxed["missing"];
-        if (boxPresent || box.(int) != 0 || len(boxed) != 0) return 6;
+        if (boxPresent || box != null || len(boxed) != 0) return 6;
         return 0;
     }''')
 

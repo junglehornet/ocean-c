@@ -1925,6 +1925,8 @@ static Value coerce(Backend *b, Value v, Kind expected) {
     if (implicitVoidPointer(b, v.kind, expected))
         return value(b, expected, "%s", v.operand);
     if (v.kind == NULL_VALUE) {
+        if (target && target->shape == 5 && target->record && target->record->enumStorage &&
+            !strcmp(target->record->name.lexeme, OCEAN_BUILTIN_OPTIONAL_NAME)) return emptyValue(b, expected);
         if (target && target->shape == 6)
             return value(b, expected, "@__ocean.null");
         fail(b, "null requires a pointer destination");
@@ -3061,6 +3063,19 @@ static Value unboxArrayView(Backend *b, Value box, Kind kind) {
 static void checkElementRequirement(Backend *b, Value box, Kind requirement) {
     if (!requirement || requirement == SCALAR_ANY) return;
     Value matches = testConstraint(b, box, requirement, 0);
+    BufferKind *required = bufferKind(b, requirement);
+    if (required && required->shape == 12) {
+        Value tag = temp(b, RAW_POINTER), bits = temp(b, INT);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %s, 0\n", tag.operand, box.operand);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %s, 1\n", bits.operand, box.operand);
+        Value metadata = anyMetadata(b, RAW_POINTER);
+        Value pointer = temp(b, BOOL), nullBits = temp(b, BOOL), absent = temp(b, BOOL), accepted = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp eq ptr %s, %s\n", pointer.operand, tag.operand, metadata.operand);
+        fprintf(b->body, "  %s = icmp eq i64 %s, ptrtoint (ptr @__ocean.null to i64)\n", nullBits.operand, bits.operand);
+        fprintf(b->body, "  %s = and i1 %s, %s\n", absent.operand, pointer.operand, nullBits.operand);
+        fprintf(b->body, "  %s = or i1 %s, %s\n", accepted.operand, matches.operand, absent.operand);
+        matches = accepted;
+    }
     unsigned good = ++b->label, bad = ++b->label;
     branch(b, matches, good, bad); label(b, bad);
     fprintf(b->body, "  call void @llvm.trap()\n  unreachable\n");
@@ -3092,9 +3107,9 @@ static int hasNonzeroEmptyValue(Backend *b, Kind kind) {
 }
 static Value emptyValue(Backend *b, Kind kind) {
     if (representationKind(b, kind) == SCALAR_ANY) {
-        Value metadata = anyMetadata(b, INT);
+        Value metadata = anyMetadata(b, RAW_POINTER);
         b->ffiUsed = 1;
-        return value(b, kind, "{ ptr %s, i64 0 }", metadata.operand);
+        return value(b, kind, "{ ptr %s, i64 ptrtoint (ptr @__ocean.null to i64) }", metadata.operand);
     }
     if (kind == RAW_POINTER)
         return value(b, kind, "null");
@@ -3772,6 +3787,11 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
         }
         if (a.kind == NULL_VALUE && c.kind == NULL_VALUE)
             return value(b, BOOL, "%d", op == EXPR_EQUALITY);
+        Value other = a.kind == NULL_VALUE ? c : a;
+        BufferKind *optional = bufferKind(b, other.kind);
+        if (optional && optional->shape == 5 && optional->record && optional->record->enumStorage &&
+            !strcmp(optional->record->name.lexeme, OCEAN_BUILTIN_OPTIONAL_NAME))
+            return binary(b, op, extract(b, other, 0), value(b, INT, "0"));
         if (a.kind == NULL_VALUE) a = coerce(b, a, c.kind);
         else c = coerce(b, c, a.kind);
     }
@@ -6040,7 +6060,11 @@ static void emitInterfaceDispatch(Backend *b, FILE *out) {
             else fprintf(out,"  ret %s %%result%u\n",irType(b,result),n);
             fprintf(out,"next%u:\n",n);
         }
-        fputs("  call void @llvm.trap()\n  unreachable\n}\n",out);
+        Value message = moduleString(b, "method call on null interface");
+        Value filename = moduleString(b, "<interface dispatch>");
+        Value snippet = moduleString(b, "");
+        fprintf(out, "  call void @__ocean.panic(ptr %s, i64 29, ptr %s, i64 0, i64 0, ptr %s)\n  unreachable\n}\n", message.operand, filename.operand, snippet.operand);
+        b->boundsUsed=1;
         b->nullChecksUsed=1;
     }
     b->typeBindings=NULL;

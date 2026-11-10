@@ -884,10 +884,10 @@ their storage and calling conventions.
 Value-parameter constraints such as `Box<int>(4)` are not supported. Test the
 immutable parameter field with an ordinary `if` inside a concrete case instead.
 
-`null` is a reserved pointer-only value. Write `p: *Node<int> = null`, compare
+`null` is a reserved absence value for pointers, interfaces, and `Optional<T>`. Write `p: *Node<int> = null`, compare
 pointers with `== null` or `!= null`, or return/pass `null` where a pointer is
 expected. An inferred declaration such as `p := null` requires an explicit
-pointer type instead. Structs, numeric types, booleans, strings, and arrays cannot
+type instead. Structs, numeric types, booleans, strings, and arrays cannot
 be null; structs retain their existing layout and zero initialization.
 
 Explicit null is distinct from the zero-address default of an uninitialized
@@ -1674,6 +1674,21 @@ the emitted byte count, including a newline where applicable. `io.Sprintf`
 returns `Result<string>` and reports argument-count mismatches as errors.
 `io.Sprint` remains a plain string conversion. Unix writes retry interruptions;
 other native output failures return errors.
+
+## Nullable interfaces and Optional
+
+Interface values, including `any`, default to `null`. Assign, pass, or return
+`null` wherever an interface is expected and check `iface == null` or
+`iface != null`. Calling a method on a null interface panics; ordinary
+`defer` and `recover` can handle the panic.
+
+`Optional<T>` is a built-in enum requiring no import. Construct a present value
+with `Optional<int>.Some(42)` or an absent value with `Optional<int>.None`.
+`None` equals `null`, and assigning `null` to an optional selects `None`.
+Uninitialized optionals and `zero(Optional<T>)` are `None`. `Some(null)` remains
+a present value when `T` is nullable. Normal enum extraction (`value.(Optional.Some)`),
+matching (`Optional.Some(v)` / `Optional.None`), equality, and ownership apply.
+A user declaration may shadow `Optional`.
 
 ## Built-in Result and number parsing
 

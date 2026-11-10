@@ -481,6 +481,11 @@ No standard-library import or build/module configuration change is required.
 
 ## User types and generics
 
+Interface values, including `any`, are nullable. Uninitialized interfaces and
+`zero(InterfaceType)` equal `null`; assign, pass, or return `null` where an
+interface is expected. Check with `iface == null` or `iface != null`. Calling a
+method on a null interface panics and supports ordinary `defer`/`recover`.
+
 Interfaces contain either method signatures or one type list; the two forms
 cannot be mixed. Method receivers are implied, parameter names are optional,
 and methods can declare their own constrained type parameters:
@@ -782,6 +787,28 @@ the emitted byte count, including a newline where applicable. `io.Sprintf`
 returns `Result<string>` and reports argument-count mismatches as errors.
 `io.Sprint` remains a plain string conversion. Unix writes retry interruptions;
 other native output failures return errors.
+
+## Built-in Optional
+
+`Optional<T>` needs no imports or standard-library files. It is an enum with
+`Optional<T>.Some(value)` carrying one `T` and `Optional<T>.None` carrying no
+payload. `None` equals `null`; assigning `null` to an optional selects `None`.
+Uninitialized optionals and `zero(Optional<T>)` are `None`. `Some(null)` is still
+`Some` when `T` is nullable, so it does not equal `null`.
+
+```ocean
+value: Optional<int> = null;
+value = Optional<int>.Some(42);
+if (value != null) { number := value.(Optional.Some); }
+match (value) {
+    Optional.Some(number) => { /* use number */ }
+    Optional.None => { /* absent */ }
+}
+```
+
+Normal enum equality, extraction, match, ownership, and explicit generic type
+arguments apply. A user declaration can shadow `Optional`. Compiler CLI, package
+layout, builds, and standard-library integration are unchanged.
 
 ## Built-in Result and number parsing
 
