@@ -49,6 +49,7 @@ if "saved" in record and os.environ.get("OCEAN_CACHE_TEST_FAIL"):
         global checks
         result = run([executable, *args], env=environment or env, cwd=cwd)
         assert result.returncode == status, (args, result)
+        assert 'argument unused during compilation' not in result.stderr, (args, result)
         checks += 1
         return result
 

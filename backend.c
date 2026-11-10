@@ -6906,9 +6906,6 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
             if (object) {
                 if (threadObject) {
                     args[n++] = "-r"; args[n++] = "-nostdlib";
-#if !defined(__APPLE__)
-                    args[n++] = "-no-pie";
-#endif
                 } else args[n++] = "-c";
             }
             args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
@@ -6999,7 +6996,7 @@ int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, co
 #endif
     }
     if(staticLink&&!library)args[n++]="-static";
-    if(library){args[n++]="-r";args[n++]="-nostdlib";if (!backendWasm()) args[n++]="-no-pie";}
+    if(library){args[n++]="-r";args[n++]="-nostdlib";}
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
     args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
 #if defined(_WIN32)

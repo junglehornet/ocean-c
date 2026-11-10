@@ -53,6 +53,8 @@ output. Fix errors and inspect warnings before using `run` for behavior checks.
 `build` produces a native executable for a root `main` package; other packages
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
+Library objects and bundled native thread runtime objects use relocatable linking
+(`-r -nostdlib`), without executable-only PIE options.
 
 With caching enabled, native builds emit LLVM directly into one module per source
 package and a shared support module for globals, startup, concrete specializations,
