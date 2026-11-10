@@ -36,8 +36,9 @@ packages default to an executable named after their directory; other packages
 default to `<package>.o`. `-o` overrides the destination. Compiler/linker failures
 preserve previous output and cannot overwrite a source file in the package graph.
 
-Native builds emit LLVM directly into one module per source package and a shared
-support module for globals, startup, concrete specializations, and runtime helpers.
+With caching enabled, native builds emit LLVM directly into one module per source
+package and a shared support module for globals, startup, concrete specializations,
+and runtime helpers.
 Each source package compiles all its ordinary functions, so the same cached object
 can serve callers using different functions. Executable linking removes unreachable
 functions and data using function/data sections (`--gc-sections`, or `-dead_strip`
@@ -218,7 +219,11 @@ Executables always relink against current system libraries. Library `.o` builds
 and `run` share the native cache. Successful objects can be cached even if a later
 link fails; failed compilation and linking never replace the requested output.
 Checksums and atomic writes protect against corrupt entries and concurrent builds.
-An unavailable cache silently falls back to compilation.
+When caching is disabled (`OCEAN_BUILD_CACHE=off`) or cannot be initialized,
+native builds instead emit a single LLVM module and invoke Clang once. Executables
+lower only reachable functions; libraries retain ordinary functions for downstream
+callers. An empty usable cache still uses package modules and stores their objects.
+Individual missing or corrupt entries remain cache misses.
 
 Set `OCEAN_BUILD_CACHE=/path/to/cache` to override its location, or
 `OCEAN_BUILD_CACHE=off` to disable caching. `ocean clean --cache` (also

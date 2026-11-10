@@ -46,6 +46,20 @@ static int sameFile(const char *a, const char *b) {
     return !stat(a, &x) && !stat(b, &y) && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
 }
 static int nativeBuild(buildCache *cache, parseResult *program, const char *output, int library, int staticLink) {
+    // Without reusable objects, lower only reachable executable functions and
+    // avoid the package module serialization and separate compilation costs.
+    if (!cache) {
+        char path[] = "/tmp/ocean-ir-XXXXXX";
+        int fd = mkstemp(path);
+        if (fd < 0) { perror("ocean: could not create IR file"); return 1; }
+        FILE *ir = fdopen(fd, "w");
+        if (!ir) { perror("ocean: could not open IR file"); close(fd); unlink(path); return 1; }
+        int failed = emitLLVM(program, ir);
+        if (fclose(ir)) failed = 1;
+        if (!failed) failed = library ? compileLLVMObject(path, output) : compileLLVMExecutable(path, output, staticLink);
+        unlink(path);
+        return failed;
+    }
     llvmPackages units = {0};
     if (createLLVMPackages(program, &units)) { perror("native package directory"); return 1; }
     char **objects = calloc(units.count, sizeof(char *));

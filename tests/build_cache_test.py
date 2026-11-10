@@ -25,15 +25,15 @@ with tempfile.TemporaryDirectory(prefix='ocean source cache ') as temporary:
     wrapper.write_text('#!' + sys.executable + '\n' + '''import json, os, pathlib, shutil, sys, tempfile
 args = sys.argv[1:]
 record = {"compile": "-c" in args, "args": args}
-if record["compile"]:
-    source = next(a for a in args if a.endswith(".ll"))
+if "-x" in args and args[args.index("-x") + 1] == "ir":
+    source = args[args.index("ir") + 1]
     fd, saved = tempfile.mkstemp(suffix=".ll", dir=os.environ["OCEAN_CACHE_CAPTURES"])
     os.close(fd)
     shutil.copyfile(source, saved)
-    record.update(module=pathlib.Path(source).name, saved=saved)
+    record.update(module=pathlib.Path(source).name, saved=saved, source=source)
 with open(os.environ["OCEAN_CACHE_TEST_LOG"], "a") as f:
     f.write(json.dumps(record) + "\\n")
-if record["compile"] and os.environ.get("OCEAN_CACHE_TEST_FAIL"):
+if "saved" in record and os.environ.get("OCEAN_CACHE_TEST_FAIL"):
     sys.exit(23)
 ''' + 'os.execv(' + repr(clang) + ', [' + repr(clang) + ', *args])\n')
     wrapper.chmod(0o755)
@@ -215,13 +215,33 @@ if record["compile"] and os.environ.get("OCEAN_CACHE_TEST_FAIL"):
     invoke('build', library, '-o', root / 'library-copy.o')
     assert len(compiles()) == count + 2 and (root / 'library.o').read_bytes() == (root / 'library-copy.o').read_bytes()
 
-    # Cache failure is a miss, not a failure of the program being compiled.
+    # Disabled/uninitializable caches use one module; empty usable caches above
+    # still populate reusable package objects. Unreachable code is not lowered.
     before = actions()
-    build_delta(4, environment=dict(env, OCEAN_BUILD_CACHE='off'))
-    assert actions() == before
     blocked = root / 'not-a-directory'; blocked.write_text('keep')
-    build_delta(4, environment=dict(env, OCEAN_BUILD_CACHE=str(blocked)))
-    assert blocked.read_text() == 'keep'
+    fallback = root / 'fallback'; fallback.mkdir()
+    (fallback / 'main.oc').write_text('package main; func Unused() int { return 99; } func main() int { return 17; }')
+    for setting in ('off', str(blocked)):
+        fallback_env = dict(env, OCEAN_BUILD_CACHE=setting)
+        start = len(records())
+        invoke('build', fallback, '-o', output, environment=fallback_env)
+        added = records()[start:]
+        assert len(added) == 1 and not added[0]['compile'] and 'saved' in added[0], added
+        text = Path(added[0]['saved']).read_text()
+        assert 'Unused' not in text and not Path(added[0]['source']).exists()
+        built(17)
+        invoke('run', fallback, status=17, environment=fallback_env)
+        start = len(records())
+        target = root / 'fallback-library.o'
+        invoke('build', library, '-o', target, environment=fallback_env)
+        added = records()[start:]
+        assert len(added) == 1 and added[0]['compile'] and 'Value' in Path(added[0]['saved']).read_text()
+        assert not Path(added[0]['source']).exists() and target.stat().st_size > 0
+        saved = output.read_bytes()
+        invoke('build', fallback, '-o', output, status=1,
+               environment=dict(fallback_env, OCEAN_CACHE_TEST_FAIL='yes'))
+        assert output.read_bytes() == saved and not Path(records()[-1]['source']).exists()
+    assert actions() == before and blocked.read_text() == 'keep'
     saved_output = output.read_bytes()
     source.write_text('package main; func main() int { return missing; }')
     invoke('build', source, '-o', output, status=1)

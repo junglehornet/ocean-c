@@ -54,8 +54,9 @@ output. Fix errors and inspect warnings before using `run` for behavior checks.
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
 
-Native builds emit LLVM directly into one module per source package and a shared
-support module for globals, startup, concrete specializations, and runtime helpers.
+With caching enabled, native builds emit LLVM directly into one module per source
+package and a shared support module for globals, startup, concrete specializations,
+and runtime helpers.
 Each source package compiles all its ordinary functions, so the same cached object
 can serve callers using different functions. Executable linking removes unreachable
 functions and data using function/data sections (`--gc-sections`, or `-dead_strip`
@@ -94,6 +95,12 @@ conservatively invalidate their importers. Parsing and semantic checking still r
 `--emit-llvm` keeps its separate source-keyed merged output cache, and `check`
 validates direct package modules in temporary files. Cleaning the build cache does
 not remove downloaded modules.
+
+When caching is disabled (`OCEAN_BUILD_CACHE=off`) or cannot be initialized,
+native builds instead emit a single LLVM module and invoke Clang once. Executables
+lower only reachable functions; libraries retain ordinary functions for downstream
+callers. An empty usable cache still uses package modules and stores their objects.
+Individual missing or corrupt entries remain cache misses.
 
 ## Modules and packages
 

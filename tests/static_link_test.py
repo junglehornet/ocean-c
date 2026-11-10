@@ -49,10 +49,12 @@ with tempfile.TemporaryDirectory(prefix='ocean-static-') as temporary:
             invoke(*args, status=1)
         assert len(calls()) == before
     invoke('build', '-s', source, '-o', output, environment=dict(env, OCEAN_BUILD_CACHE='off'))
-    assert '-static' in calls()[-1] and '-x' not in calls()[-1]
-    assert all('-c' in args and '-x' in args and '-static' not in args for args in calls()[-3:-1])
+    assert '-static' in calls()[-1] and '-x' in calls()[-1] and '-c' not in calls()[-1]
     invoke('run', '-s', source, status=7, environment=dict(env, OCEAN_BUILD_CACHE='off'))
     saved = output.read_bytes()
+    invoke('build', '-s', source, '-o', output, status=1,
+           environment=dict(env, OCEAN_BUILD_CACHE='off', STATIC_FAIL='1'))
+    assert output.read_bytes() == saved
     invoke('build', '-s', source, '-o', output, status=1, environment=dict(env, STATIC_FAIL='1'))
     assert output.read_bytes() == saved
     source.write_text('package library; func Value() int { return 1; }')
