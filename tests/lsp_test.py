@@ -1,5 +1,6 @@
 """CLI check mode and a real stdio LSP session, including editor overlays."""
 import json
+import platform
 from pathlib import Path
 import select
 import subprocess
@@ -71,6 +72,7 @@ with tempfile.TemporaryDirectory(prefix='ocean lsp ') as directory:
             assert params['version'] == version, params
         return [d for d in params['diagnostics'] if d['severity'] == 1]
 
+    architecture = {'AMD64': 'x86_64', 'arm64': 'aarch64'}.get(platform.machine(), platform.machine())
     uri = source.as_uri()
     try:
         send('unknown', request_id=0)
@@ -124,8 +126,26 @@ with tempfile.TemporaryDirectory(prefix='ocean lsp ') as directory:
         send('textDocument/didChange', {'textDocument': {'uri': uri, 'version': 6},
                                       'contentChanges': [{'text': good}]})
         assert not diagnostics(uri, 6)
+        # Backend/native failures do not belong in editor diagnostics. Standalone
+        # check must still reject the same programs.
+        frontend_only = [
+            'package main;\nextern int ocean_missing_symbol();\n'
+            'func main() int { return extern.ocean_missing_symbol(); }\n',
+            f'package main;\nfunc main() {{ asm {architecture} {{ ocean_invalid_instruction }} }}\n',
+        ]
+        version = 6
+        for text in frontend_only:
+            source.write_text(text)
+            checked = subprocess.run([compiler, 'check', str(source)],
+                                     capture_output=True, timeout=10)
+            assert checked.returncode != 0, checked.stderr
+            version += 1
+            send('textDocument/didChange', {'textDocument': {'uri': uri, 'version': version},
+                                          'contentChanges': [{'text': text}]})
+            assert not diagnostics(uri, version)
+        source.write_text(good)
         send('textDocument/didClose', {'textDocument': {'uri': uri}})
-        assert not diagnostics(uri, 6)
+        assert not diagnostics(uri, version)
         send('unimplemented', request_id=42)
         assert receive()['error']['code'] == -32601
         # Invalid JSON gets a protocol error, followed by a usable server.

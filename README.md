@@ -86,7 +86,9 @@ to the current directory and exits with a nonzero status on errors.
 [Language Server Protocol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/)
 framing. Configure an editor's Ocean language client to run `ocean` with arguments
 `["check", "--lsp"]`. The server supports initialization, shutdown, full-document
-synchronization, and scanner, parser, semantic, backend, and native diagnostics on open, change, and save. Open
+synchronization, and scanner, parser, and semantic diagnostics on open, change, and save.
+Editor validation stops before the backend: it does not generate code or verify
+native compilation or linking. Use `ocean check` for those checks. Open
 buffers, including new unsaved files, are checked together with their package and
 imports without modifying source files. Diagnostic and edit positions use UTF-16.
 Semantic hover displays resolved types. Definition, declaration, type-definition,

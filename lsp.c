@@ -3,7 +3,6 @@
 #include "lsp.h"
 #include "package.h"
 #include "semantic.h"
-#include "backend.h"
 #include "source_path.h"
 #include <ctype.h>
 #include <errno.h>
@@ -221,7 +220,7 @@ static void publish(Document *doc, Document *documents, int clear) {
             if (slash == directory) slash[1] = 0; else *slash = 0;
             packageBuild *build = loadPackageWithSources(directory, sources, count);
             parseResult *program = packageProgram(build);
-            if (program && !analyzeSemantics(program).nErrors) checkBackend(program);
+            if (program) analyzeSemantics(program);
             fflush(stderr); _exit(0); /* Also releases parser allocations on scanner failure. */
         }
         if (child > 0) {

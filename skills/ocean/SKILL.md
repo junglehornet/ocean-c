@@ -80,7 +80,11 @@ use `ocean run . -- -o literal --check` to forward those strings as program argu
 
 Configure an editor's LSP client with command `ocean` and arguments
 `["check", "--lsp"]`. It supports diagnostics with unsaved buffers, completion,
-hover, navigation, references, and rename. Protocol positions use UTF-16.
+hover, navigation, references, and rename. Diagnostics stop after scanning, parsing,
+package resolution, and semantic analysis; the server does not run backend lowering,
+LLVM verification, or native compilation/linking and does not require Clang for
+validation. Use standalone `ocean check` to verify backend support and linking.
+Protocol positions use UTF-16.
 
 Native objects are cached under `~/.cache/ocean-build`; override with
 `OCEAN_BUILD_CACHE` or set it to `off`. Package keys hash source contents/paths,
