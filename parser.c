@@ -2731,6 +2731,8 @@ static char parseAsmOperands(parserState *state, struct stmt_asm *node) {
         node->references[node->nReferences++] = (struct asm_reference){begin, end-begin+1, operand};
         i = end;
     }
+    if (!strcmp(node->architecture.lexeme, "wasm") && node->nOperands)
+        return signatureError(state, "Wasm asm blocks do not yet support scalar operands");
     if (strcmp(node->architecture.lexeme, "x86_64") && node->nOperands > 4)
         return signatureError(state, "AArch64 and RISC-V asm blocks support at most four distinct scalar operands");
     return 1;
@@ -2773,10 +2775,10 @@ static stmt parseStatementImpl(parserState *state) {
                 return (stmt){0};
             }
             tok = advance(state);
-            expect(IDENTIFIER, "Expected asm architecture (x86_64, aarch64, riscv64)", stmt);
+            expect(IDENTIFIER, "Expected asm architecture (x86_64, aarch64, riscv64, wasm)", stmt);
             token architecture = tok, platform = {.type=EOF_TOKEN};
-            if (strcmp(tok.lexeme, "x86_64") && strcmp(tok.lexeme, "aarch64") && strcmp(tok.lexeme, "riscv64")) {
-                signatureError(state, "Unknown asm architecture; expected x86_64, aarch64, or riscv64");
+            if (strcmp(tok.lexeme, "x86_64") && strcmp(tok.lexeme, "aarch64") && strcmp(tok.lexeme, "riscv64") && strcmp(tok.lexeme, "wasm")) {
+                signatureError(state, "Unknown asm architecture; expected x86_64, aarch64, riscv64, or wasm");
                 return (stmt){0};
             }
             tok = advance(state);

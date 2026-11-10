@@ -128,7 +128,8 @@ struct buildCache { char *directory; char irKey[65], compilerHash[65]; };
 buildCache *openBuildCache(const char *compiler, parseResult *program, const char *packageDirectory) {
     char *directory = cacheDirectory(); if (!directory) return NULL;
     char *self = executable(compiler), *cwd = getcwd(NULL, 0);
-    Digest d = digest(); string(&d, "ocean merged IR action v1");
+    Digest d = digest();
+    string(&d, getenv("OCOS")); string(&d, getenv("OCARCH")); string(&d, "ocean merged IR action v1");
     Digest compilerDigest = digest();
     int compilerOK;
 #ifdef __linux__
@@ -183,6 +184,7 @@ int buildCachePackageKey(buildCache *cache, parseResult *program, size_t package
     char *tool = executable("clang"); struct stat info;
     if (!tool || stat(tool, &info)) { free(tool); return 0; }
     Digest d = digest();
+    string(&d, getenv("OCOS")); string(&d, getenv("OCARCH"));
     string(&d, "ocean source package action v3: native ABI v1; function/data sections");
     string(&d, cache->compilerHash); string(&d, tool); free(tool);
     number(&d, info.st_dev); number(&d, info.st_ino); number(&d, info.st_size); number(&d, info.st_mode);

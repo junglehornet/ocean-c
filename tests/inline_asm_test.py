@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix="ocean asm ") as directory:
 
     # All known selectors parse. Invalid foreign assembly is never assembled.
     blocks = []
-    for arch in ("x86_64", "aarch64", "riscv64"):
+    for arch in ("x86_64", "aarch64", "riscv64", "wasm"):
         for os in (None, "linux", "macos", "windows"):
             matches = arch == architecture and (os is None or os == os_name)
             body = 'nop' if matches else 'not_an_instruction @ $foreign %reg #123\n'
@@ -36,6 +36,9 @@ with tempfile.TemporaryDirectory(prefix="ocean asm ") as directory:
     for text, message in (
         ('func main() { asm linux { nop } }', 'Unknown asm architecture'),
         ('func main() { asm x86 { nop } }', 'Unknown asm architecture'),
+        ('func main() { asm wasm/js { nop } }', 'Unknown asm platform'),
+        ('func main() { asm x86_64/js { nop } }', 'Unknown asm platform'),
+        ('func main() { asm js { nop } }', 'Unknown asm architecture'),
         ('func main() { asm x86_64/freebsd { nop } }', 'Unknown asm platform'),
         ('func main() { asm x86_64/ { nop } }', 'Expected asm platform'),
         ('func main() { asm { nop } }', 'Expected asm architecture'),

@@ -4,13 +4,15 @@
 #include "llvm_packages.h"
 #include <stdio.h>
 /* Returns zero on success. Does not take ownership of the AST or output. */
+int backendWasm(void);
+int validateBackendTarget(void);
 int emitLLVM(parseResult *program, FILE *output);
 /* Direct emission; no merged LLVM file is parsed or split. */
 int emitLLVMPackages(parseResult *program, llvmPackages *units);
 /* Validate lowering, LLVM verification, and the normal link contract without publishing output. */
 int checkBackend(parseResult *program);
 int linkLLVMObjects(const char **objects, size_t count, int needsFFI, const char *output, int library, int staticLink);
-/* Uses clang from PATH, with the host target and system linker. */
+/* Uses clang from PATH; OCOS=js OCARCH=wasm selects wasm32, otherwise host. */
 int compileLLVMExecutable(const char *irPath, const char *outputPath, int staticLink);
 int compileLLVM(const char *irPath, const char *outputPath);
 int compileLLVMObject(const char *irPath, const char *outputPath);

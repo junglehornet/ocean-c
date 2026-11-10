@@ -240,6 +240,7 @@ static void finishNativeModules(Backend *b, FILE *support) {
         if (!b->units->needed[unit]) continue;
         FILE *out = fopen(b->units->paths[unit], "w");
         if (!out) { fail(b, "could not create native module"); break; }
+        emitTarget(out);
         if (!unit) {
             copy(types, out); nativeCopy(b, ordinary, out); copy(runtime, out);
         } else {

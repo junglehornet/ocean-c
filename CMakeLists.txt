@@ -234,3 +234,12 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/enums_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(enums_test PROPERTIES TIMEOUT 90)
 endif()
+
+if(BUILD_TESTING)
+    find_program(OCEAN_WASM_LD_EXECUTABLE wasm-ld)
+    if(OCEAN_WASM_LD_EXECUTABLE AND OCEAN_CLANG_EXECUTABLE)
+        add_test(NAME wasm_backend_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/wasm_backend_test.py" "$<TARGET_FILE:ocean-c>")
+        set_tests_properties(wasm_backend_test PROPERTIES TIMEOUT 120)
+    endif()
+endif()

@@ -15,6 +15,27 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+int backendWasm(void) {
+    const char *arch = getenv("OCARCH");
+    return arch && !strcmp(arch, "wasm");
+}
+int validateBackendTarget(void) {
+    const char *os = getenv("OCOS"), *arch = getenv("OCARCH");
+    if ((os && !strcmp(os, "js")) || backendWasm()) {
+        if (!os || strcmp(os, "js") || !arch || strcmp(arch, "wasm")) {
+            fprintf(stderr, "backend error: WebAssembly requires OCOS=js and OCARCH=wasm together\n");
+            return 1;
+        }
+    } else if ((os && *os) || (arch && *arch)) {
+        fprintf(stderr, "backend error: target overrides currently support only OCOS=js OCARCH=wasm\n");
+        return 1;
+    }
+    return 0;
+}
+static void emitTarget(FILE *out) {
+    if (backendWasm()) fputs("target triple = \"wasm32-unknown-unknown\"\n", out);
+}
+
 typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER } Kind;
 typedef struct {
     Kind kind;
@@ -4921,7 +4942,7 @@ static void emitAssembly(Backend *b, struct stmt_asm *v, const char *architectur
         for (int i=0; i<=30; i++) if (i != 18 && i != 29 && !(v->nOperands && i >= 9 && i <= 15)) fprintf(b->body, ",~{x%d}", i);
         for (int i=0; i<32; i++) fprintf(b->body, ",~{v%d}", i);
         fputs(",~{cc}", b->body);
-    } else {
+    } else if (!strcmp(architecture, "riscv64")) {
         for (int i=1; i<32; i++) if (i != 2 && i != 3 && i != 4 && i != 8 && !(v->nOperands && i >= 28)) fprintf(b->body, ",~{x%d}", i);
         for (int i=0; i<32; i++) fprintf(b->body, ",~{f%d}", i);
     }
@@ -4934,7 +4955,7 @@ static void emitAssembly(Backend *b, struct stmt_asm *v, const char *architectur
     free(operands);
 }
 
-// The native driver invokes host Clang; selectors follow that same host.
+// Selectors follow the configured target, defaulting to the native host.
 static void assemblyStatement(Backend *b, struct stmt_asm *v) {
     const char *architecture = "", *platform = "";
 #if defined(__x86_64__) || defined(_M_X64)
@@ -4951,6 +4972,7 @@ static void assemblyStatement(Backend *b, struct stmt_asm *v) {
 #elif defined(_WIN32)
     platform = "windows";
 #endif
+    if (backendWasm()) { architecture = "wasm"; platform = "js"; }
     if (strcmp(v->architecture.lexeme, architecture) ||
         (v->platform.type != EOF_TOKEN && strcmp(v->platform.lexeme, platform))) return;
     emitAssembly(b, v, architecture);
@@ -6351,6 +6373,8 @@ static void emitOSArgs(Backend *b, FILE *out, struct stmt_func *hook) {
 #include "backend_modules.inc"
 
 static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units) {
+    if (validateBackendTarget()) return 1;
+    if (!units) emitTarget(output);
     Scope globals = {0};
     Backend b = {.program = program, .out = output, .globalScope = &globals, .scope = &globals, .units = units};
     if (units) {
@@ -6685,12 +6709,16 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         return 1;
     }
     if (!child) {
-        char *args[20]; size_t n = 0;
+        char *args[32]; size_t n = 0;
         args[n++] = "clang"; args[n++] = "-Wno-override-module";
+        if (backendWasm()) {
+            args[n++] = "--target=wasm32-unknown-unknown";
+            if (!object) { args[n++] = "-nostdlib"; args[n++] = "-Wl,--no-entry"; args[n++] = "-Wl,--export=main"; args[n++] = "-Wl,--allow-undefined"; }
+        }
         args[n++] = "-ffunction-sections"; args[n++] = "-fdata-sections";
         if (!object) {
 #if defined(__APPLE__)
-            args[n++] = "-Wl,-dead_strip";
+            args[n++] = backendWasm() ? "-Wl,--gc-sections" : "-Wl,-dead_strip";
 #else
             args[n++] = "-Wl,--gc-sections";
 #endif
@@ -6704,9 +6732,9 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         args[n++] = "-o"; args[n++] = staged;
         if (!object) {
 #if defined(_WIN32)
-            args[n++] = "-lkernel32";
+            if (!backendWasm()) args[n++] = "-lkernel32";
 #endif
-            if (needsFFI) args[n++] = "-lffi";
+            if (needsFFI && !backendWasm()) args[n++] = "-lffi";
         }
         args[n] = NULL;
         execvp(args[0], args);
@@ -6768,21 +6796,25 @@ int checkBackend(parseResult *program) {
 int linkLLVMObjects(const char **objects, size_t count, int ffi, const char *output, int library, int staticLink) {
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
-    char **args=checked(sizeof(char*)*(count+16));size_t n=0;
+    char **args=checked(sizeof(char*)*(count+24));size_t n=0;
     args[n++]="clang";args[n++]="-Wno-override-module";
+    if (backendWasm()) {
+        args[n++]="--target=wasm32-unknown-unknown";
+        if (!library) { args[n++]="-nostdlib"; args[n++]="-Wl,--no-entry"; args[n++]="-Wl,--export=main"; args[n++]="-Wl,--allow-undefined"; }
+    }
     if (!library) {
 #if defined(__APPLE__)
-        args[n++] = "-Wl,-dead_strip";
+        args[n++] = backendWasm() ? "-Wl,--gc-sections" : "-Wl,-dead_strip";
 #else
         args[n++] = "-Wl,--gc-sections";
 #endif
     }
     if(staticLink&&!library)args[n++]="-static";
-    if(library){args[n++]="-r";args[n++]="-nostdlib";args[n++]="-no-pie";}
+    if(library){args[n++]="-r";args[n++]="-nostdlib";if (!backendWasm()) args[n++]="-no-pie";}
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
-    args[n++]="-o";args[n++]=staged;if(ffi&&!library)args[n++]="-lffi";
+    args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
 #if defined(_WIN32)
-    if(!library)args[n++]="-lkernel32";
+    if(!library&&!backendWasm())args[n++]="-lkernel32";
 #endif
     args[n]=NULL;
     pid_t child=fork();if(!child){execvp(args[0],args);perror("could not execute clang");_exit(127);}

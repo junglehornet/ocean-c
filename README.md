@@ -1498,8 +1498,11 @@ No standard-library import or build/module configuration change is required.
 ## Inline assembly
 
 Inside a function, write `asm architecture[/platform] { assembly }`. The
-architecture is required: `x86_64`, `aarch64`, or `riscv64`. An optional `/linux`,
-`/macos`, or `/windows` restricts the block to that host platform. Braces are
+architecture is required: `x86_64`, `aarch64`, `riscv64`, or `wasm`. An optional `/linux`,
+`/macos`, or `/windows` restricts the block to that target platform.
+`js` is not a valid assembly platform selector: use `asm wasm { ... }`
+without `/js`, since the JavaScript target always uses Wasm. Wasm blocks
+currently accept raw instructions only, without `${variable}` operands. Braces are
 required; a trailing semicolon is optional. Unknown selectors are errors.
 
 ```ocean
@@ -1514,8 +1517,9 @@ func main() {
 }
 ```
 
-Ocean currently builds for the host through Clang. Nonmatching blocks are omitted
-without assembling their bodies; selectors do not enable cross-compilation.
+Ocean builds for the host through Clang by default; `OCOS=js OCARCH=wasm`
+selects WebAssembly. Nonmatching blocks are omitted without assembling their
+bodies; assembly selectors do not change the build target.
 Every matching block executes in source order. x86-64 uses Intel syntax;
 AArch64 and RISC-V use their standard LLVM assembler syntax. Bodies are raw
 assembly, including newlines, directives, and literal `$` characters, with balanced
@@ -1565,7 +1569,7 @@ provide any required call space. Access operands before changing the stack and
 after restoring it. Do not return, branch out of the block, or unwind through
 it. Numeric local labels avoid collisions when blocks are repeated.
 
-Instructions must be supported by the host's default Clang target; there is no
+Instructions must be supported by the selected Clang target; there is no
 CPU-feature selection. Native `check`/build reports assembler errors through
 Clang; `--emit-llvm` alone does not assemble instructions.
 
@@ -1745,3 +1749,23 @@ unchanged.
 `io.Sprint` and the print/format functions support unsigned `uint`/`u64`,
 `u32`, `u16`, and `u8` values as decimal strings across their full ranges,
 including 18446744073709551615 for `uint`/`u64`.
+
+### WebAssembly backend
+
+Use `OCOS=js OCARCH=wasm ocean build -o main.wasm` to emit a
+`wasm32-unknown-unknown` WebAssembly module for a JavaScript host. Set both
+environment variables together; leaving both unset uses the native host.
+The same target selection applies to `ocean check`, `--emit-llvm`, library
+objects, and cached package builds. Clang with WebAssembly support and
+`wasm-ld` must be installed. LLVM output includes the Wasm target triple.
+
+The module exports `main` and imports unresolved runtime/extern functions
+from `env`. The JavaScript host must supply those imports, including any
+required allocation, C runtime, or libffi functions; no JavaScript runtime
+adapter is bundled. Ocean integers remain 64-bit while Wasm pointers are
+32-bit. Native standard-library assembly blocks are skipped on this target;
+the existing system-call based I/O has no JavaScript implementation.
+`ocean run` requires a native target; instantiate the Wasm module in a
+WebAssembly host instead. `asm wasm { nop }` selects a Wasm assembly block;
+`asm wasm/js` is an error. Wasm `${variable}` assembly operands are not yet
+supported. Module/package resolution and build inputs otherwise stay the same.

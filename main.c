@@ -150,7 +150,11 @@ static int packageMain(int argc, char **argv) {
         fprintf(stderr, "ocean run: package %s is not main\n", program->packageName);
         freePackage(build); return 1;
     }
-    int failed = analyzeSemantics(program).nErrors != 0;
+    int failed = validateBackendTarget() || analyzeSemantics(program).nErrors != 0;
+    if (!failed && run && backendWasm()) {
+        fprintf(stderr, "ocean run: WebAssembly output must be run by a WebAssembly host\n");
+        freePackage(build); return 1;
+    }
     if (check && !failed) failed = checkBackend(program);
     if (failed || check) { freePackage(build); return failed; }
     char *temporaryDirectory = NULL, *temporaryExecutable = NULL, *defaultOutput = NULL;
