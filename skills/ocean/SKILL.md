@@ -280,7 +280,9 @@ func main() int {
 
 Control flow includes `if`/`else`, `for`, range loops, `switch`, `break`,
 `continue`, and explicit `fallthrough`. A one-binding range receives the index,
-not the element. Type switches use `switch (v := value.(type)) { case int: ... }`.
+not the element. Use `_` in either binding to discard it, such as
+`for (_, value := range values)`. `for (_ := range values)` runs once per
+entry without binding a variable. Type switches use `switch (v := value.(type)) { case int: ... }`.
 Labels and `goto` are function-local and cannot enter nested scopes or skip
 in-scope declarations. An unrecovered `panic "message";` terminates with a diagnostic and call
 trace. `return panic "message";` reports at the caller. Use

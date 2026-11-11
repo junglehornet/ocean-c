@@ -58,6 +58,17 @@ with tempfile.TemporaryDirectory(prefix="ocean backend ") as directory:
     program("func main() int { n := 0; outer: for (i := range int[]{1, 2}) { "
             "for (j, item := range int[]{3, 4}) { n += item; break outer; } } return n; }", 3)
 
+    # Blank bindings discard either slot without declaring a variable.
+    program("struct Row { value int; } func main() int { sum := 0; "
+            "for (_, row := range Row[]{{3}, {5}}) { sum += row.value; } "
+            "for (i, _ := range int[]{4, 6}) { sum += i; } "
+            "for (_ := range \"AB\") { sum++; } "
+            "for (_, _ := range int[]{1, 2}) { sum++; } return sum; }", 13)
+    program('func main() int { sum := 0; a := map[string]string{"ab": "xyz"}; '
+            'for (_, value := range a) { sum += len(value); } '
+            'for (key, _ := range a) { sum += len(key); } '
+            'for (_, _ := range a) { sum++; } return sum; }', 6)
+
     # Assigning to the visible index must not change traversal or item selection.
     program("func main() int { sum := 0; for (i, item := range int[]{3, 5, 7}) { "
             "sum += i + item; i = 100; sum += i; } return sum - 300; }", 18)

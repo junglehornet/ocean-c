@@ -2037,7 +2037,8 @@ static stmt parseFor(parserState *state) {
     size_t cursor = bindingStart;
     size_t nBindings = 0;
     while (cursor < state->tokensLen &&
-           state->tokens[cursor].type == IDENTIFIER) {
+           (state->tokens[cursor].type == IDENTIFIER ||
+            state->tokens[cursor].type == UNDERSCORE)) {
         nBindings++;
         cursor++;
         if (cursor >= state->tokensLen || state->tokens[cursor].type != COMMA) break;

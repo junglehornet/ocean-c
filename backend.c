@@ -5431,7 +5431,7 @@ static void statementImpl(Backend *b, stmt *s) {
         Scope bodyScope = {.parent = b->scope, .jumpRegion = v->body};
         b->scope = &bodyScope;
         saveStack(b, &bodyScope, v->range || statementAllocatesStack(v->body));
-        if (v->range) {
+        if (v->range && v->bindings[0].type != UNDERSCORE) {
             // The visible binding is a per-iteration value, not the loop counter.
             Kind keyKind = rangeType->map ? rangeType->mapKey : INT;
             Value binding = localSlot(b, keyKind, v->bindings[0].lexeme);
@@ -5441,7 +5441,7 @@ static void statementImpl(Backend *b, stmt *s) {
             bind(b, v->bindings[0].lexeme, binding);
             b->scope->bindings->autoRelease = !binding.closureCell;
         }
-        if (v->range && v->nBindings == 2) {
+        if (v->range && v->nBindings == 2 && v->bindings[1].type != UNDERSCORE) {
             Kind itemKind = rangeType->map ? rangeType->mapValue : rangeType->element;
             Value item = localSlot(b, itemKind, v->bindings[1].lexeme);
             Value i = load(b, index);
