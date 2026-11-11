@@ -1,5 +1,6 @@
 """CLI check mode and a real stdio LSP session, including editor overlays."""
 import json
+import os
 import platform
 from pathlib import Path
 import select
@@ -8,6 +9,7 @@ import sys
 import tempfile
 
 compiler = str(Path(sys.argv[1]).resolve())
+os.environ.setdefault("OCEAN_SRC", str(Path(__file__).resolve().parents[2] / "ocean-src"))
 
 
 def frame(message):
@@ -116,6 +118,23 @@ with tempfile.TemporaryDirectory(prefix='ocean lsp ') as directory:
         send('textDocument/didClose', {'textDocument': {'uri': new_file.as_uri()}})
         assert not diagnostics(new_file.as_uri(), 1)
         assert not diagnostics(uri, 4)
+        # Both test package variants, including files that exist only in the editor.
+        for package in ('main', 'main_test'):
+            test_file = root / 'unsaved_test.oc'
+            test_uri = test_file.as_uri()
+            send('textDocument/didOpen', {'textDocument': {
+                'uri': test_uri, 'version': 1,
+                'text': f'package {package}; func helper() int {{ return false; }}'}})
+            assert not diagnostics(uri, 4)
+            assert diagnostics(test_uri, 1)
+            send('textDocument/didChange', {'textDocument': {'uri': test_uri, 'version': 2},
+                'contentChanges': [{'text': f'package {package}; func helper() int {{ return 42; }}'}]})
+            assert not diagnostics(uri, 4)
+            assert not diagnostics(test_uri, 2)
+            assert not test_file.exists()
+            send('textDocument/didClose', {'textDocument': {'uri': test_uri}})
+            assert not diagnostics(test_uri, 2)
+            assert not diagnostics(uri, 4)
         unicode_text = 'package main;\nfunc main() { s := "😀"; x: int = false; }\n'
         send('textDocument/didChange', {'textDocument': {'uri': uri, 'version': 5},
                                       'contentChanges': [{'text': unicode_text}]})

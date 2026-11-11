@@ -211,7 +211,7 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
         slash[1] = 0;
     else
         *slash = 0;
-    packageBuild *build = loadPackageWithSources(directory, overlays, count);
+    packageBuild *build = loadCheckPackageWithSources(directory, overlays, count);
     parseResult *program = packagePartialProgram(build);
     if (!program) {
         fputs(completion ? "{\"isIncomplete\":true,\"items\":[]}" : "null", out);

@@ -883,3 +883,8 @@ report files, and timeout handling against the matching standard library.
 
 `tests/slicing_test.py` checks half-open slices of arrays, buffers, and strings,
 independent nested storage, bound evaluation, generic results, and invalid bounds.
+
+`check_backend_test.py` also verifies that `check` and `build --check` validate
+same-package and external test sources and test entry signatures without executing
+tests, while normal builds and dependency loading exclude test sources.
+`lsp_test.py` covers unsaved same-package and external test diagnostics and fixes.

@@ -62,7 +62,7 @@ struct packageBuild {
     Allocation *allocations;
     size_t nPackages, nFinished, nFiles;
     int errors;
-    const char *testDirectory;
+    const char *testDirectory, *harnessDirectory;
     int loadingExternal;
 };
 static void *alloc(packageBuild *b, size_t size) {
@@ -476,12 +476,13 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
     p->id = b->nPackages++; p->directory = pkgString(b, location); p->state = 1;
     p->module = findModule(b, location);
     p->next = b->packages; b->packages = p;
-    DIR *dir = opendir(location);
-    if (!dir) { error(b, location, "cannot read package directory"); return p; }
+    int harness = b->harnessDirectory && !strcmp(location, b->harnessDirectory);
+    DIR *dir = harness ? NULL : opendir(location);
+    if (!dir && !harness) { error(b, location, "cannot read package directory"); return p; }
     size_t count = 0, capacity = 16;
     char **names = malloc(capacity * sizeof(*names));
     struct dirent *entry;
-    while ((entry = readdir(dir))) {
+    while (dir && (entry = readdir(dir))) {
         size_t length = strlen(entry->d_name);
         if (length < 4 || strcmp(entry->d_name + length - 3, ".oc")) continue;
         if (testFilename(entry->d_name) ? !target : external) continue;
@@ -491,7 +492,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         if (count == capacity) { capacity *= 2; names = realloc(names, capacity * sizeof(*names)); }
         names[count++] = path;
     }
-    closedir(dir);
+    if (dir) closedir(dir);
     for (size_t i = 0; i < b->nEditorSources; i++) {
         const char *path = b->editorSources[i].path;
         const char *slash = strrchr(path, '/');
@@ -1010,9 +1011,11 @@ static packageBuild *finishPackage(packageBuild *b) {
     }
     return b;
 }
-packageBuild *loadTestPackage(const char *location, const char *harnessDirectory) {
+static packageBuild *loadTestPackageWithSources(const char *location, const char *harnessDirectory,
+                                              const packageSource *sources, size_t count) {
     packageBuild *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
+    b->editorSources = sources; b->nEditorSources = count;
     char *path = canonical(b, location);
     if (!path) { error(b, location, "location does not exist"); return b; }
     if (!directory(path)) {
@@ -1023,6 +1026,7 @@ packageBuild *loadTestPackage(const char *location, const char *harnessDirectory
         path = parent(b, path);
     }
     b->testDirectory = path;
+    b->harnessDirectory = pkgString(b, harnessDirectory);
     Package *internal = loadDirectory(b, path);
     if (!b->errors && !internal->name) error(b, path, "no package under test; add ordinary source or same-package test files");
     if (b->errors) return b;
@@ -1057,13 +1061,47 @@ packageBuild *loadTestPackage(const char *location, const char *harnessDirectory
     fprintf(out, "return testing.Finish(); }");
     fclose(out);
     char *source = pkgString(b, text); free(text);
-    packageSource *overlay = alloc(b, sizeof(*overlay));
-    *overlay = (packageSource){format(b, "%s/runner.oc", harnessDirectory), source};
-    b->editorSources = overlay; b->nEditorSources = 1;
+    packageSource *overlay = alloc(b, (count + 1) * sizeof(*overlay));
+    if (count) memcpy(overlay, sources, count * sizeof(*overlay));
+    overlay[count] = (packageSource){format(b, "%s/runner.oc", harnessDirectory), source};
+    b->editorSources = overlay; b->nEditorSources = count + 1;
     b->root = loadDirectory(b, harnessDirectory);
     b->editorSources = NULL; b->nEditorSources = 0;
     if (b->errors) return b;
     return finishPackage(b);
+}
+packageBuild *loadTestPackage(const char *location, const char *harnessDirectory) {
+    return loadTestPackageWithSources(location, harnessDirectory, NULL, 0);
+}
+/* Reuse test discovery and its synthetic harness without executing any tests.
+ * Editor buffers must remain visible while loading both test package variants. */
+static int hasTestSources(const char *location, const packageSource *sources, size_t count) {
+    char *path = realpath(location, NULL);
+    if (path && !directory(path)) {
+        char *slash = strrchr(path, '/');
+        if (slash == path) slash[1] = 0; else if (slash) *slash = 0;
+    }
+    int hasTests = 0;
+    DIR *dir = path ? opendir(path) : NULL;
+    struct dirent *entry;
+    while (dir && (entry = readdir(dir)))
+        if (testFilename(entry->d_name)) { hasTests = 1; break; }
+    if (dir) closedir(dir);
+    for (size_t i = 0; path && !hasTests && i < count; i++) {
+        const char *slash = strrchr(sources[i].path, '/');
+        if (slash && (size_t)(slash - sources[i].path) == strlen(path) &&
+            !strncmp(sources[i].path, path, strlen(path)) && testFilename(slash + 1)) hasTests = 1;
+    }
+    free(path);
+    return hasTests;
+}
+packageBuild *loadCheckPackageWithSources(const char *location, const packageSource *sources, size_t count) {
+    if (!hasTestSources(location, sources, count)) return loadPackageWithSources(location, sources, count);
+    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", sources, count);
+}
+packageBuild *loadPackageTests(const char *location) {
+    if (!hasTestSources(location, NULL, 0)) return NULL;
+    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", NULL, 0);
 }
 parseResult *packagePartialProgram(packageBuild *b) {
     return b && b->program.nSources ? &b->program : NULL;

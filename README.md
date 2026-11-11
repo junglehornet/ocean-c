@@ -82,6 +82,10 @@ build/ocean check --lsp
 its imports, including backend lowering, LLVM verification, and native linking. Temporary artifacts are removed; no output is published and the program is never executed. It defaults
 to the current directory and exits with a nonzero status on errors.
 
+Checks also validate same-package and external `*_test.oc` files in the selected
+package without executing them. `build --check` includes these tests too; ordinary
+`build` and `run` continue to ignore them. Tests in imported dependencies are excluded.
+
 `ocean check --lsp` starts the Ocean language server over stdin/stdout using
 [Language Server Protocol](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/)
 framing. Configure an editor's Ocean language client to run `ocean` with arguments
@@ -1830,8 +1834,9 @@ POSIX; real Windows and macOS hosts are still required to validate those ABIs.
 
 Run `ocean test [location]` to compile and execute a package's tests. A location
 is a directory or an Ocean file selecting its containing package; it defaults to
-`.`. Test source filenames must end in `_test.oc`. Normal `build`, `run`, and
-`check` commands always ignore these files, including those in dependencies.
+`.`. Test source filenames must end in `_test.oc`. Normal `build` and `run` commands ignore these files. `check`, `build --check`,
+and LSP validation include same-package and external tests in the selected
+package, without executing them. Dependency test files remain excluded.
 Test sources are never linked into a normal executable or library object.
 
 Tests are top-level functions whose names start with `Test`, with exactly one

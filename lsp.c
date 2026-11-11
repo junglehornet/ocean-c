@@ -218,7 +218,7 @@ static void publish(Document *doc, Document *documents, int clear) {
             for (Document *d = documents; d; d = d->next) sources[i++] = (packageSource){d->path, d->text};
             char *directory = strdup(doc->path), *slash = strrchr(directory, '/');
             if (slash == directory) slash[1] = 0; else *slash = 0;
-            packageBuild *build = loadPackageWithSources(directory, sources, count);
+            packageBuild *build = loadCheckPackageWithSources(directory, sources, count);
             parseResult *program = packageProgram(build);
             if (program) analyzeSemantics(program);
             fflush(stderr); _exit(0); /* Also releases parser allocations on scanner failure. */

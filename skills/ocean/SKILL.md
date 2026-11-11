@@ -50,7 +50,10 @@ ocean clean --cache
 A location is a directory or a file selecting its entire containing package.
 `check` defaults to the current directory and checks imports, semantics, backend
 lowering, LLVM verification, and native linking without running or publishing an
-output. Fix errors and inspect warnings before using `run` for behavior checks.
+output. It also validates same-package and external `*_test.oc` files in the
+selected package, without running tests; imported packages’ test files remain excluded.
+`build --check` does the same. Normal `build` and `run` ignore test files.
+Fix errors and inspect warnings before using `run` for behavior checks.
 `build` produces a native executable for a root `main` package; other packages
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
@@ -82,7 +85,7 @@ Compiler flags `-o`, `--check`, and `--emit-llvm` are incompatible with `run`;
 use `ocean run . -- -o literal --check` to forward those strings as program arguments.
 
 Configure an editor's LSP client with command `ocean` and arguments
-`["check", "--lsp"]`. It supports diagnostics with unsaved buffers, completion,
+`["check", "--lsp"]`. It supports diagnostics for ordinary and test files with unsaved buffers, completion,
 hover, navigation, references, and rename. Diagnostics stop after scanning, parsing,
 package resolution, and semantic analysis; the server does not run backend lowering,
 LLVM verification, or native compilation/linking and does not require Clang for
@@ -987,8 +990,9 @@ matching `threads` and `sync` standard-library sources.
 
 Run `ocean test [location]` to compile and execute a package's tests. A location
 is a directory or an Ocean file selecting its containing package; it defaults to
-`.`. Test source filenames must end in `_test.oc`. Normal `build`, `run`, and
-`check` commands always ignore these files, including those in dependencies.
+`.`. Test source filenames must end in `_test.oc`. Normal `build` and `run` commands ignore these files. `check`, `build --check`,
+and LSP validation include same-package and external tests in the selected
+package, without executing them. Dependency test files remain excluded.
 Test sources are never linked into a normal executable or library object.
 
 Tests are top-level functions whose names start with `Test`, with exactly one

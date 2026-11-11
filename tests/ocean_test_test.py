@@ -59,11 +59,11 @@ func TestPublic(t *testing.T) { if (calc.Answer() != 42) t.Error("public API"); 
     default = run('test', root)
     assert 'TestPublic' not in default.stdout  # tang hides passing details by default
 
-    # Test sources are excluded even when explicitly used to select a package.
+    # Ordinary builds exclude tests even when a test file selects the package.
     broken = root / 'broken_test.oc'
     broken.write_text('this is deliberately not valid Ocean')
     run('build', broken, '-o', root / 'calc.o')
-    run('check', root)
+    run('check', root, ok=False)
     run('test', root, ok=False)
     broken.unlink()
 

@@ -158,6 +158,15 @@ static int packageMain(int argc, char **argv) {
         freePackage(build); return 1;
     }
     if (check && !failed) failed = checkBackend(program);
+    if (check && !failed) {
+        packageBuild *tests = loadPackageTests(location);
+        if (tests) {
+            parseResult *testProgram = packageProgram(tests);
+            failed = !testProgram || analyzeSemantics(testProgram).nErrors != 0;
+            if (!failed) failed = checkBackend(testProgram);
+            freePackage(tests);
+        }
+    }
     if (failed || check) { freePackage(build); return failed; }
     char *temporaryDirectory = NULL, *temporaryExecutable = NULL, *defaultOutput = NULL;
     struct sigaction oldInterrupt, oldTerminate, oldHangup;
