@@ -1989,6 +1989,24 @@ static Type *expression(Context *c, expr *e) {
             checkConstraint(c, t, constraints[i], t->arguments[i], at);
         return t;
     }
+    case EXPR_TYPE_SLICE: {
+        struct expr_slice *v = e->underlying;
+        Type *p = representation(expression(c, &v->parent));
+        if (v->start.type) check(c, &integer, expression(c, &v->start), v->start.location);
+        if (v->end.type) check(c, &integer, expression(c, &v->end), v->end.location);
+        if (!p->element || p->mapKey || (strcmp(p->name, "fixed-array") &&
+            strcmp(p->name, "dynamic-array") && strcmp(p->name, "buffer"))) {
+            error(c, at, "slicing requires an array, dynamic array, string, or typed buffer");
+            return &unknown;
+        }
+        if (p->immutableString) return p;
+        Type *result = allocate(c, sizeof(*result));
+        result->name = "dynamic-array";
+        result->dynamicArray = 1;
+        result->mixed = p->mixed;
+        result->element = p->element;
+        return result;
+    }
     case EXPR_TYPE_INDEX: {
         struct expr_index *v = e->underlying;
         typeTokens element;

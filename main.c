@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
 #include "backend.h"
 #include "build_cache.h"
@@ -268,6 +269,8 @@ static int packageMain(int argc, char **argv) {
     free(temporaryExecutable); free(temporaryDirectory); free(defaultOutput);
     return status;
 }
+#include "test_runner.inc"
+
 static int moduleMain(int argc, char **argv) {
     const char *usage = "Usage: ocean mod init [name]\n";
     if ((argc == 3 && !strcmp(argv[2], "--help")) ||
@@ -308,6 +311,7 @@ static int moduleMain(int argc, char **argv) {
     return failed;
 }
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "test")) return testMain(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "check")) {
         if (argc == 3 && !strcmp(argv[2], "--lsp")) return oceanLsp();
         if (argc == 3 && !strcmp(argv[2], "--help")) {
@@ -332,6 +336,7 @@ int main(int argc, char **argv) {
     if (argc == 1 || (argc == 2 && (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")))) {
         printf("Usage: ocean build [--check | --emit-llvm | --static | -s] [-o output] [location]\n"
                "       ocean run [--static | -s] [location] [program-arguments...] [-- program-arguments...]\n"
+               "       ocean test [location] [--json] [--outfile path] [--jsonfile path]\n"
                "       ocean check [location]\n"
                "       ocean check --lsp\n"
                "       ocean mod init [name]\n"

@@ -2177,6 +2177,11 @@ static Kind expressionKind(Backend *b, expr *e) {
         }
         return k == SCALAR_ANY ? constrainedArrayKind(b, constraintKind(b, element), 0) : dynamicArrayKind(b, k);
     }
+    case EXPR_TYPE_SLICE: {
+        struct expr_slice *v = e->underlying;
+        BufferKind *t = bufferKind(b, expressionKind(b, &v->parent));
+        return t ? ((t->shape == 4 && !t->fixedArray) ? t->kind : dynamicArrayKind(b, t->element)) : BAD;
+    }
     case EXPR_TYPE_INDEX: {
         BufferKind *t =
             bufferKind(b, expressionKind(b, &((struct expr_index *)e->underlying)->parent));
@@ -4081,6 +4086,55 @@ static Value expressionImpl(Backend *b, expr *e) {
         result.kind = expressionKind(b, e);
         return result;
     }
+    case EXPR_TYPE_SLICE: {
+        struct expr_slice *v = e->underlying;
+        Value source = expression(b, &v->parent);
+        // Snapshot only when evaluating bounds could mutate the receiver.
+        if (!pureIndex(&v->start) || !pureIndex(&v->end)) source = copyValue(b, source, 0);
+        BufferKind *t = bufferKind(b, source.kind);
+        int knownLength = t->shape != 3 || t->fixedArray || source.length;
+        if (!knownLength && !v->end.type) {
+            fail(b, "slicing a buffer pointer requires an explicit end bound");
+            return value(b, BAD, "0");
+        }
+        Value length = knownLength ? arrayLength(b, source) : value(b, INT, "0");
+        Value start = v->start.type ? coerce(b, expression(b, &v->start), INT) : value(b, INT, "0");
+        Value end = v->end.type ? coerce(b, expression(b, &v->end), INT) : length;
+        Value nonnegative = temp(b, BOOL), ordered = temp(b, BOOL), valid = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp sge i64 %s, 0\n", nonnegative.operand, start.operand);
+        fprintf(b->body, "  %s = icmp sge i64 %s, %s\n", ordered.operand, end.operand, start.operand);
+        fprintf(b->body, "  %s = and i1 %s, %s\n", valid.operand, nonnegative.operand, ordered.operand);
+        if (knownLength) {
+            Value fits = temp(b, BOOL), both = temp(b, BOOL);
+            fprintf(b->body, "  %s = icmp sle i64 %s, %s\n", fits.operand, end.operand, length.operand);
+            fprintf(b->body, "  %s = and i1 %s, %s\n", both.operand, valid.operand, fits.operand);
+            valid = both;
+        }
+        unsigned good = ++b->label, bad = ++b->label;
+        branch(b, valid, good, bad); label(b, bad);
+        b->boundsUsed = 1;
+        token location = diagnosticLocation(b, v->location);
+        Value filename = moduleString(b, location.filename);
+        char *text = sourceSnippet(b, location); Value snippet = moduleString(b, text); free(text);
+        fprintf(b->body, "  call void @__ocean.bounds_fail(i64 %s, i64 %s, ptr %s, i64 %ld, i64 %ld, ptr %s)\n  unreachable\n",
+                end.operand, length.operand, filename.operand, location.line, location.column, snippet.operand);
+        b->terminated = 1; label(b, good);
+        Value count = temp(b, INT);
+        fprintf(b->body, "  %s = sub i64 %s, %s\n", count.operand, end.operand, start.operand);
+        Value result = allocateCollection(b, expressionKind(b, e), count);
+        Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+        unsigned condition = ++b->label, body = ++b->label, done = ++b->label;
+        jump(b, condition); label(b, condition);
+        Value i = load(b, cursor), more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
+        branch(b, more, body, done); label(b, body);
+        Value offset = temp(b, INT);
+        fprintf(b->body, "  %s = add i64 %s, %s\n", offset.operand, start.operand, i.operand);
+        store(b, elementAddress(b, result, i), load(b, elementAddress(b, source, offset)));
+        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, condition); label(b, done);
+        return result;
+    }
     case EXPR_TYPE_INDEX: {
         int previous = b->readingIndex; b->readingIndex = 1;
         Value result = load(b, address(b, e)); b->readingIndex = previous;
@@ -4756,6 +4810,7 @@ static int hasArrayAllocation(expr *e) {
     case EXPR_TYPE_LITERAL:
         return ((struct expr_literal *)e->underlying)->type == LITERAL_TYPE_STRING;
     case EXPR_TYPE_ARRAY_NEW:
+    case EXPR_TYPE_SLICE:
         return 1;
     case EXPR_TYPE_BINARY: {
         struct expr_binary *v = e->underlying;
@@ -5889,6 +5944,7 @@ static int globalKindReady(Backend *b, expr *e) {
         return 0;
     }
     case EXPR_TYPE_DOT: return globalKindReady(b, &((struct expr_dot *)e->underlying)->parent);
+    case EXPR_TYPE_SLICE: return globalKindReady(b, &((struct expr_slice *)e->underlying)->parent);
     case EXPR_TYPE_INDEX: return globalKindReady(b, &((struct expr_index *)e->underlying)->parent);
     case EXPR_TYPE_UNARY: {
         struct expr_unary *v = e->underlying;

@@ -456,9 +456,21 @@ static expr primary(parserState *state) {
                 // array indexing
                 token indexLocation = tok;
                 tok = advance(state);
-                expr index = tok.type == RIGHT_BRACKET ? (expr){0} : comma(state);
+                expr index = (tok.type == RIGHT_BRACKET || tok.type == COLON) ? (expr){0} : comma(state);
                 CHECK_SYNC;
                 SET_TOK;
+                if (tok.type == COLON) {
+                    advance(state);
+                    struct expr_slice slice = {.parent = parent, .start = index, .location = indexLocation};
+                    if (currentToken(state).type != RIGHT_BRACKET) slice.end = comma(state);
+                    CHECK_SYNC;
+                    SET_TOK;
+                    expect(RIGHT_BRACKET, "expected right bracket after slice", expr);
+                    CONSTRUCT_EXPR_RES(EXPR_TYPE_SLICE, slice, result);
+                    parent = result;
+                    tok = advance(state);
+                    break;
+                }
                 expect(RIGHT_BRACKET, "expected right bracket", expr);
                 struct expr_index index_n = {.location = indexLocation};
                 index_n.parent = parent;

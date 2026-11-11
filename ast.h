@@ -255,6 +255,7 @@ enum exprType {
     EXPR_TYPE_UNARY,
     EXPR_TYPE_TYPECAST,
     EXPR_TYPE_INDEX,
+    EXPR_TYPE_SLICE,
     EXPR_TYPE_FUNCTION,
     EXPR_TYPE_COMPOSITE,
     EXPR_TYPE_INSTANTIATION,
@@ -354,6 +355,11 @@ struct expr_assertion {
     typeTokens type; // Empty for .(type), which is restricted to switch guards.
     char isTypeGuard;
     expr *pattern; // Optional named record extraction pattern.
+};
+
+struct expr_slice {
+    expr parent, start, end; // Missing bounds default to zero and length.
+    token location;
 };
 
 struct expr_index {

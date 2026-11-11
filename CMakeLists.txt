@@ -81,6 +81,10 @@ if(BUILD_TESTING)
     endforeach()
 
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME ocean_test_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/ocean_test_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(ocean_test_test PROPERTIES TIMEOUT 120
+        ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
     add_test(NAME check_backend_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_backend_test.py" "$<TARGET_FILE:ocean-c>")
     set_tests_properties(check_backend_test PROPERTIES TIMEOUT 120)
@@ -224,6 +228,9 @@ if(BUILD_TESTING)
     add_test(NAME constant_builtins_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/constant_builtins_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(constant_builtins_test PROPERTIES TIMEOUT 60)
+    add_test(NAME slicing_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/slicing_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(slicing_test PROPERTIES TIMEOUT 60)
     add_test(NAME array_addition_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/array_addition_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(array_addition_test PROPERTIES TIMEOUT 60)

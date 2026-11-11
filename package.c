@@ -47,7 +47,7 @@ struct Symbol {
 struct Package {
     char *directory, *name;
     size_t id, order;
-    int state;
+    int state, externalTest;
     Module *module;
     File *files;
     Symbol *symbols;
@@ -62,6 +62,8 @@ struct packageBuild {
     Allocation *allocations;
     size_t nPackages, nFinished, nFiles;
     int errors;
+    const char *testDirectory;
+    int loadingExternal;
 };
 static void *alloc(packageBuild *b, size_t size) {
     void *data = calloc(1, size ? size : 1);
@@ -318,6 +320,13 @@ static char *standardSource(packageBuild *b) {
     return executable ? format(b, "%s/../src", parent(b, executable)) : NULL;
 }
 static Package *resolveImport(packageBuild *b, Package *from, const char *path) {
+    if (b->testDirectory && (!strcmp(path, "__ocean_test_internal") || !strcmp(path, "__ocean_test_external"))) {
+        int previous = b->loadingExternal;
+        b->loadingExternal = !strcmp(path, "__ocean_test_external");
+        Package *result = loadDirectory(b, b->testDirectory);
+        b->loadingExternal = previous;
+        return result;
+    }
     if (!validModulePath(path)) { error(b, from->directory, "invalid import path: %s", path); return NULL; }
     char *location = NULL;
     Module *module = from->module;
@@ -444,13 +453,26 @@ static void addSymbol(packageBuild *b, Package *package, stmt *declaration, toke
     s->qualified = format(b, "__pkg%zu_%s", package->id, name.lexeme);
     s->next = package->symbols; package->symbols = s;
 }
+static int testFilename(const char *name) {
+    size_t n = strlen(name);
+    return n >= 8 && !strcmp(name + n - 8, "_test.oc");
+}
+static int compareTestFiles(const void *left, const void *right) {
+    int a = testFilename(*(char *const *)left), b = testFilename(*(char *const *)right);
+    return a != b ? a - b : compareNames(left, right);
+}
 static Package *loadDirectory(packageBuild *b, const char *location) {
+    int target = b->testDirectory && !strcmp(location, b->testDirectory);
+    int external = target && b->loadingExternal;
+    /* The external package can import the internal package in this directory. */
+    b->loadingExternal = 0;
     for (Package *p = b->packages; p; p = p->next)
-        if (!strcmp(p->directory, location)) {
+        if (!strcmp(p->directory, location) && p->externalTest == external) {
             if (p->state == 1) error(b, location, "import cycle");
             return p;
         }
     Package *p = alloc(b, sizeof(*p));
+    p->externalTest = external;
     p->id = b->nPackages++; p->directory = pkgString(b, location); p->state = 1;
     p->module = findModule(b, location);
     p->next = b->packages; b->packages = p;
@@ -462,6 +484,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
     while ((entry = readdir(dir))) {
         size_t length = strlen(entry->d_name);
         if (length < 4 || strcmp(entry->d_name + length - 3, ".oc")) continue;
+        if (testFilename(entry->d_name) ? !target : external) continue;
         char *path = format(b, "%s/%s", location, entry->d_name);
         struct stat info;
         if (stat(path, &info) || !S_ISREG(info.st_mode)) continue;
@@ -475,20 +498,20 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         size_t length = strlen(path);
         if (!slash || (size_t)(slash - path) != strlen(location) ||
             strncmp(path, location, strlen(location)) || length < 3 || strcmp(path + length - 3, ".oc")) continue;
+        if (testFilename(path) ? !target : external) continue;
         size_t j = 0;
         while (j < count && strcmp(names[j], path)) j++;
         if (j < count) continue;
         if (count == capacity) { capacity *= 2; names = realloc(names, capacity * sizeof(*names)); }
         names[count++] = pkgString(b, path);
     }
-    qsort(names, count, sizeof(*names), compareNames);
-    if (!count) error(b, location, "directory contains no Ocean source files");
+    qsort(names, count, sizeof(*names), target && !external ? compareTestFiles : compareNames);
+    if (!count && !external) error(b, location, "directory contains no Ocean source files");
     File **tail = &p->files;
     for (size_t i = 0; i < count; i++) {
         File *file = alloc(b, sizeof(*file));
         file->id = b->nFiles++;
         file->path = names[i]; file->text = readFile(b, file->path);
-        *tail = file; tail = &file->next;
         if (!file->text) continue;
         char *display = relativeSourcePath(file->path);
         file->displayPath = pkgString(b, display ? display : file->path);
@@ -496,6 +519,20 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         tokenlist *tokens = scanTokens(file->text, file->displayPath);
         file->ast = parseTokensWithSource(tokens, file->text); free(tokens);
         file->ast.sourceFilename = file->displayPath; file->ast.sourceText = file->text;
+        if (target && testFilename(file->path) && file->ast.packageName) {
+            size_t n = strlen(file->ast.packageName);
+            const char *baseName = p->name;
+            if (external)
+                for (Package *base = b->packages; base; base = base->next)
+                    if (!base->externalTest && !strcmp(base->directory, location)) baseName = base->name;
+            int isExternal = n > 5 && !strcmp(file->ast.packageName + n - 5, "_test") &&
+                (!baseName || strcmp(file->ast.packageName, baseName));
+            if (isExternal != external) {
+                free(file->ast.statements); free(file->ast.packageName);
+                continue;
+            }
+        }
+        *tail = file; tail = &file->next;
         if (file->ast.hasError) { b->errors++; continue; }
         if (!file->ast.packageName) { error(b, file->path, "expected package declaration at the top of the file"); continue; }
         const char *packageName = file->ast.packageName;
@@ -551,6 +588,18 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         }
     }
     free(names);
+    if (target && !external) {
+        /* Read ordinary package headers first, then restore filename order for
+         * initialization and test discovery (even for packages named *_test). */
+        File *sorted = NULL;
+        while (p->files) {
+            File *file = p->files; p->files = file->next;
+            File **at = &sorted;
+            while (*at && strcmp((*at)->path, file->path) < 0) at = &(*at)->next;
+            file->next = *at; *at = file;
+        }
+        p->files = sorted;
+    }
     if (b->errors) { p->order = b->nFinished++; p->state = 2; return p; }
     for (File *file = p->files; file; file = file->next)
         for (size_t i = 0; i < file->ast.nStatements; i++) {
@@ -735,6 +784,11 @@ static void rewriteExpr(Rewrite *r, Local *scope, expr *e) {
         for (size_t i = 0; i < v->nParams; i++) rewriteExpr(r, scope, &v->params[i]);
         break;
     }
+    case EXPR_TYPE_SLICE: {
+        struct expr_slice *v = e->underlying;
+        rewriteExpr(r, scope, &v->parent);
+        rewriteExpr(r, scope, &v->start); rewriteExpr(r, scope, &v->end); break;
+    }
     case EXPR_TYPE_INDEX: {
         struct expr_index *v = e->underlying;
         rewriteExpr(r, scope, &v->parent); rewriteExpr(r, scope, &v->index); break;
@@ -890,6 +944,7 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
     }
     return scope;
 }
+static packageBuild *finishPackage(packageBuild *b);
 packageBuild *loadPackage(const char *location) {
     return loadPackageWithSources(location, NULL, 0);
 }
@@ -906,6 +961,9 @@ packageBuild *loadPackageWithSources(const char *location, const packageSource *
     }
     b->root = loadDirectory(b, path);
     if (b->errors || !b->root->name) return b;
+    return finishPackage(b);
+}
+static packageBuild *finishPackage(packageBuild *b) {
     b->program.packageName = b->root->name;
     b->program.isLibrary = strcmp(b->root->name, "main") != 0;
     Symbol *entry = symbol(b->root, "main");
@@ -951,6 +1009,61 @@ packageBuild *loadPackageWithSources(const char *location, const packageSource *
         b->program.sourceText = b->root->files->text;
     }
     return b;
+}
+packageBuild *loadTestPackage(const char *location, const char *harnessDirectory) {
+    packageBuild *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    char *path = canonical(b, location);
+    if (!path) { error(b, location, "location does not exist"); return b; }
+    if (!directory(path)) {
+        size_t n = strlen(path);
+        if (n < 3 || strcmp(path + n - 3, ".oc")) {
+            error(b, location, "expected an Ocean file or package directory"); return b;
+        }
+        path = parent(b, path);
+    }
+    b->testDirectory = path;
+    Package *internal = loadDirectory(b, path);
+    if (!b->errors && !internal->name) error(b, path, "no package under test; add ordinary source or same-package test files");
+    if (b->errors) return b;
+    b->loadingExternal = 1;
+    Package *external = loadDirectory(b, path);
+    if (b->errors) return b;
+    if (external->name && strcmp(external->name, format(b, "%s_test", internal->name))) {
+        error(b, path, "external test package must be %s_test", internal->name); return b;
+    }
+    char *text = NULL; size_t length = 0;
+    FILE *out = open_memstream(&text, &length);
+    if (!out) { error(b, path, "cannot create test harness"); return b; }
+    fprintf(out, "package main; import \"testing\"; import \"__ocean_test_internal\" as tested; ");
+    if (external->name) fprintf(out, "import \"__ocean_test_external\" as external; ");
+    fprintf(out, "func main() int { testing.Start(); ");
+    Package *targets[] = {internal, external};
+    for (size_t k = 0; k < 2; k++)
+      for (File *file = targets[k]->files; file; file = file->next) {
+        if (!testFilename(file->path)) continue;
+        for (size_t i = 0; i < file->ast.nStatements; i++) {
+            stmt *statement = &file->ast.statements[i];
+            if (statement->type != STMT_FUNC) continue;
+            struct stmt_func *f = statement->value;
+            if (f->receiverType.nTokens || strncmp(f->name.lexeme, "Test", 4)) continue;
+            if (f->isExtern || f->isVariadic || f->nTypeParams || f->nParams != 1 || f->nResults) {
+                error(b, file->path, "%s must have signature func %s(t *testing.T)", f->name.lexeme, f->name.lexeme);
+                continue;
+            }
+            fprintf(out, "testing.RunTest(\"%s\", %s.%s); ", f->name.lexeme, k ? "external" : "tested", f->name.lexeme);
+        }
+      }
+    fprintf(out, "return testing.Finish(); }");
+    fclose(out);
+    char *source = pkgString(b, text); free(text);
+    packageSource *overlay = alloc(b, sizeof(*overlay));
+    *overlay = (packageSource){format(b, "%s/runner.oc", harnessDirectory), source};
+    b->editorSources = overlay; b->nEditorSources = 1;
+    b->root = loadDirectory(b, harnessDirectory);
+    b->editorSources = NULL; b->nEditorSources = 0;
+    if (b->errors) return b;
+    return finishPackage(b);
 }
 parseResult *packagePartialProgram(packageBuild *b) {
     return b && b->program.nSources ? &b->program : NULL;

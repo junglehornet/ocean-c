@@ -876,3 +876,10 @@ unreachable sections. Merged `--emit-llvm` remains an inspection artifact.
 returns, mixed arrays, maps and embedded interfaces, pointer mutation and value
 receivers, explicit generic specializations, variadic packing/spread, string
 ownership, deferred calls, optimized LLVM, and package builds with cache reuse.
+
+`ocean_test_test.py` exercises `ocean test`, internal/external test packages,
+normal-build exclusion, fatal/panic/cleanup behavior, tang reports, JSON events,
+report files, and timeout handling against the matching standard library.
+
+`tests/slicing_test.py` checks half-open slices of arrays, buffers, and strings,
+independent nested storage, bound evaluation, generic results, and invalid bounds.
