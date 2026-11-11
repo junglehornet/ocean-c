@@ -15,6 +15,8 @@ Copy `grammar/` to `~/.config/helix/grammars/ocean/` and `queries/ocean/` to
 [language-server.ocean-lsp]
 command = "ocean"
 args = ["check", "--lsp"]
+# For a compiler in a development checkout, explicitly locate its standard library:
+# environment = { OCEAN_SRC = "/absolute/path/to/ocean-src" }
 
 [[language]]
 name = "ocean"
@@ -42,6 +44,12 @@ Helix after updating its grammar. For manual completion, set this in config.toml
 [keys.insert]
 C-space = "completion"
 ```
+
+An installed compiler normally finds its standard library in `../src` relative
+to its executable directory. A compiler run directly from a checkout needs
+`OCEAN_SRC` pointing at the matching standard-library source tree. Set the
+language server's `environment` as shown above when using a checkout executable;
+otherwise unresolved standard-library imports can prevent completion.
 
 The generated ABI 14 parser is included; installation needs a C compiler, but
 not the Tree-sitter CLI. After changing grammar.json, regenerate using CLI

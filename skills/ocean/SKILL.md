@@ -95,6 +95,10 @@ The maintained Helix token grammar and queries live in `editors/helix/` in the
 compiler checkout; see its README for installation and regeneration. In Helix,
 use `completion` for a manual completion key binding (for example Ctrl-Space);
 `signature_help` requests a separate feature that Ocean does not advertise.
+When an editor starts a checkout binary, set its server environment's `OCEAN_SRC`
+to the matching standard-library source tree. The installed-layout default
+`<executable-directory>/../src` usually does not exist for a checkout binary;
+unresolved standard-library imports can prevent semantic completion.
 
 Native objects are cached under `~/.cache/ocean-build`; override with
 `OCEAN_BUILD_CACHE` or set it to `off`. Package keys hash source contents/paths,
