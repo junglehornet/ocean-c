@@ -1,0 +1,100 @@
+==================
+Ocean literals, comments, Unicode, methods and keywords
+==================
+package main;
+/***/
+/* stars *** inside **/
+// return string should stay a comment, including n and r
+/* outer /* nested */ still a comment */
+struct Point { x int; }
+func (p Point) Value() int { return p.x; }
+func main() {
+    café := "line\nquote\"";
+    字 := '🌊';
+    raw := `hello
+world`;
+    a := 0x1a.f;
+    b := 1.25e-3;
+    c := '\u0041';
+}
+match (x := value) { Color.Red: {} }
+asm wasm { nop }
+
+---
+
+(source_file
+  (keyword)
+  (identifier)
+  (delimiter)
+  (comment)
+  (comment)
+  (comment)
+  (comment
+    (comment))
+  (keyword)
+  (identifier)
+  (block
+    (identifier)
+    (identifier)
+    (delimiter))
+  (keyword)
+  (parenthesized
+    (identifier)
+    (identifier))
+  (identifier)
+  (parenthesized)
+  (identifier)
+  (block
+    (keyword)
+    (identifier)
+    (delimiter)
+    (identifier)
+    (delimiter))
+  (keyword)
+  (identifier)
+  (parenthesized)
+  (block
+    (identifier)
+    (operator)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence))
+    (delimiter)
+    (identifier)
+    (operator)
+    (character)
+    (delimiter)
+    (identifier)
+    (operator)
+    (raw_string)
+    (delimiter)
+    (identifier)
+    (operator)
+    (number)
+    (delimiter)
+    (identifier)
+    (operator)
+    (number)
+    (delimiter)
+    (identifier)
+    (operator)
+    (character
+      (escape_sequence))
+    (delimiter))
+  (keyword)
+  (parenthesized
+    (identifier)
+    (operator)
+    (identifier))
+  (block
+    (identifier)
+    (delimiter)
+    (identifier)
+    (delimiter)
+    (block))
+  (keyword)
+  (identifier)
+  (block
+    (identifier)))

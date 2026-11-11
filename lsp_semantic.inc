@@ -186,13 +186,16 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
         edited = malloc(n + 48);
         memcpy(edited, doc->text, begin);
         edited[begin] = 0;
-        const char *replacement =
-            memberMode ? "oceanCompletionPlaceholder" : "oceanCompletionPlaceholder";
+        const char *replacement = "oceanCompletionPlaceholder";
         strcat(edited, replacement);
         size_t next = end;
         while (doc->text[next] == ' ' || doc->text[next] == '\t')
             next++;
-        if (!doc->text[next] || doc->text[next] == '\n' || doc->text[next] == '}')
+        size_t previous = begin;
+        while (previous && isspace((unsigned char)doc->text[previous - 1])) previous--;
+        int statementStart = previous && strchr("{;}", doc->text[previous - 1]);
+        if (!doc->text[next] || doc->text[next] == '\n' || doc->text[next] == '}' ||
+            (statementStart && wordLength(doc->text + next)))
             strcat(edited, ";");
         strcat(edited, doc->text + end);
     }
@@ -270,12 +273,16 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
                         exportedName(s->name) && !strncmp(s->name, prefix, prefixLength))
                         completionItem(out, &comma, s->name, s->type, s->kind);
                 }
-            } else
+            } else {
+                int exact = 0;
+                for (i = 0; i < index.nMembers; i++)
+                    if (!strcmp(index.members[i].use.filename, display) &&
+                        tokenPosition(doc->text, index.members[i].use) == begin) exact = 1;
                 for (i = index.nMembers; i-- > 0;) {
                     semanticMembers *group = &index.members[i];
                     if (strcmp(group->use.filename, display) ||
                         (tokenPosition(doc->text, group->use) != begin &&
-                         tokenPosition(doc->text, group->use) != receiverBegin))
+                         (exact || tokenPosition(doc->text, group->use) != receiverBegin)))
                         continue;
                     for (size_t j = 0; j < group->count; j++) {
                         semanticSymbol *s = &index.symbols[group->symbols[j]];
@@ -297,9 +304,18 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
                     }
                     break;
                 }
+            }
             free(imports.values);
             free(receiver);
         } else {
+            LspImports imports = {0};
+            visitPackageImports(build, collectImport, &imports);
+            for (i = 0; i < imports.count; i++)
+                if (!strcmp(imports.values[i].filename, display) &&
+                    identifierName(imports.values[i].alias) &&
+                    !strncmp(imports.values[i].alias, prefix, prefixLength))
+                    completionItem(out, &comma, imports.values[i].alias, "package", 9);
+            free(imports.values);
             for (i = 0; i < index.nSymbols; i++) {
                 semanticSymbol *s = &index.symbols[i];
                 if (s->member || s->packageId != packageId ||
@@ -307,7 +323,7 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
                     continue;
                 if (!s->global && (strcmp(s->declaration.filename, display) || cursor < s->begin ||
                                    cursor > s->end ||
-                                   (s->kind != 3 && s->kind != 7 &&
+                                   (s->kind != 7 &&
                                     tokenPosition(doc->text, s->declaration) > cursor)))
                     continue;
                 int shadowed = 0;
@@ -327,7 +343,8 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
             }
             const char *builtins[] = {"uint", "u64", "u32", "u16", "u8", "int",    "i8",  "i16",  "i32",    "i64", "float",
                                       "f32",    "f64", "bool", "string", "any", "array", "Result",
-                                      "buffer", "map", "delete", "len", "new", "free", "recover"};
+                                      "Optional", "buffer", "map", "delete", "len", "new", "make", "free", "recover",
+                                      "sizeof", "typeof", "zero"};
             for (i = 0; i < sizeof(builtins) / sizeof(*builtins); i++)
                 if (!strncmp(builtins[i], prefix, prefixLength))
                     completionItem(out, &comma, builtins[i], "builtin", 14);

@@ -1,0 +1,23 @@
+{
+  "grammars": [
+    {
+      "name": "ocean",
+      "camelcase": "Ocean",
+      "scope": "source.ocean",
+      "path": ".",
+      "file-types": [
+        "oc"
+      ],
+      "highlights": "../queries/ocean/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "description": "Ocean token grammar for Helix",
+    "authors": [
+      {
+        "name": "Ocean contributors"
+      }
+    ]
+  }
+}

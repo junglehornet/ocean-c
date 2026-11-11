@@ -2636,6 +2636,24 @@ static Type *expression(Context *c, expr *e) {
                 indexReference(c, member, reference);
                 return callable;
             }
+            if (c->index) {
+                semanticMembers group = {.use = member};
+                for (size_t j = 0; j < t->enumeration->nMembers; j++) {
+                    token name = t->enumeration->names[j];
+                    if (!exportedName(name.lexeme) && sourcePackage(c, name.filename) != sourcePackage(c, member.filename)) continue;
+                    Symbol *variantSymbol = allocate(c, sizeof(*variantSymbol));
+                    variantSymbol->name = name;
+                    variantSymbol->type = enumMemberType(c, t, name);
+                    size_t id = indexSymbol(c, variantSymbol);
+                    c->index->symbols[id].member = 1;
+                    c->index->symbols[id].kind = 20; // CompletionItemKind.EnumMember
+                    c->index->symbols[id].owner = t->enumeration->name;
+                    group.symbols = realloc(group.symbols, (group.count + 1) * sizeof(size_t));
+                    group.symbols[group.count++] = id;
+                }
+                c->index->members = realloc(c->index->members, (c->index->nMembers + 1) * sizeof(group));
+                c->index->members[c->index->nMembers++] = group;
+            }
             Type *variant = enumMemberType(c, t, member);
             if (variant == &unknown) return variant;
             *e = specializedEnumExpr(ENUM_VARIANT, variant, variant->enumMember - 1, (expr){0}, at);
@@ -3207,13 +3225,25 @@ static void finishIndex(Context *c){
     for(size_t i=0;i<index->nReferences+c->nCompletionTypes;i++){
         Type *original=i<index->nReferences?c->referenceTypes[i]:c->completionTypes[i-index->nReferences],*t=recordReceiver(representation(original));
         semanticMembers group={.use=i<index->nReferences?index->references[i].use:c->completionUses[i-index->nReferences],.collection=t->dynamicArray?1:!strcmp(t->name,"fixed-array")?2:0,.immutable=t->immutableString};
-        if(t->record){
+        if(t->record && !t->enumeration){
             for(size_t j=0;j<t->record->nFields;j++){
                 token name=t->record->fieldNames[j];
                 if(!exportedName(name.lexeme)&&sourcePackage(c,name.filename)!=sourcePackage(c,group.use.filename))continue;
                 Symbol *member=allocate(c,sizeof(*member));member->name=name;member->type=parameter(c,t,t->record->fieldTypes[j]);
                 size_t id=indexSymbol(c,member);index->symbols[id].member=1;index->symbols[id].owner=t->record->name;
                 group.symbols=realloc(group.symbols,(group.count+1)*sizeof(size_t));group.symbols[group.count++]=id;
+            }
+        }
+        if (t->interface) {
+            for (size_t j = 0; j < t->interface->nMethods; j++) {
+                struct stmt_func *f = &t->interface->methods[j];
+                Type *callable = allocate(c, sizeof(*callable));
+                callable->name = "function"; callable->function = f; callable->receiver = original;
+                Symbol *member = allocate(c, sizeof(*member)); member->name = f->name; member->type = callable;
+                size_t id = indexSymbol(c, member);
+                index->symbols[id].member = 1; index->symbols[id].owner = t->interface->name;
+                group.symbols = realloc(group.symbols, (group.count + 1) * sizeof(size_t));
+                group.symbols[group.count++] = id;
             }
         }
         for(size_t j=0;j<c->program->nStatements;j++)if(c->program->statements[j].type==STMT_FUNC){

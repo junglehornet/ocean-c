@@ -87,7 +87,14 @@ hover, navigation, references, and rename. Diagnostics stop after scanning, pars
 package resolution, and semantic analysis; the server does not run backend lowering,
 LLVM verification, or native compilation/linking and does not require Clang for
 validation. Use standalone `ocean check` to verify backend support and linking.
-Protocol positions use UTF-16.
+Protocol positions use UTF-16. Completion includes visible locals, parameters,
+package functions/types, import qualifiers, struct fields, interface/receiver
+methods, enum variants (including specialized generic enums), and collection
+operations. Names are filtered by the typed prefix and lexical scope.
+The maintained Helix token grammar and queries live in `editors/helix/` in the
+compiler checkout; see its README for installation and regeneration. In Helix,
+use `completion` for a manual completion key binding (for example Ctrl-Space);
+`signature_help` requests a separate feature that Ocean does not advertise.
 
 Native objects are cached under `~/.cache/ocean-build`; override with
 `OCEAN_BUILD_CACHE` or set it to `off`. Package keys hash source contents/paths,

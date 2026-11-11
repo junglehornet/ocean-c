@@ -102,6 +102,41 @@ func main() int {
         r=request('textDocument/completion',1,len('func main() { result := Result<int>.value(7); result.'))
         labels={item['label'] for item in r['result']['items']}
         assert {'unwrap','unwrapOrElse','unwrapOrZero'}<=labels,r
+        # Exercise complete tokens, empty scope, parameters, shadowing, and enums.
+        version = 11
+        def complete(buffer):
+            global version
+            version += 1
+            before, after = buffer.split('|')
+            edited = before + after
+            send('textDocument/didChange', {'textDocument': {'uri': source.as_uri(), 'version': version},
+                                          'contentChanges': [{'text': edited}]})
+            recv()
+            line = before.count('\n')
+            col = len(before.rsplit('\n', 1)[-1].encode('utf-16-le')) // 2
+            result = request('textDocument/completion', line, col)['result']
+            return {item['label']: item for item in result['items']}
+        items = complete('package main; func main() { local := 1; lo|cal; }')
+        assert 'local' in items, items
+        items = complete('package main; func use(param int) { local := 1; | } func main() {}')
+        assert {'param', 'local', 'use', 'helper', 'main', 'make', 'zero'} <= items.keys(), items
+        items = complete('package main; func main() { before := 1; { hidden := 2; } | later := 3; }')
+        assert 'before' in items and not {'hidden', 'later'} & items.keys(), items
+        items = complete('package main; func main() { value := 1; { value := "x"; val| } }')
+        assert items['value']['detail'] == 'string', items
+        items = complete('package main; enum Color { Red, Green, RGB(int, int, int) } func main() { Color.| }')
+        assert {'Red', 'Green', 'RGB'} <= items.keys(), items
+        assert items['Red']['kind'] == 20, items
+        items = complete('package main; enum Box<T> { Value(T), Empty } func main() { Box<int>.Va| }')
+        assert set(items) == {'Value'}, items
+        items = complete('package main; interface Reader { Read() int; } func use(r Reader) { r.| } func main() {}')
+        assert 'Read' in items, items
+        items = complete('package main; func main() { | callback := func() {}; }')
+        assert 'callback' not in items, items
+        items = complete('package main; import "example.com/lsp/lib"; func main() { li| }')
+        assert 'lib' in items, items
+        items = complete('package main; enum Color { Red, Green } func (c Color) Read() int { return 1; } func main() { Color.| }')
+        assert {'Red', 'Green'} <= items.keys() and 'Color' not in items, items
         send('shutdown',{},99);assert recv()['result'] is None;send('exit');assert server.wait(timeout=10)==0
         assert not server.stderr.read()
     finally:
