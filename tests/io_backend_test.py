@@ -48,6 +48,17 @@ func main() int {
 }
 ''', 'ab\n\nx12yQz\na{b\\q{c\\d\n0 12345 -987 -9223372036854775808\n7 -8 9 1.25\n2.00 -0.125\n2.0 1.25 2\n[1 3]\n[1 two true]\n[a b]\n[[1 2] [3]]\n', library=True)
 
+    # Byte arrays print numeric bytes; strings retain their text identity.
+    program(r'''func main() int {
+        bytes := i8[]{1, 5, 3}; Println(bytes);
+        Println(i8[]{}); Println(i8[]{-128, 0, 127});
+        Println("ans"->i8[]); Println("ans");
+        Println(Sprintf("bytes={}", bytes).unwrap());
+        Println(i8[][]{{1, 5}, {3}});
+        if (isString(bytes) || !isString("ans")) return 1;
+        return 0;
+    }''', '[1, 5, 3]\n[]\n[-128, 0, 127]\n[97, 110, 115]\nans\nbytes=[1, 5, 3]\n[[1, 5] [3]]\n', library=True)
+
     program(r'''func main() int {
         Println(Sprint(0->uint, 18446744073709551615->uint));
         Println(Sprint(18446744073709551615->u64, 4294967295->u32, 65535->u16, 255->u8));

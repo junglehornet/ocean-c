@@ -983,6 +983,10 @@ static int matchesConstraint(Backend *b, Kind pattern, Kind actual) {
     if (p->fixedArray && p->shape == 4)
         return a->fixedArray && matchesConstraint(b, p->element, a->element);
     if (p->shape == 4 && a->shape == 4) {
+        // Concrete string and byte-array cases have distinct boxed identities.
+        // Generic array constraints may still inspect a string's element type.
+        if (p->immutableString != a->immutableString &&
+            (p->immutableString || p->element != SCALAR_ANY)) return 0;
         if (a->fixedArray) return 0;
         if (!p->count && a->count) return 0;
         Kind bound = p->requirement ? p->requirement : p->element;

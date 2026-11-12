@@ -744,8 +744,12 @@ saved IR manually). Other architecture/platform combinations report unsupported
 output. Writes handle partial results and retry Unix interruptions; other output
 failures return error Results. Float formatting is portable Ocean code with exact binary64
 conversion and round-to-nearest, ties-to-even, independent of the C locale.
-Default printed floats retain two decimal places. Compiler runtime and boxed
-values still use native libraries/libffi; this does not make executables freestanding.
+Default printed floats retain two decimal places. Mutable `i8[]` values print as
+comma-separated decimal bytes, for example `[1, 5, 3]`; strings print as text.
+Use `bytes -> string` to print byte contents as text. Concrete `string` and
+`i8[]` type-switch cases are distinct, including inside nested collection types.
+Compiler runtime and boxed values still use native libraries/libffi; this does
+not make executables freestanding.
 
 ## Input scanning and files
 

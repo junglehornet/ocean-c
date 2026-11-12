@@ -105,6 +105,12 @@ func sprintItem(item any) string {
 			return sprintFloat(item.(f32)->float, 2);
 		case bool:
 			return item.(bool) ? "true" : "false";
+		case i8[]:
+			str := "[";
+			for (i, value := range item.(i8[])) {
+				str += (i > 0 ? ", " : "") + sprintInt(value->int);
+			}
+			return str + "]";
 		case string:
 			return item.(string);
 		case buffer:

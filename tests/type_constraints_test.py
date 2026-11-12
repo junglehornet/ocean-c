@@ -32,6 +32,25 @@ with tempfile.TemporaryDirectory(prefix="ocean constraints ") as directory:
         assert result.returncode != 0, body
         assert message in result.stdout + result.stderr, result.stdout + result.stderr
 
+    # Concrete string and mutable byte-array cases must agree with assertions.
+    program('''func stringFirst(x any) int { switch (v := x.(type)) {
+        case string: return v == "abc" ? 1 : 90;
+        case i8[]: return v[0]->int; default: return 91;
+    } }
+    func bytesFirst(x any) int { switch (v := x.(type)) {
+        case i8[]: return v[0]->int;
+        case string: return v == "abc" ? 1 : 92; default: return 93;
+    } }
+    func nested(x any) int { switch (v := x.(type)) {
+        case string[]: return len(v[0]);
+        case i8[][]: return v[0][0]->int; default: return 94;
+    } }
+    func main() int {
+        return stringFirst("abc") + stringFirst(i8[]{2}) +
+            bytesFirst("abc") + bytesFirst(i8[]{3}) +
+            nested(string[]{"abc"}) + nested(i8[][]{{4}});
+    }''', 14)
+
     # Built-in buffers follow the same bare/specialized constraint rules as structs.
     program("func classify(x any) int { switch (x.(type)) { case buffer: return 2; default: return 1; } } "
             "func main() int { a := buffer<int>[2]{1, 2}; b := buffer<bool>[1]{true}; "
