@@ -4,6 +4,8 @@ import json, os, select, subprocess, sys, tempfile
 compiler=str(Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix='ocean semantic lsp ') as d:
     root=Path(d);source=root/'main.oc';sibling=root/'other.oc'
+    standard=root/'std';standard.mkdir();(standard/'ocean.mod').write_text('module std\nocean 0.1\n')
+    (standard/'formatting').mkdir();(standard/'formatting'/'pretty.oc').write_text('/* header */ package pretty; func Print() {}')
     text='''package main;
 struct Person { Name string; Age int; }
 func (p Person) Read() int { return p.Age; }
@@ -16,7 +18,7 @@ func main() int {
 }
 '''
     source.write_text(text);sibling.write_text('package main; func helper() int { return 2; }')
-    server=subprocess.Popen([compiler,'check','--lsp'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0)
+    server=subprocess.Popen([compiler,'check','--lsp'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0,env={**os.environ,'OCEAN_SRC':str(standard)})
     seq=0
     def send(method,params=None,id=None):
         msg={'jsonrpc':'2.0','method':method}
@@ -105,13 +107,13 @@ func main() int {
         # Exercise complete tokens, empty scope, parameters, shadowing, and enums.
         version = 11
         def complete(buffer):
-            global version
+            global version, last_diagnostics
             version += 1
             before, after = buffer.split('|')
             edited = before + after
             send('textDocument/didChange', {'textDocument': {'uri': source.as_uri(), 'version': version},
                                           'contentChanges': [{'text': edited}]})
-            recv()
+            last_diagnostics = recv()['params']['diagnostics']
             line = before.count('\n')
             col = len(before.rsplit('\n', 1)[-1].encode('utf-16-le')) // 2
             result = request('textDocument/completion', line, col)['result']
@@ -137,6 +139,71 @@ func main() int {
         assert 'lib' in items, items
         items = complete('package main; enum Color { Red, Green } func (c Color) Read() int { return 1; } func main() { Color.| }')
         assert {'Red', 'Green'} <= items.keys() and 'Color' not in items, items
+        # Syntax, scanner, binding, and semantic failures must not hide valid symbols.
+        items = complete('package main; struct Person { Name string; } func main() { person := Person{}; broken := ; person.Na| }')
+        assert 'Name' in items and any('syntax' in x['message'] for x in last_diagnostics), (items, last_diagnostics)
+        items = complete('package main; func bad() { broken := ; } func main() { local := 1; lo| }')
+        assert 'local' in items, items
+        items = complete('package main; func main() { local := 1; @; lo| }')
+        assert 'local' in items and any('scanner' in x['message'] for x in last_diagnostics), (items, last_diagnostics)
+        items = complete('package main; func main() { local := 1; lo|')
+        assert 'local' in items, items
+        items = complete('package main; import "missing"; func main() { local := 1; lo| }')
+        assert 'local' in items and any('could not resolve import: missing' in d['message'] for d in last_diagnostics), (items, last_diagnostics)
+        items = complete('package main; func main() { bad: string = 7; local := 1; lo| }')
+        assert 'local' in items and any('expected string, got int' in x['message'] for x in last_diagnostics), (items, last_diagnostics)
+        # Malformed sibling files retain valid declarations and imports in this file.
+        sibling.write_text('package main; func broken() { bad := ; } func helper() int { return 2; }')
+        items = complete('package main; import "example.com/lsp/lib"; func main() { lib.Ma| }')
+        assert 'Make' in items, items
+        items = complete('package main; func main() { hel| }')
+        assert 'helper' in items, items
+        sibling.write_text('package main; func helper() int { return 2; }')
+        # Semantic diagnostics survive unrelated syntax errors and point at calls.
+        complete('package main;\nfunc take(x int) {}\nfunc main() {\n    broken := ;\n    take();\n    |\n}')
+        arity = [d for d in last_diagnostics if 'Expected 1 args, but got 0.' in d['message']]
+        assert arity and arity[0]['range']['start'] == {'line':4,'character':4}, last_diagnostics
+        complete('package main;\nimport "example.com/lsp/lib";\nfunc main() {\n    lib.Make(42); |\n}')
+        arity = [d for d in last_diagnostics if 'Expected 0 args, but got 1.' in d['message']]
+        assert arity and arity[0]['range']['start']['line'] == 3, last_diagnostics
+        # Package-name completion supplies an import edit, including declared names
+        # that differ from the directory basename. Existing bindings suppress it.
+        items = complete('package main; func main() { li| }')
+        assert items['lib']['detail'] == 'example.com/lsp/lib', items
+        edits = items['lib']['additionalTextEdits']
+        assert edits == [{'range':{'start':{'line':0,'character':13},'end':{'line':0,'character':13}},
+                          'newText':'\nimport "example.com/lsp/lib";'}], edits
+        items = complete('package main; func main() { pre| }')
+        assert items['pretty']['detail'] == 'formatting', items
+        assert items['pretty']['additionalTextEdits'][0]['newText'] == '\nimport "formatting";', items
+        items = complete('package main; import "example.com/lsp/lib"; func main() { li| }')
+        assert 'additionalTextEdits' not in items['lib'], items
+        items = complete('package main; func main() { lib := 1; li| }')
+        assert 'additionalTextEdits' not in items['lib'], items
+        items = complete('package main; import "example.com/lsp/lib" as renamed; func main() { li| }')
+        assert 'lib' not in items, items
+        # A syntax error in a test file must retain imports and semantic completion.
+        testfile = root/'other_test.oc'
+        testfile.write_text('package main; func brokenTest() { bad := ; }')
+        items = complete('package main; func main() { li| }')
+        assert items['lib']['detail'] == 'example.com/lsp/lib', items
+        testfile.unlink()
+        # Declared dependencies are discovered from local replacements without downloads.
+        replacement = root/'replacement'; replacement.mkdir()
+        (replacement/'ocean.mod').write_text('module example.com/dependency\nocean 0.1\n')
+        (replacement/'dep.oc').write_text('package dependency; func Export() {}')
+        manifest = root/'ocean.mod'
+        original = manifest.read_text()
+        manifest.write_text(original + 'replace example.com/dependency => ./replacement\n')
+        items = complete('package main; func main() { dep| }')
+        assert items['dependency']['detail'] == 'example.com/dependency', items
+        manifest.write_text(original)
+        # Apply both the chosen completion and the import, then complete its exports.
+        buffer = 'package main; func main() { lib.| }'
+        insert = edits[0]['range']['start']['character']
+        buffer = buffer[:insert] + edits[0]['newText'] + buffer[insert:]
+        items = complete(buffer)
+        assert {'Make','Thing'} <= items.keys(), items
         send('shutdown',{},99);assert recv()['result'] is None;send('exit');assert server.wait(timeout=10)==0
         assert not server.stderr.read()
     finally:

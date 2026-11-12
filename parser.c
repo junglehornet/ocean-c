@@ -25,6 +25,7 @@ typedef struct parserState {
     char hasError;
     char isSynchronizing;
     char quietErrors;
+    char recoverStatements;
     char probingLabelType;
     char pendingGreater; // Second half of >> while closing nested angle types.
     char allowTypeGuard;
@@ -3091,8 +3092,26 @@ static stmtlist *parseBlock(parserState *state) {
     *statements = (stmtlist){0};
     init_stmtlist(statements);
     while (tok.type != RIGHT_CURLY_BRACE && tok.type != EOF_TOKEN) {
+        size_t start = state->tokenIndex;
         stmt statement = parseStatement(state);
-        if (state->isSynchronizing) {
+        if (state->isSynchronizing && state->recoverStatements) {
+            // Discard only the damaged statement, balancing nested blocks.
+            size_t braces = 0;
+            for (size_t i = start; i < state->tokenIndex; i++) {
+                if (state->tokens[i].type == LEFT_CURLY_BRACE) braces++;
+                else if (state->tokens[i].type == RIGHT_CURLY_BRACE && braces) braces--;
+            }
+            while (currentToken(state).type != EOF_TOKEN) {
+                token next = currentToken(state);
+                if (!braces && next.type == RIGHT_CURLY_BRACE) break;
+                advance(state);
+                if (next.type == LEFT_CURLY_BRACE) braces++;
+                else if (next.type == RIGHT_CURLY_BRACE && braces) braces--;
+                if (!braces && next.type == SEMICOLON) break;
+            }
+            state->hasError = 1;
+            state->isSynchronizing = 0;
+        } else if (state->isSynchronizing) {
             free_stmtlist(statements);
             free(statements);
             return nullptr;
@@ -3102,6 +3121,10 @@ static stmtlist *parseBlock(parserState *state) {
     if (tok.type == EOF_TOKEN) {
         diagnostic(state->source, tok, "syntax", "error", "Expected end of block");
         state->hasError = state->isSynchronizing = 1;
+        if (state->recoverStatements) {
+            state->isSynchronizing = 0;
+            return statements;
+        }
         free_stmtlist(statements);
         free(statements);
         return nullptr;
@@ -3119,6 +3142,7 @@ static char parseImportEntry(parserState *state, stmtlist *statements) {
     }
     if (tok.type != LITERAL_STRING)
         return signatureError(state, "Expected quoted import path");
+    token location = tok;
     char *path = tok.lexeme;
     if (!path || !*path) return signatureError(state, "Import path must not be empty");
     tok = advance(state);
@@ -3133,7 +3157,7 @@ static char parseImportEntry(parserState *state, stmtlist *statements) {
     struct stmt_import *node = malloc(sizeof(*node));
     CHECK_MALLOC(node);
     *node = (struct stmt_import){.path = path, .importedName = alias};
-    push_stmtlist(statements, (stmt){.type = STMT_IMPORT, .value = node});
+    push_stmtlist(statements, (stmt){.type = STMT_IMPORT, .value = node, .location = location});
     return 1;
 }
 
@@ -3189,13 +3213,20 @@ static void recoverTopLevel(parserState *state, size_t start) {
 }
 
 parseResult parseTokens(tokenlist *tokensList) { return parseTokensWithSource(tokensList, NULL); }
+static parseResult parseTokensMode(tokenlist *tokensList, const char *source, int recovery);
 parseResult parseTokensWithSource(tokenlist *tokensList, const char *source) {
+    return parseTokensMode(tokensList, source, 0);
+}
+parseResult parseTokensForEditor(tokenlist *tokensList, const char *source) {
+    return parseTokensMode(tokensList, source, 1);
+}
+static parseResult parseTokensMode(tokenlist *tokensList, const char *source, int recovery) {
     parseResult result = {.sourceText = source};
     if (!tokensList || tokensList->top <= 0 || !tokensList->arr) {
         result.hasError = 1;
         return result;
     }
-    parserState state = {.tokens = to_tokenarray(tokensList), .tokensLen = tokensList->top, .source = source};
+    parserState state = {.tokens = to_tokenarray(tokensList), .tokensLen = tokensList->top, .source = source, .recoverStatements = recovery};
     stmtlist statements = {0};
     init_stmtlist(&statements);
     // Require the scanner's EOF sentinel before exposing tokens to the parser.

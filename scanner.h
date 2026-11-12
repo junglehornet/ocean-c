@@ -14,6 +14,8 @@ struct scannerState {
 };
 
 tokenlist *scanTokens(char *source, char *filename);
+/* Best-effort tokens for editor workers; scanner diagnostics are still emitted. */
+tokenlist *scanTokensForEditor(char *source, char *filename);
 
 void printTokensFromFile(char *filename, tokenlist *list);
 
