@@ -112,6 +112,16 @@ static void error(Context *c, token t, const char *message) {
                t.lexeme ? ": " : "", t.lexeme ? t.lexeme : "");
     c->errors++;
 }
+// Count errors describe the use site without appending a mangled declaration name.
+static void countError(Context *c, token at, const char *kind, size_t expected,
+                       size_t actual, int minimum) {
+    at = diagnosticLocation(c, at);
+    diagnostic(programSource(c->program, at.filename), at, "semantic", "error",
+               "%s count mismatch: Expected %s%zu %s, but got %zu.",
+               kind, minimum ? "at least " : "", expected,
+               !strcmp(kind, "argument") ? "args" : "return values", actual);
+    c->errors++;
+}
 static Symbol *lookup(Context *c, const char *name) {
     if (!name)
         return NULL;
@@ -692,6 +702,7 @@ static void formatType(FILE *out, Type *t, unsigned depth) {
         fputs(t->spelling, out);
         return;
     }
+    if (t->immutableString) { fputs("string", out); return; }
     if (t->function) {
         struct stmt_func *f = t->function;
         fputs("func(", out);
@@ -1041,7 +1052,7 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
             error(c, at, "multiple-return call must be the only expression in a value list");
         }
         if (t == &nothing)
-            error(c, at, "function returns no value");
+            error(c, values[i].location, "function returns no value");
         list.items[i] = t;
     }
     return list;
@@ -2264,7 +2275,10 @@ static Type *expression(Context *c, expr *e) {
                     check(c, parameter(c, t, f->paramTypeNames[f->nParams - 1]), last->element, at);
             }
         } else if (f && (args.count < fixed || (!f->isVariadic && args.count != fixed)))
-            error(c, f->name, "argument count mismatch");
+            countError(c, callee->type == EXPR_TYPE_DOT
+                              ? ((struct expr_dot *)callee->underlying)->field.location
+                              : callee->location,
+                       "argument", fixed, args.count, f->isVariadic);
         for (size_t i = 0; f && i < args.count; i++) {
             if (v->spread && i + 1 == args.count)
                 continue;
@@ -2959,9 +2973,9 @@ static void statement(Context *c, stmt *s) {
         Type **expected = allocate(c, sizeof(Type *) * (f->nResults + 1));
         for (size_t i = 0; i < f->nResults; i++)
             expected[i] = typeOf(c, f->resultTypes[i]);
-        TypeList values = valueTypes(c, v->values, v->nValues, expected, f->nResults, f->name, 0);
+        TypeList values = valueTypes(c, v->values, v->nValues, expected, f->nResults, at, 0);
         if (values.count != f->nResults && !(named && !v->nValues))
-            error(c, f->name, "return count mismatch");
+            countError(c, at, "return", f->nResults, values.count, 0);
         for (size_t i = 0; i < values.count && i < f->nResults; i++)
             check(c, expected[i], values.items[i],
                   v->values[values.count == v->nValues ? i : 0].location);

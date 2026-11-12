@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory(prefix="ocean semantic diagnostics ") as direct
     output = Path(directory) / "output"
     display_source = os.path.relpath(source)
 
-    def mismatch(text, expected, actual, marker, focus):
+    def diagnostic_case(text, message, marker, focus):
         global checks
         text = "package main;\n" + text
         source.write_bytes(text.encode())
@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix="ocean semantic diagnostics ") as direct
                                     capture_output=True, timeout=10)
             report = result.stderr
             assert result.returncode == 1, result
-            assert f"[{display_source}:{number}:{column}]: semantic error: type mismatch: expected {expected}, got {actual}\n" in report, report
+            assert f"[{display_source}:{number}:{column}]: semantic error: {message}\n" in report, report
             assert "<source>" not in report and ":0:0" not in report, report
             snippet = f" {number} | {line}"
             assert snippet in report, report
@@ -34,6 +34,49 @@ with tempfile.TemporaryDirectory(prefix="ocean semantic diagnostics ") as direct
                 "\t" if ch == "\t" else " " for ch in line[:column - 1]) + "^", report
             assert output.read_text() == "previous output"
             checks += 1
+
+    def mismatch(text, expected, actual, marker, focus):
+        diagnostic_case(text, f"type mismatch: expected {expected}, got {actual}", marker, focus)
+
+    def count_case(text, kind, expected, actual, marker, focus, minimum=False):
+        noun = "args" if kind == "argument" else "return values"
+        diagnostic_case(text, f"{kind} count mismatch: Expected "
+                        f"{'at least ' if minimum else ''}{expected} {noun}, but got {actual}.",
+                        marker, focus)
+
+    count_case("func take(x int) {}\nfunc main() {\n    take();\n}",
+               "argument", 1, 0, "take();", "take")
+    count_case("func take() {}\nfunc main() {\n    take(1, 2);\n}",
+               "argument", 0, 2, "take(1", "take")
+    count_case("func take(n int, xs ...int) {}\nfunc main() {\n    take();\n}",
+               "argument", 1, 0, "take();", "take", True)
+    count_case("struct S {}\nfunc (s S) take(x int) {}\nfunc main() {\n    s := S{};\n    s.take();\n}",
+               "argument", 1, 0, "s.take();", "take")
+    count_case("func take<T>(x T) {}\nfunc main() {\n    take<int>();\n}",
+               "argument", 1, 0, "take<int>();", "take")
+    count_case("func take(x int) {}\nfunc main() {\n    callback := take;\n    callback();\n}",
+               "argument", 1, 0, "callback();", "callback")
+    count_case("func pair() (int, int) { return 1, 2; }\nfunc take(x int) {}\nfunc main() {\n    take(pair());\n}",
+               "argument", 1, 2, "take(pair());", "take")
+    count_case("func bad() int {\n    return;\n}\nfunc main() {}",
+               "return", 1, 0, "return;", "return")
+    count_case("func bad() {\n    return 1;\n}\nfunc main() {}",
+               "return", 0, 1, "return 1;", "return")
+    count_case("func bad() (int, bool) {\n    return 1;\n}\nfunc main() {}",
+               "return", 2, 1, "return 1;", "return")
+    count_case("func pair() (int, int) { return 1, 2; }\nfunc bad() int {\n    return pair();\n}\nfunc main() {}",
+               "return", 1, 2, "return pair();", "return")
+    mismatch("func take(x string) {}\nfunc main() {\n    take(42);\n}",
+             "string", "int", "take(42)", "42")
+    mismatch("func bad() string {\n    return 42;\n}\nfunc main() {}",
+             "string", "int", "return 42", "42")
+    mismatch("func pair() (int, int) { return 1, 2; }\nfunc bad() (string, int) {\n    return pair();\n}\nfunc main() {}",
+             "string", "int", "return pair", "(")
+    (Path(directory) / "helper").mkdir()
+    (Path(directory) / "helper" / "helper.oc").write_text("package helper;\nfunc Take(value int) {}\n")
+    (Path(directory) / "ocean.mod").write_text("module diagnostics\nocean 0.1\n")
+    count_case('import "helper";\nfunc main() {\n    helper.Take();\n}',
+               "argument", 1, 0, "helper.Take();", ".")
 
     mismatch("struct Node<T any> { value T; next *Node; }\n"
              "func (n *Node<T>) length() int {\n"
@@ -50,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix="ocean semantic diagnostics ") as direct
     mismatch("func main() {\n\tif (1) {}\n}", "bool", "int", "if (", "1")
     mismatch("func main() {\n\tfor (1) {}\n}", "bool", "int", "for (", "1")
     mismatch("func main() {\n\tx := true ? 1 : false;\n}", "int", "bool", "x :=", "?")
-    mismatch('func bad() int {\n\treturn "bad";\n}\nfunc main() {}', "int", "i8[]", "return", '"bad"')
+    mismatch('func bad() int {\n\treturn "bad";\n}\nfunc main() {}', "int", "string", "return", '"bad"')
     mismatch("func takes(x bool) {}\nfunc main() {\n\ttakes(\n\t\t42\n\t);\n}", "bool", "int", "42", "42")
     mismatch("func main() {\n\ta := {1, 2};\n\tx := a[1.5];\n}", "int", "float", "a[", "1.5")
     mismatch("struct Point { value bool; }\nfunc main() {\n\tp := Point{value: 7};\n}", "bool", "int", "p :=", "7")

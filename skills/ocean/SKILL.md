@@ -12,6 +12,11 @@ examples. Parser acceptance alone does not establish backend support. Prefer
 `ocean check` to validate complete programs. This file is self-contained so it can
 be downloaded and installed as `ocean/SKILL.md` in an agent's skills directory.
 
+Argument-count errors point at the call and report expected and actual counts
+(including the minimum for variadic functions). Return-count errors point at the
+return statement. Type mismatches show expected and actual Ocean types at the
+argument or returned expression; strings display as `string`.
+
 ## Tooling and build workflow
 
 An installed compiler is named `ocean`; `ocean-c` accepts the same interface.
