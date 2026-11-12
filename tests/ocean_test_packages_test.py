@@ -23,9 +23,17 @@ with tempfile.TemporaryDirectory(prefix='ocean-packages-') as temp:
  assert r.stdout==events.read_text()
  assert 'example.test/project/a' in report.read_text() and 'example.test/project/b' in report.read_text()
  assert report.read_text().count('raw package output') == 2
+ assert report.read_text().count('─── Summary') == 1
+ assert '(2 packages)' in report.read_text()
+ totals=report.read_text().split('(2 packages)',1)[1].splitlines()[0].split()
+ assert totals[:4]==['4','0','0','4'],totals
+ text=run('a','b').stdout
+ assert text.count('─── Summary')==1 and '(2 packages)' in text
  run('a','b','--outfile',root/'b/suite_test.oc',bad=True)
  assert (root/'b/suite_test.oc').read_text().startswith('package suite;')
  (root/'a/suite_test.oc').write_text('package suite; import "testing"; func TestSame(t *testing.T) { t.Fatal("failure"); }')
+ failed_report=run('a','b',bad=True).stdout
+ assert failed_report.count('─── Summary')==1 and '(2 packages)' in failed_report and 'FAIL' in failed_report
  assert packages(run('a','b','--json',bad=True))==['example.test/project/a','example.test/project/b']
  (root/'empty').mkdir(); run('empty/...',bad=True)
  master,slave=pty.openpty(); old=termios.tcgetattr(slave)

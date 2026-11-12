@@ -1978,3 +1978,8 @@ ocean test engine parser
 ocean test ./...
 ocean test engine/... -t 4
 ```
+
+Multi-package test runs print one combined Summary table with a row per package,
+aggregate passed/failed/skipped/total counts, and total command wall time.
+Package rows retain their individual elapsed times; failure details remain
+grouped by package. Saved text reports use the same combined summary.

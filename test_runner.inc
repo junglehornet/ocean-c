@@ -294,20 +294,7 @@ static void testDuration(double elapsed, char text[48]) {
     }
 }
 static int testDigits(int n) { int width = 1; while (n >= 10) { n /= 10; width++; } return width; }
-static void testSummary(testReporter *r, double elapsed, int status) {
-    int total = r->passed + r->failed + r->skipped;
-    int widths[] = {testDigits(r->passed), testDigits(r->failed), testDigits(r->skipped), testDigits(total)};
-    char duration[48]; testDuration(elapsed, duration);
-    int timeWidth = (int)strlen(duration);
-    int statusWidth = status ? 4 : 2;
-    int nameWidth = (int)strlen(r->package);
-    if (nameWidth + statusWidth + 4 < 13) nameWidth = 13 - statusWidth - 4;
-    int countWidth = widths[0] + widths[1] + widths[2] + widths[3] + 9;
-    if (nameWidth + statusWidth + 4 + countWidth + timeWidth + 4 > 150)
-        nameWidth = 150 - statusWidth - 4 - countWidth - timeWidth - 4;
-    if (nameWidth < 1) nameWidth = 1;
-    int labelWidth = statusWidth + 4 + nameWidth;
-    int lineWidth = labelWidth + countWidth + timeWidth + 4;
+static void testDetails(testReporter *r, int lineWidth, int status) {
     int details = 0;
     if (r->packageOutputSize) {
         testPrint(r, "─── Messages "); testRule(r, lineWidth - 13);
@@ -330,6 +317,22 @@ static void testSummary(testReporter *r, double elapsed, int status) {
     }
     if (details) testPrint(r, "\n");
     if (status && (!r->completed || !r->failed)) testPrint(r, "✗ %s: test process exited before completing (status %d)\n", r->package, status);
+}
+static void testSummary(testReporter *r, double elapsed, int status) {
+    int total = r->passed + r->failed + r->skipped;
+    int widths[] = {testDigits(r->passed), testDigits(r->failed), testDigits(r->skipped), testDigits(total)};
+    char duration[48]; testDuration(elapsed, duration);
+    int timeWidth = (int)strlen(duration);
+    int statusWidth = status ? 4 : 2;
+    int nameWidth = (int)strlen(r->package);
+    if (nameWidth + statusWidth + 4 < 13) nameWidth = 13 - statusWidth - 4;
+    int countWidth = widths[0] + widths[1] + widths[2] + widths[3] + 9;
+    if (nameWidth + statusWidth + 4 + countWidth + timeWidth + 4 > 150)
+        nameWidth = 150 - statusWidth - 4 - countWidth - timeWidth - 4;
+    if (nameWidth < 1) nameWidth = 1;
+    int labelWidth = statusWidth + 4 + nameWidth;
+    int lineWidth = labelWidth + countWidth + timeWidth + 4;
+    testDetails(r, lineWidth, status);
     /* Match tang's static Summary table: zero package counts are blank,
      * totals include zeroes, count columns align with the symbol header. */
     for (int row = 0; row < 2; row++) {

@@ -7,6 +7,63 @@ typedef struct packageRun {
     double started, elapsed;
     testReporter reporter;
 } packageRun;
+static void packageSummary(packageRun *runs, size_t count, double elapsed) {
+    if (!count) return;
+    testReporter *out = &runs[0].reporter;
+    int totals[4] = {0}, widths[4] = {1,1,1,1}, nameWidth = 5, statusWidth = 2;
+    char totalTime[48]; testDuration(elapsed, totalTime);
+    int timeWidth = (int)strlen(totalTime);
+    for (size_t i = 0; i < count; i++) {
+        testReporter *r = &runs[i].reporter;
+        int n = (int)strlen(r->package); if (n > nameWidth) nameWidth = n;
+        if (runs[i].status) statusWidth = 4;
+        int values[] = {r->passed, r->failed, r->skipped, r->passed+r->failed+r->skipped};
+        for (int j = 0; j < 4; j++) totals[j] += values[j];
+        char duration[48]; testDuration(runs[i].elapsed > 0 ? runs[i].elapsed : elapsed, duration);
+        if ((int)strlen(duration) > timeWidth) timeWidth = (int)strlen(duration);
+    }
+    for (int j = 0; j < 4; j++) widths[j] = testDigits(totals[j]);
+    char label[64]; snprintf(label, sizeof(label), "(%zu packages)", count);
+    int minLabel = (int)strlen(label); if (minLabel < 13) minLabel = 13;
+    if (nameWidth + statusWidth + 4 < minLabel) nameWidth = minLabel - statusWidth - 4;
+    int countsWidth = widths[0]+widths[1]+widths[2]+widths[3]+9;
+    int maxName = 150 - statusWidth - 4 - countsWidth - timeWidth - 4;
+    if (maxName < 1) maxName = 1;
+    if (nameWidth > maxName) nameWidth = maxName;
+    int labelWidth = statusWidth + 4 + nameWidth;
+    int lineWidth = labelWidth + countsWidth + timeWidth + 4;
+    for (size_t i = 0; i < count; i++) testDetails(&runs[i].reporter, lineWidth, runs[i].status);
+    for (size_t row = 0; row <= count; row++) {
+        if (row == 0 || row == count) {
+            if (!row) { testPrint(out, "─── Summary "); testRule(out, labelWidth + widths[0] - 12); }
+            else testRule(out, labelWidth + widths[0]);
+            const char *icons[] = {"✓", "✗", "∅", "∑"};
+            for (int j = 0; j < 4; j++) {
+                testPrint(out, " %s ", icons[j]);
+                testRule(out, j == 3 ? (timeWidth > 1 ? timeWidth-1 : 1) : widths[j+1]);
+            }
+            testPrint(out, " ⏱\n");
+        }
+        int values[4]; char duration[48];
+        if (row < count) {
+            packageRun *p = &runs[row]; testReporter *r = &p->reporter;
+            const char *color = out->color ? (p->status ? "\033[31m" : "\033[32m") : "";
+            testPrint(out, "%s%-*s%s    %-*.*s  ", color, statusWidth, p->status ? "FAIL" : "ok",
+                      out->color ? "\033[0m" : "", nameWidth, nameWidth, r->package);
+            values[0]=r->passed; values[1]=r->failed; values[2]=r->skipped; values[3]=r->passed+r->failed+r->skipped;
+            testDuration(p->elapsed > 0 ? p->elapsed : elapsed, duration);
+        } else {
+            testPrint(out, "%-*s  ", labelWidth, label);
+            memcpy(values, totals, sizeof(values)); strcpy(duration, totalTime);
+        }
+        for (int j = 0; j < 4; j++) {
+            if (j) testPrint(out, "   ");
+            if (row < count && !values[j]) testPrint(out, "%*s", widths[j], "");
+            else testPrint(out, "%*d", widths[j], values[j]);
+        }
+        testPrint(out, "  %*s\n", timeWidth, duration);
+    }
+}
 static void packageLine(packageRun *p, const char *line) {
     char *action = testField(line, "Action");
     if (!strcmp(action, "acquire")) p->pending++;
@@ -197,7 +254,7 @@ static int testPackages(int argc, char **flags, int nflags, testLocations *list,
         }
     }
     if (interrupted) status = 128 + interrupted;
-    for (size_t i = 0; i < next; i++) testSummary(&runs[i].reporter, runs[i].elapsed > 0 ? runs[i].elapsed : testClock() - runs[i].started, runs[i].status);
+    packageSummary(runs, next, testClock() - start);
     testStopDisplay(&multiUI, testClock() - start, status);
     if (multiUI.report) {
         rewind(multiUI.report); char bytes[8192]; size_t n;
