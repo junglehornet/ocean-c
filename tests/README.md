@@ -888,3 +888,11 @@ independent nested storage, bound evaluation, generic results, and invalid bound
 same-package and external test sources and test entry signatures without executing
 tests, while normal builds and dependency loading exclude test sources.
 `lsp_test.py` covers unsaved same-package and external test diagnostics and fixes.
+
+`ocean_test_tui_test.py` validates the Ocean `term/tui` test frontend with a
+pseudo-terminal: incremental completion, nested tests, resize/input, NO_COLOR,
+Ctrl+C, external signals, timeout, renderer crashes, and noninteractive modes.
+
+`ocean_test_parallel_test.py` checks the default 16-worker pool, explicit worker
+counts, OS thread reuse, shared-queue scheduling, worker replacement after fatal
+failures/skips, async subtests beyond the pool limit, and parent cleanup ordering.

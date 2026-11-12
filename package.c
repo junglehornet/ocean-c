@@ -1070,6 +1070,14 @@ static packageBuild *loadTestPackageWithSources(const char *location, const char
     if (b->errors) return b;
     return finishPackage(b);
 }
+packageBuild *loadTestDisplay(void) {
+    packageBuild *lookup = calloc(1, sizeof(*lookup));
+    if (!lookup) return NULL;
+    const char *root = standardSource(lookup);
+    packageBuild *result = root ? loadPackage(format(lookup, "%s/testing/internal/display", root)) : NULL;
+    freePackage(lookup);
+    return result;
+}
 packageBuild *loadTestPackage(const char *location, const char *harnessDirectory) {
     return loadTestPackageWithSources(location, harnessDirectory, NULL, 0);
 }

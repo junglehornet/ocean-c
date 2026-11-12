@@ -1021,20 +1021,68 @@ production `main` function is preserved for normal builds and replaced by the
 generated test entry point only in test builds. Imported packages' tests do not
 run as part of the target package's suite.
 
-`testing.T` supports `Run(name, callback) bool`, `Error`, `Errorf`, `Fatal`,
+`testing.T` supports `Run(name, callback) bool`, `Parallel(name, callback)`,
+`Error`, `Errorf`, `Fatal`,
 `Fatalf`, `Fail`, `FailNow`, `Failed`, `Log`, `Logf`, `Skip`, `Skipf`, `SkipNow`,
 `Skipped`, `Name`, `Cleanup`, and `Helper`. Format methods use Ocean's `{}`
 format placeholders. `Error` marks failure and continues; `Fatal` stops the
 current test, runs its defers and cleanup callbacks, and lets other tests run.
 `Run` waits for its subtest and cleanups, returns false on failure, and propagates
-failure to the parent. Tests and subtests run sequentially on managed native
-threads. `Cleanup` callbacks run in reverse order, including after fatal errors
+failure to the parent. `Cleanup` callbacks run in reverse order, including after fatal errors
 and panics. A panic fails the current test; subsequent tests continue. `Helper`
 is accepted but does not currently alter source-location reporting. There is no
-parallel-test or benchmark API yet. Do not call fatal/skip methods from a thread
+benchmark API yet. Do not call fatal/skip methods from a thread
 created by the test; they terminate their calling thread.
 
-The default report follows [tang](https://github.com/ansel1/tang)'s static
+Top-level `Test*` functions run through one shared work queue with up to 16
+managed OS worker threads by default (or fewer when there are fewer tests).
+Each worker pulls another function when it finishes. Use `-t N` to choose a
+positive worker count or `--single-threaded` for one top-level worker. Workers
+are reused across tests; workers stopped by Fatal, skips, or threads.Return
+are joined and replaced when pending work remains.
+
+`t.Run(name, callback) bool` starts a synchronous subtest and waits for its
+completion and cleanup. `t.Parallel(name, callback)` starts an asynchronous
+subtest on an additional OS thread and returns immediately, with no result.
+The pool limit does not cap subtest threads: Parallel may start more than 16
+children, including with `-t 1` or `--single-threaded`. This is an async version
+of Run, rather than Go’s no-argument Parallel scheduling marker.
+
+After a parent body returns or stops, the runner joins all of its async children
+before running the parent’s Cleanup callbacks and reporting its final status.
+This applies recursively to nested subtests. Child failures propagate to the
+parent. Ordinary defers run when the body exits; use `t.Cleanup` for resources
+that async children still need. Subtests cannot be started from cleanup.
+`testing.T` synchronizes its failure/skip flags, cleanup registrations, and
+subtest bookkeeping, and serializes log events. Protect shared test fixtures
+with synchronization or use `--single-threaded` for sequential top-level tests.
+
+```ocean
+func TestConcurrent(t *testing.T) {
+    t.Parallel("first", func(t *testing.T) { /* first check */ });
+    t.Parallel("second", func(t *testing.T) { /* second check */ });
+    // Both subtests can run before this body returns.
+}
+```
+
+Interactive terminals show a live [tang](https://github.com/ansel1/tang)-style
+TUI implemented in Ocean with `term/tui`. It updates running and completed tests,
+nested subtests, live output, status counts (▶ / ⏸ / ✓ / ✗ / ∅ / ∑), and elapsed
+time. The frontend handles terminal resizing; use ↑/↓ or Page Up/Page Down to
+scroll, `f` or End to follow recent tests, and `q` or Ctrl+C to stop the suite.
+After execution, the live view is cleared and the final report is printed.
+
+The TUI requires terminal stdin/stdout and a TERM other than `dumb`.
+`--notty` (also `-notty` or `--no-tui`) disables it. `--json` and redirected
+output always use their noninteractive formats. `NO_COLOR` and `--no-color`
+disable colors while retaining live progress and terminal redraw controls.
+The frontend is shipped in `testing/internal/display` and uses `term/tui` from
+the selected standard library. It is compiled and cached separately from the
+test executable. If the frontend is unavailable, the final report still works.
+While the TUI owns keyboard input, tests receive EOF on stdin; use `--notty`
+for tests that need stdin. Test stdout/stderr remain captured in all modes.
+
+The final report follows [tang](https://github.com/ansel1/tang)'s static
 Messages/Summary format: nested failure and skip details, aligned package and
 suite counts under ✓ / ✗ / ∅ / ∑ / ⏱ headers, and elapsed durations. Passing
 details are hidden unless requested. `NO_COLOR` (including an empty value) or
@@ -1043,7 +1091,10 @@ files are plain text. The report counts both tests and subtests, as tang does.
 
 ```sh
 ocean test .
-ocean test . -v                         # include passed tests and logs
+ocean test . -v                         # include passed tests in the final report
+ocean test . --notty                    # disable the live TUI
+ocean test . -t 4                       # up to four top-level workers
+ocean test . --single-threaded          # one top-level worker
 ocean test . --json                     # JSON events on stdout
 ocean test . --outfile results.txt      # save the plain report too
 ocean test . --jsonfile results.jsonl    # save JSON events too

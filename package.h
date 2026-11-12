@@ -7,6 +7,8 @@ int validModulePath(const char *path);
 packageBuild *loadPackage(const char *location);
 /* Build a synthetic executable containing only the target package's tests. */
 packageBuild *loadTestPackage(const char *location, const char *harnessDirectory);
+/* Source frontend shipped with the selected standard library. */
+packageBuild *loadTestDisplay(void);
 /* Borrowed absolute paths and editor buffers, valid until freePackage. */
 typedef struct packageSource { const char *path, *text; } packageSource;
 packageBuild *loadPackageWithSources(const char *location, const packageSource *sources, size_t count);

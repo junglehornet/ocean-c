@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <stdarg.h>
 #include <time.h>
+#include <termios.h>
 
 typedef struct testResult {
     char *name, *output;
@@ -15,11 +16,122 @@ typedef struct testResult {
 typedef struct testReporter {
     FILE *report, *jsonFile;
     const char *package;
-    int json, color, includePassed, includeSkipped, passed, failed, skipped, completed;
+    int json, color, includePassed, includeSkipped, passed, failed, skipped, completed, workers;
     double timeout;
     testResult *results, **tail;
     char *packageOutput; size_t packageOutputSize;
+    int displayFD, displayInterrupted, terminalSaved;
+    pid_t displayPID;
+    struct termios savedTerminal;
+    char *displayPending; size_t displayPendingSize, displayPendingOffset;
 } testReporter;
+/* The frontend owns all terminal rendering through term/tui. This bridge only
+ * transports events and restores the terminal if the frontend crashes. */
+static void testFlushDisplay(testReporter *r) {
+    while (r->displayFD >= 0 && r->displayPendingOffset < r->displayPendingSize) {
+        ssize_t n = write(r->displayFD, r->displayPending + r->displayPendingOffset,
+                          r->displayPendingSize - r->displayPendingOffset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n <= 0) { close(r->displayFD); r->displayFD = -1; break; }
+        r->displayPendingOffset += (size_t)n;
+    }
+    if (r->displayFD < 0 || r->displayPendingOffset == r->displayPendingSize) {
+        free(r->displayPending); r->displayPending = NULL;
+        r->displayPendingSize = r->displayPendingOffset = 0;
+    }
+}
+static void testDisplaySend(testReporter *r, const char *action, const char *name, const char *output, double elapsed) {
+    if (r->displayFD < 0) return;
+    char *frame = NULL; size_t length = 0;
+    FILE *stream = open_memstream(&frame, &length);
+    if (!stream) return;
+    fprintf(stream, "%s\t%.9f\t", action, elapsed);
+    const char *fields[] = {name, output};
+    for (size_t i = 0; i < 2; i++) {
+        for (const unsigned char *p = (const unsigned char *)fields[i]; *p; p++) fprintf(stream, "%02x", *p);
+        fputc(i ? '\n' : '\t', stream);
+    }
+    fclose(stream);
+    size_t remaining = r->displayPendingSize - r->displayPendingOffset;
+    if (remaining && r->displayPendingOffset) memmove(r->displayPending, r->displayPending + r->displayPendingOffset, remaining);
+    char *pending = realloc(r->displayPending, remaining + length);
+    if (!pending) { free(frame); return; }
+    r->displayPending = pending;
+    memcpy(pending + remaining, frame, length);
+    r->displayPendingSize = remaining + length; r->displayPendingOffset = 0;
+    testFlushDisplay(r);
+    free(frame);
+}
+static void testRestoreTerminal(testReporter *r) {
+    if (r->terminalSaved) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &r->savedTerminal);
+        r->terminalSaved = 0;
+    }
+}
+static void testCheckDisplay(testReporter *r) {
+    if (r->displayPID <= 0) return;
+    int status = 0;
+    pid_t result = waitpid(r->displayPID, &status, WNOHANG);
+    if (result != r->displayPID) return;
+    r->displayPID = 0;
+    if (r->displayFD >= 0) { close(r->displayFD); r->displayFD = -1; }
+    testRestoreTerminal(r);
+    if (WIFSIGNALED(status)) {
+        const char visible[] = "\033[?25h";
+        write(STDOUT_FILENO, visible, sizeof(visible) - 1);
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 130) {
+        r->displayInterrupted = 1;
+        if (runningChild > 0) kill((pid_t)runningChild, SIGINT);
+    }
+}
+static void testStartDisplay(testReporter *r, const char *executable, int events[2], int output[2]) {
+    if (!executable) return;
+    int input[2];
+    if (pipe(input)) { perror("ocean test: live display pipe"); return; }
+    r->terminalSaved = tcgetattr(STDIN_FILENO, &r->savedTerminal) == 0;
+    pid_t child = fork();
+    if (!child) {
+        close(input[1]);
+        close(events[0]); close(events[1]); close(output[0]); close(output[1]);
+        if (dup2(input[0], 197) < 0) _exit(2);
+        if (input[0] != 197) close(input[0]);
+        /* Signals sent to the compiler are forwarded to the test process.
+         * The UI shuts down via its event channel, allowing tui to restore it. */
+        signal(SIGINT, SIG_IGN); signal(SIGTERM, SIG_IGN); signal(SIGHUP, SIG_IGN);
+        execl(executable, executable, r->package, r->color ? "1" : "0", r->includeSkipped ? "1" : "0", (char *)NULL);
+        _exit(2);
+    }
+    close(input[0]);
+    if (child < 0) { close(input[1]); perror("ocean test: live display fork"); return; }
+    r->displayFD = input[1]; r->displayPID = child;
+    fcntl(r->displayFD, F_SETFD, FD_CLOEXEC);
+    fcntl(r->displayFD, F_SETFL, O_NONBLOCK);
+}
+static void testStopDisplay(testReporter *r, double elapsed, int status) {
+    if (r->displayPID <= 0) return;
+    testDisplaySend(r, "done", "", status ? "1" : "0", elapsed);
+    for (int attempts = 0; attempts < 200 && r->displayFD >= 0 && r->displayPendingSize; attempts++) {
+        struct pollfd output = {r->displayFD, POLLOUT, 0};
+        poll(&output, 1, 10); testFlushDisplay(r); testCheckDisplay(r);
+    }
+    if (r->displayFD >= 0) { close(r->displayFD); r->displayFD = -1; }
+    for (int attempts = 0; attempts < 200 && r->displayPID > 0; attempts++) {
+        testCheckDisplay(r);
+        if (r->displayPID > 0) { struct timespec delay = {0, 10000000}; nanosleep(&delay, NULL); }
+    }
+    if (r->displayPID > 0) {
+        /* A crashed/stuck renderer must not strand raw terminal settings. */
+        kill(r->displayPID, SIGKILL);
+        int childStatus; while (waitpid(r->displayPID, &childStatus, 0) < 0 && errno == EINTR) { }
+        r->displayPID = 0;
+        const char visible[] = "\033[?25h";
+        write(STDOUT_FILENO, visible, sizeof(visible) - 1);
+    }
+    testRestoreTerminal(r);
+}
+
 static double testClock(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return (double)t.tv_sec + t.tv_nsec / 1e9;
@@ -77,6 +189,7 @@ static char *testField(const char *line, const char *key) {
     *out = 0; return value;
 }
 static void testJSON(testReporter *r, const char *action, const char *name, const char *output, double elapsed) {
+    testDisplaySend(r, action, name, output, elapsed);
     FILE *streams[] = {r->json ? stdout : NULL, r->jsonFile};
     struct timespec now; struct tm utc;
     clock_gettime(CLOCK_REALTIME, &now); gmtime_r(&now.tv_sec, &utc);
@@ -211,35 +324,47 @@ static void testSummary(testReporter *r, double elapsed, int status) {
         testPrint(r, "  %*s\n", timeWidth, duration);
     }
 }
-static int testExecute(testReporter *r, const char *executable) {
+static int testExecute(testReporter *r, const char *executable, const char *displayExecutable) {
     int events[2], output[2];
     if (pipe(events)) { perror("ocean test: pipe"); return 1; }
     if (pipe(output)) { close(events[0]); close(events[1]); perror("ocean test: pipe"); return 1; }
+    testStartDisplay(r, displayExecutable, events, output);
     double start = testClock();
     pid_t child = fork();
     if (!child) {
         close(events[0]); close(output[0]);
+        if (r->displayFD >= 0) {
+            close(r->displayFD);
+            int empty = open("/dev/null", O_RDONLY);
+            if (empty >= 0) { dup2(empty, STDIN_FILENO); close(empty); }
+        }
+        signal(SIGPIPE, SIG_DFL);
         if (dup2(events[1], 198) < 0 || dup2(output[1], STDOUT_FILENO) < 0 || dup2(output[1], STDERR_FILENO) < 0) _exit(127);
         close(events[1]); close(output[1]);
         signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGHUP, SIG_DFL);
-        execl(executable, executable, (char *)NULL); _exit(127);
+        char workers[32]; snprintf(workers, sizeof(workers), "%d", r->workers);
+        execl(executable, executable, "--ocean-test-workers", workers, (char *)NULL); _exit(127);
     }
     close(events[1]); close(output[1]);
-    if (child < 0) { close(events[0]); close(output[0]); perror("ocean test: fork"); return 1; }
+    if (child < 0) { close(events[0]); close(output[0]); testStopDisplay(r, 0, 1); perror("ocean test: fork"); return 1; }
     runningChild = child;
     if (interrupted) kill(child, interrupted);
     int timedOut = 0;
-    struct pollfd descriptors[] = {{events[0], POLLIN, 0}, {output[0], POLLIN, 0}};
+    struct pollfd descriptors[] = {{events[0], POLLIN, 0}, {output[0], POLLIN, 0}, {-1, 0, 0}};
     char *pending = NULL; size_t pendingSize = 0;
     int openCount = 2;
     while (openCount) {
+        testCheckDisplay(r);
         if (!timedOut && r->timeout > 0 && testClock() - start >= r->timeout) {
             timedOut = 1; kill(child, SIGKILL);
             testJSON(r, "output", "", "test timed out\n", testClock() - start);
             char message[100]; snprintf(message, sizeof(message), "test timed out after %.3fs\n", r->timeout);
             testPackageOutput(r, message);
         }
-        if (poll(descriptors, 2, 100) < 0) { if (errno == EINTR) continue; break; }
+        descriptors[2].fd = r->displayFD;
+        descriptors[2].events = r->displayPendingSize ? POLLOUT : 0;
+        if (poll(descriptors, 3, 100) < 0) { if (errno == EINTR) continue; break; }
+        if (descriptors[2].revents & (POLLOUT | POLLHUP | POLLERR)) testFlushDisplay(r);
         for (int i = 0; i < 2; i++) {
             if (descriptors[i].fd < 0 || !(descriptors[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
             char bytes[4097]; ssize_t n = read(descriptors[i].fd, bytes, 4096);
@@ -269,24 +394,37 @@ static int testExecute(testReporter *r, const char *executable) {
     status = waited < 0 ? 1 : WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
     if (!r->completed && !status) status = 1;
     if (r->failed && !status) status = 1;
+    testStopDisplay(r, testClock() - start, status);
+    if (r->displayInterrupted) status = 130;
     testJSON(r, status ? "fail" : "pass", "", !r->completed ? "test process did not complete" : "", testClock() - start);
     testSummary(r, testClock() - start, status);
     return status;
 }
 static int testMain(int argc, char **argv) {
     const char *location = ".", *reportPath = NULL, *jsonPath = NULL;
-    int haveLocation = 0;
-    testReporter reporter = {.includeSkipped = 1, .timeout = 600}; reporter.tail = &reporter.results;
+    int haveLocation = 0, noTTY = 0;
+    testReporter reporter = {.includeSkipped = 1, .timeout = 600, .displayFD = -1, .workers = 16}; reporter.tail = &reporter.results;
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "--help") || !strcmp(arg, "-h")) {
             puts("Usage: ocean test [location] [--json] [--outfile path] [--jsonfile path]\n"
                  "                  [--include-passed | -v] [--no-color] [--hide-skipped]\n"
-                 "                  [--timeout duration] (default 10m; 0 disables)\n"
+                 "                  [--timeout duration] [--notty] [-t nthreads | --single-threaded]\n"
                  "Run Test*(t *testing.T) functions in _test.oc files.\n"
                  "--json emits newline-delimited test events; --jsonfile saves them.\n"
-                 "--outfile (or -o) saves the plain tang-style report. NO_COLOR disables color.");
+                 "--outfile (or -o) saves the plain tang-style report. NO_COLOR disables color.\n"
+                 "Interactive terminals use the term/tui live display; --notty disables it.\n"
+                 "Timeout defaults to 10m; 0 disables it. Top-level workers default to 16.\n"
+                 "-t sets the worker count; --single-threaded sets it to 1. Parallel subtests are unbounded.");
             return 0;
+        } else if (!strcmp(arg, "--single-threaded")) reporter.workers = 1;
+        else if (!strcmp(arg, "-t")) {
+            if (++i == argc) { fputs("ocean test: -t requires a positive thread count\n", stderr); return 1; }
+            char *end; errno = 0; long count = strtol(argv[i], &end, 10);
+            if (errno || !*argv[i] || *end || count < 1 || count > 2147483647L) {
+                fputs("ocean test: -t requires a positive thread count (1..2147483647)\n", stderr); return 1;
+            }
+            reporter.workers = (int)count;
         } else if (!strcmp(arg, "--timeout") || !strcmp(arg, "-timeout")) {
             if (++i == argc) { fputs("ocean test: --timeout requires a duration\n", stderr); return 1; }
             char *end; errno = 0;
@@ -301,6 +439,7 @@ static int testMain(int argc, char **argv) {
         } else if (!strcmp(arg, "--json") || !strcmp(arg, "-json")) reporter.json = 1;
         else if (!strcmp(arg, "--include-passed") || !strcmp(arg, "-v")) reporter.includePassed = 1;
         else if (!strcmp(arg, "--hide-skipped")) reporter.includeSkipped = 0;
+        else if (!strcmp(arg, "--notty") || !strcmp(arg, "-notty") || !strcmp(arg, "--no-tui")) noTTY = 1;
         else if (!strcmp(arg, "--no-color")) reporter.color = -1;
         else if (!strcmp(arg, "--outfile") || !strcmp(arg, "-outfile") || !strcmp(arg, "-o") ||
                  !strcmp(arg, "--jsonfile") || !strcmp(arg, "-jsonfile")) {
@@ -310,6 +449,9 @@ static int testMain(int argc, char **argv) {
         else if (haveLocation++) { fputs("ocean test accepts one package location\n", stderr); return 1; }
         else location = arg;
     }
+    const char *terminal = getenv("TERM");
+    int live = !noTTY && !reporter.json && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO) &&
+               (!terminal || strcmp(terminal, "dumb"));
     reporter.color = !reporter.json && reporter.color != -1 && !getenv("NO_COLOR") && isatty(STDOUT_FILENO);
     if (reportPath && jsonPath && (!strcmp(reportPath, jsonPath) || sameFile(reportPath, jsonPath))) {
         fputs("ocean test: report and JSON output must be different files\n", stderr); return 1;
@@ -331,6 +473,17 @@ static int testMain(int argc, char **argv) {
             fputs("ocean test: output would overwrite an input file\n", stderr); failed = 1;
         }
     if (!failed) failed = nativeBuild(NULL, program, executable, 0, 0);
+    char displayExecutable[sizeof(directory) + 16];
+    snprintf(displayExecutable, sizeof(displayExecutable), "%s/display", directory);
+    if (!failed && live) {
+        packageBuild *displayBuild = loadTestDisplay();
+        parseResult *displayProgram = packageProgram(displayBuild);
+        int displayFailed = !displayProgram || analyzeSemantics(displayProgram).nErrors != 0;
+        buildCache *cache = displayFailed ? NULL : openBuildCache(argv[0], displayProgram, packageDirectory(displayBuild));
+        if (!displayFailed) displayFailed = nativeBuild(cache, displayProgram, displayExecutable, 0, 0);
+        closeBuildCache(cache); freePackage(displayBuild);
+        if (displayFailed) { fputs("ocean test: live display unavailable; using final report\n", stderr); live = 0; }
+    }
     if (!failed && reportPath && !(reporter.report = fopen(reportPath, "w"))) { perror("ocean test: report file"); failed = 1; }
     if (!failed && jsonPath && !(reporter.jsonFile = fopen(jsonPath, "w"))) { perror("ocean test: JSON file"); failed = 1; }
     char *packagePath = realpath(location, NULL);
@@ -343,11 +496,14 @@ static int testMain(int argc, char **argv) {
     }
     reporter.package = packagePath ? packagePath : location;
     if (!failed) {
-        struct sigaction action = {0}, oldInt, oldTerm, oldHup;
+        struct sigaction action = {0}, oldInt, oldTerm, oldHup, oldPipe, ignorePipe = {0};
         action.sa_handler = forwardSignal; sigemptyset(&action.sa_mask);
         interrupted = runningChild = 0;
         sigaction(SIGINT, &action, &oldInt); sigaction(SIGTERM, &action, &oldTerm); sigaction(SIGHUP, &action, &oldHup);
-        failed = testExecute(&reporter, executable);
+        ignorePipe.sa_handler = SIG_IGN; sigemptyset(&ignorePipe.sa_mask);
+        sigaction(SIGPIPE, &ignorePipe, &oldPipe);
+        failed = testExecute(&reporter, executable, live ? displayExecutable : NULL);
+        sigaction(SIGPIPE, &oldPipe, NULL);
         sigaction(SIGINT, &oldInt, NULL); sigaction(SIGTERM, &oldTerm, NULL); sigaction(SIGHUP, &oldHup, NULL);
     }
     if (reporter.report) {
@@ -362,7 +518,7 @@ static int testMain(int argc, char **argv) {
     }
     if (fflush(stdout) || ferror(stdout)) failed = 1;
     while (reporter.results) { testResult *t = reporter.results; reporter.results = t->next; free(t->name); free(t->output); free(t); }
-    free(reporter.packageOutput);
-    free(packagePath); freePackage(build); unlink(executable); rmdir(directory);
+    free(reporter.packageOutput); free(reporter.displayPending);
+    free(packagePath); freePackage(build); unlink(executable); unlink(displayExecutable); rmdir(directory);
     return failed;
 }
