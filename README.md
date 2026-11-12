@@ -1698,11 +1698,11 @@ Interface values, including `any`, default to `null`. Assign, pass, or return
 `defer` and `recover` can handle the panic.
 
 `Optional<T>` is a built-in enum requiring no import. Construct a present value
-with `Optional<int>.Some(42)` or an absent value with `Optional<int>.None`.
-`None` equals `null`, and assigning `null` to an optional selects `None`.
-Uninitialized optionals and `zero(Optional<T>)` are `None`. `Some(null)` remains
-a present value when `T` is nullable. Normal enum extraction (`value.(Optional.Some)`),
-matching (`Optional.Some(v)` / `Optional.None`), equality, and ownership apply.
+with `Optional<int>.value(42)` or an absent value with `Optional<int>.none`.
+`none` equals `null`, and assigning `null` to an optional selects `none`.
+Uninitialized optionals and `zero(Optional<T>)` are `none`. `value(null)` remains
+a present value when `T` is nullable. Normal enum extraction (`value.(Optional.value)`),
+matching (`Optional.value(v)` / `Optional.none`), equality, and ownership apply.
 A user declaration may shadow `Optional`.
 
 ## Built-in Result and number parsing

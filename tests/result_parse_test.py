@@ -88,9 +88,9 @@ func main() int {
     message := failure.error(); message = "changed";
     if (failure.error() != "stored error") return 3;
     absent: Optional<int>;
-    if (absent.hasValue() || zero(Optional<int>).hasValue() || Optional<int>.None.hasValue()) return 4;
-    if (!Optional<int>.Some(0).hasValue() || !present<string>(Optional<string>.Some(""))) return 5;
-    if (!Optional<*int>.Some(null).hasValue()) return 6;
+    if (absent.hasValue() || zero(Optional<int>).hasValue() || Optional<int>.none.hasValue()) return 4;
+    if (!Optional<int>.value(0).hasValue() || !present<string>(Optional<string>.value(""))) return 5;
+    if (!Optional<*int>.value(null).hasValue()) return 6;
     return 0;
 }''')
     program('func main() { Result<int>.value(1).error(); }',
@@ -99,19 +99,19 @@ func main() int {
     program('''struct Payload { text string; values int[2]; }
 func extract<T>(value Optional<T>) T { return value.unwrap(); }
 func main() int {
-    if (Optional<int>.Some(42).unwrap() != 42) return 1;
-    if (extract<string>(Optional<string>.Some("text")) != "text") return 2;
-    if (Optional<*int>.Some(null).unwrap() != null) return 3;
-    original := Optional<Payload>.Some(Payload{"owned", {3, 4}});
+    if (Optional<int>.value(42).unwrap() != 42) return 1;
+    if (extract<string>(Optional<string>.value("text")) != "text") return 2;
+    if (Optional<*int>.value(null).unwrap() != null) return 3;
+    original := Optional<Payload>.value(Payload{"owned", {3, 4}});
     copy := original.unwrap(); copy.text = "changed"; copy.values[0] = 99;
     next := original.unwrap();
     if (next.text != "owned" || next.values[0] != 3) return 4;
     return 0;
 }''')
-    program('func main() { Optional<int>.None.unwrap(); }',
-            error='Panic: Optional.unwrap() called on None')
+    program('func main() { Optional<int>.none.unwrap(); }',
+            error='Panic: Optional.unwrap() called on none')
     program('func main() { value: Optional<string>; value.unwrap(); }',
-            error='Panic: Optional.unwrap() called on None')
+            error='Panic: Optional.unwrap() called on none')
 
     # Parsing returns errors rather than panicking, until unwrap is requested.
     valid_ints = ['0', '-0', '+0', '7', '-42', '+123', '000123',
@@ -167,8 +167,8 @@ return 0; }'''
                  'func main() { Result<int>.error(1); }',
                  'func main() { Result<int>.value(1).hasError(1); }',
                  'func main() { Result<int>.error("bad").error(1); }',
-                 'func main() { Optional<int>.Some(1).hasValue(1); }',
-                 'func main() { Optional<int>.Some(1).unwrap(2); }',
+                 'func main() { Optional<int>.value(1).hasValue(1); }',
+                 'func main() { Optional<int>.value(1).unwrap(2); }',
                  'enum E { error(string) } func (e E) error() string { return ""; } func main() {}'):
         source.write_text('package main; ' + body)
         result = run([compiler, 'check', str(source)], env=env)

@@ -38,22 +38,26 @@ func main() int {
     v = Box{}; if (v == null || v.Get() != 4) return 2;
     v = null; if (null != v) return 3;
     a: Optional<int> = null; z: Optional<string>;
-    if (a != null || z != Optional<string>.None || Optional<int>.None != null) return 4;
-    a = Optional<int>.Some(7);
-    if (a == null || a.(Optional.Some) != 7 || null == a) return 5;
-    b := Optional<Value>.Some(null);
-    if (b == null || b.(Optional.Some) != null) return 6;
-    nested := Optional<Optional<string>>.Some(Optional<string>.None);
-    if (nested == null || nested.(Optional.Some) != null) return 7;
+    if (a != null || z != Optional<string>.none || Optional<int>.none != null) return 4;
+    a = Optional<int>.value(7);
+    if (a == null || a.(Optional.value) != 7 || null == a) return 5;
+    b := Optional<Value>.value(null);
+    if (b == null || b.(Optional.value) != null) return 6;
+    nested := Optional<Optional<string>>.value(Optional<string>.none);
+    if (nested == null || nested.(Optional.value) != null) return 7;
     xs := mixed Value[]{null, Box{}};
     if (xs[0] != null || xs[1].Get() != 4) return 8;
     m := map[string]Value{"empty":null};
     if (m["empty"] != null) return 9;
-    match (a) { Optional.Some(n) => { if (n != 7) return 10; } Optional.None => return 11; }
-    a = null; if (a != Optional<int>.None) return 12;
+    match (a) { Optional.value(n) => { if (n != 7) return 10; } Optional.none => return 11; }
+    a = null; if (a != Optional<int>.none) return 12;
     return 0;
 }
 ''')
+    for variant in ('Some(1)', 'None'):
+        source.write_text('package main; func main() { x := Optional<int>.' + variant + '; }')
+        result = run(compiler, "check", str(root))
+        assert result.returncode != 0 and "unknown enum variant" in result.stderr, result
     declarations = 'interface Value { Get() int; }\n'
     program(declarations + 'func main() int { v: Value = null; return v.Get(); }', panic=True)
     program(declarations + '''
@@ -63,14 +67,14 @@ func main() int { invoke(null); return 0; }
 ''')
     program('''
 func choose<T>(value T, present bool) Optional<T> {
-    if (present) return Optional<T>.Some(value);
+    if (present) return Optional<T>.value(value);
     return null;
 }
 func main() int {
     a := choose<string>("hello", true); b := choose<int>(3, false);
-    if (a == null || a.(Optional.Some) != "hello" || b != null) return 1;
-    r := Result<Optional<int>>.value(Optional<int>.Some(42));
-    o := r.unwrap(); if (o.(Optional.Some) != 42) return 2;
+    if (a == null || a.(Optional.value) != "hello" || b != null) return 1;
+    r := Result<Optional<int>>.value(Optional<int>.value(42));
+    o := r.unwrap(); if (o.(Optional.value) != 42) return 2;
     return 0;
 }
 ''')
@@ -89,8 +93,8 @@ func Maybe() Result<int> { return Result<int>.value(8); }
 import "example.test/nullable/values";
 func absent<T>() Optional<T> { return null; }
 func main() int {
-    x := Optional<int>.Some(4);
-    if (values.Empty() != null || absent<string>() != null || x.(Optional.Some) != 4) return 1;
+    x := Optional<int>.value(4);
+    if (values.Empty() != null || absent<string>() != null || x.(Optional.value) != 4) return 1;
     if (values.Custom() != 5 || values.Maybe().unwrap() != 8) return 2;
     return 0;
 }

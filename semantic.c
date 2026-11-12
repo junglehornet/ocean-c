@@ -2684,7 +2684,7 @@ static Type *expression(Context *c, expr *e) {
                 semanticMembers group = {.use = member};
                 for (size_t j = 0; j < t->enumeration->nMembers; j++) {
                     token name = t->enumeration->names[j];
-                    if (!exportedName(name.lexeme) && sourcePackage(c, name.filename) != sourcePackage(c, member.filename)) continue;
+                    if (!t->enumeration->isBuiltin && !exportedName(name.lexeme) && sourcePackage(c, name.filename) != sourcePackage(c, member.filename)) continue;
                     Symbol *variantSymbol = allocate(c, sizeof(*variantSymbol));
                     variantSymbol->name = name;
                     variantSymbol->type = enumMemberType(c, t, name);

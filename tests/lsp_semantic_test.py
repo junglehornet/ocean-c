@@ -129,6 +129,9 @@ func main() int {
         items = complete('package main; enum Color { Red, Green, RGB(int, int, int) } func main() { Color.| }')
         assert {'Red', 'Green', 'RGB'} <= items.keys(), items
         assert items['Red']['kind'] == 20, items
+        items = complete('package main; func main() { Optional<int>.| }')
+        labels = set(items)
+        assert {'value', 'none'} <= labels and not {'Some', 'None'} & labels, items
         items = complete('package main; enum Box<T> { Value(T), Empty } func main() { Box<int>.Va| }')
         assert set(items) == {'Value'}, items
         items = complete('package main; interface Reader { Read() int; } func use(r Reader) { r.| } func main() {}')

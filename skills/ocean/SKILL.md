@@ -845,29 +845,31 @@ other native output failures return errors.
 ## Built-in Optional
 
 `Optional<T>` needs no imports or standard-library files. It is an enum with
-`Optional<T>.Some(value)` carrying one `T` and `Optional<T>.None` carrying no
-payload. `None` equals `null`; assigning `null` to an optional selects `None`.
-Uninitialized optionals and `zero(Optional<T>)` are `None`. `Some(null)` is still
-`Some` when `T` is nullable, so it does not equal `null`.
-The built-in `hasValue() bool` method returns true for `Some` and false for `None`,
-including true for `Some(null)`.
-The built-in `unwrap() T` method returns the payload of `Some` (including a null
-payload) and panics on `None`, attributed to the caller. Returned payloads follow
+`Optional<T>.value(value)` carrying one `T` and `Optional<T>.none` carrying no
+payload. `none` equals `null`; assigning `null` to an optional selects `none`.
+Uninitialized optionals and `zero(Optional<T>)` are `none`. `value(null)` is still
+`value` when `T` is nullable, so it does not equal `null`.
+The built-in `hasValue() bool` method returns true for `value` and false for `none`,
+including true for `value(null)`.
+The built-in `unwrap() T` method returns the payload of `value` (including a null
+payload) and panics on `none`, attributed to the caller. Returned payloads follow
 normal value-copy and ownership rules.
 
 ```ocean
 value: Optional<int> = null;
-value = Optional<int>.Some(42);
-if (value != null) { number := value.(Optional.Some); }
+value = Optional<int>.value(42);
+if (value != null) { number := value.(Optional.value); }
 match (value) {
-    Optional.Some(number) => { /* use number */ }
-    Optional.None => { /* absent */ }
+    Optional.value(number) => { /* use number */ }
+    Optional.none => { /* absent */ }
 }
 ```
 
 Normal enum equality, extraction, match, ownership, and explicit generic type
-arguments apply. A user declaration can shadow `Optional`. Compiler CLI, package
-layout, builds, and standard-library integration are unchanged.
+arguments apply. Its lowercase variants and methods are public built-ins,
+independent of package capitalization rules. A user declaration can shadow
+`Optional`. Compiler CLI, package layout, builds, and standard-library integration
+are unchanged.
 
 ## Built-in Result and number parsing
 
