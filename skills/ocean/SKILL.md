@@ -823,6 +823,11 @@ other native output failures return errors.
 payload. `None` equals `null`; assigning `null` to an optional selects `None`.
 Uninitialized optionals and `zero(Optional<T>)` are `None`. `Some(null)` is still
 `Some` when `T` is nullable, so it does not equal `null`.
+The built-in `hasValue() bool` method returns true for `Some` and false for `None`,
+including true for `Some(null)`.
+The built-in `unwrap() T` method returns the payload of `Some` (including a null
+payload) and panics on `None`, attributed to the caller. Returned payloads follow
+normal value-copy and ownership rules.
 
 ```ocean
 value: Optional<int> = null;
@@ -852,10 +857,15 @@ Construct values with explicit type arguments, for example
 variant comparisons, extraction, and `match` to inspect either case. Its
 lowercase variants and methods are public language built-ins, independent of
 package capitalization rules; ordinary package members retain those rules.
+`result.error()` is an instance method; `Result<T>.error(message)` constructs
+the error variant. This built-in accessor is an exception to the usual ban on
+methods sharing an enum variant name.
 A user-declared Result may shadow the built-in name and remains a distinct type.
 
 | Method | value case | error case |
 | --- | --- | --- |
+| `hasError() bool` | Returns false | Returns true |
+| `error() string` | Panics | Returns the stored error string |
 | `unwrap() T` | Returns the payload | Returns a panic containing the stored error string, attributed to the caller |
 | `unwrapOrElse(fallback T) T` | Returns the payload | Returns the provided fallback value |
 | `unwrapOrZero() T` | Returns the payload | Returns `zero(T)` |

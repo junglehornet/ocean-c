@@ -972,7 +972,7 @@ static packageBuild *finishPackage(packageBuild *b) {
     size_t statements = 0, sourceCount = 0;
     for (Package *p = b->packages; p; p = p->next)
         for (File *file = p->files; file; file = file->next) { statements += file->ast.nStatements; sourceCount++; }
-    b->program.statementsCapacity = statements + 5;
+    b->program.statementsCapacity = statements + 10;
     b->program.statements = alloc(b, sizeof(stmt) * b->program.statementsCapacity);
     b->program.sources = alloc(b, sizeof(sourceFile) * sourceCount);
     for (size_t order = 0; order < b->nPackages; order++)

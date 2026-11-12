@@ -77,6 +77,42 @@ func shadow() int { type Result = int; return create().unwrap(); }
 func main() int { if (shadow() != 8) return 1; return 0; }''')
     program('func main() { Result<int>.error("bad number").unwrap(); }', error='Panic: bad number')
 
+    # Built-in inspection methods distinguish tags, including a present null.
+    program('''func inspect<T>(result Result<T>) bool { return result.hasError(); }
+func present<T>(optional Optional<T>) bool { return optional.hasValue(); }
+func main() int {
+    success := Result<int>.value(42);
+    failure := Result<int>.error("stored error");
+    if (success.hasError() || !failure.hasError() || !inspect<string>(Result<string>.error(""))) return 1;
+    if (failure.error() != "stored error" || Result<string>.error("").error() != "") return 2;
+    message := failure.error(); message = "changed";
+    if (failure.error() != "stored error") return 3;
+    absent: Optional<int>;
+    if (absent.hasValue() || zero(Optional<int>).hasValue() || Optional<int>.None.hasValue()) return 4;
+    if (!Optional<int>.Some(0).hasValue() || !present<string>(Optional<string>.Some(""))) return 5;
+    if (!Optional<*int>.Some(null).hasValue()) return 6;
+    return 0;
+}''')
+    program('func main() { Result<int>.value(1).error(); }',
+            error='Panic: Result.error() called on a value result')
+
+    program('''struct Payload { text string; values int[2]; }
+func extract<T>(value Optional<T>) T { return value.unwrap(); }
+func main() int {
+    if (Optional<int>.Some(42).unwrap() != 42) return 1;
+    if (extract<string>(Optional<string>.Some("text")) != "text") return 2;
+    if (Optional<*int>.Some(null).unwrap() != null) return 3;
+    original := Optional<Payload>.Some(Payload{"owned", {3, 4}});
+    copy := original.unwrap(); copy.text = "changed"; copy.values[0] = 99;
+    next := original.unwrap();
+    if (next.text != "owned" || next.values[0] != 3) return 4;
+    return 0;
+}''')
+    program('func main() { Optional<int>.None.unwrap(); }',
+            error='Panic: Optional.unwrap() called on None')
+    program('func main() { value: Optional<string>; value.unwrap(); }',
+            error='Panic: Optional.unwrap() called on None')
+
     # Parsing returns errors rather than panicking, until unwrap is requested.
     valid_ints = ['0', '-0', '+0', '7', '-42', '+123', '000123',
                   '9223372036854775807', '-9223372036854775808']
@@ -128,7 +164,12 @@ return 0; }'''
 
     for body in ('func main() { Result<int>.value(1).unwrap(2); }',
                  'func main() { Result<int>.value(1).unwrapOrElse(); }',
-                 'func main() { Result<int>.error(1); }'):
+                 'func main() { Result<int>.error(1); }',
+                 'func main() { Result<int>.value(1).hasError(1); }',
+                 'func main() { Result<int>.error("bad").error(1); }',
+                 'func main() { Optional<int>.Some(1).hasValue(1); }',
+                 'func main() { Optional<int>.Some(1).unwrap(2); }',
+                 'enum E { error(string) } func (e E) error() string { return ""; } func main() {}'):
         source.write_text('package main; ' + body)
         result = run([compiler, 'check', str(source)], env=env)
         assert result.returncode != 0, body

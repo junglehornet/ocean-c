@@ -3238,7 +3238,7 @@ done:
     result.hasError = state.hasError;
     result.packageName = state.packageName;
     result.nStatements = statements.top;
-    result.statementsCapacity = statements.top + 4; // Embedded Result enum and methods.
+    result.statementsCapacity = statements.top + 10; // Embedded Result and Optional enums and methods.
     result.statements = calloc(result.statementsCapacity, sizeof(stmt));
     CHECK_MALLOC(result.statements);
     for (size_t i=0; i<statements.top; i++) result.statements[i] = get_stmtlist(&statements, i);

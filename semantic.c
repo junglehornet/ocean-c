@@ -1214,7 +1214,10 @@ static void function(Context *c, struct stmt_func *f) {
         if (receiverOwner->enumeration) {
             struct stmt_enum *enumeration = receiverOwner->enumeration;
             for (size_t i = 0; i < enumeration->nMembers; i++) {
-                if (!strcmp(enumeration->names[i].lexeme, f->name.lexeme))
+                // The built-in Result.error() accessor shares the error variant name.
+                if (!strcmp(enumeration->names[i].lexeme, f->name.lexeme) &&
+                    !(f->isBuiltin && !strcmp(enumeration->name.lexeme, OCEAN_BUILTIN_RESULT_NAME) &&
+                      !strcmp(f->name.lexeme, "error")))
                     error(c, f->name, "method name conflicts with an enum variant");
                 for (size_t j = 0; j < enumeration->payloads[i].nFields; j++)
                     if (!strcmp(enumeration->payloads[i].fieldNames[j].lexeme, f->name.lexeme))

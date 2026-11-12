@@ -6,6 +6,13 @@
 // Embedded language definitions; these never depend on a standard-library checkout.
 static inline const char *oceanBuiltinResultSource(void) {
     return "enum Result<T> { value(T), error(string) }\n"
+           "func (result Result<T>) hasError() bool {\n"
+           "    return result == Result<T>.error;\n"
+           "}\n"
+           "func (result Result<T>) error() string {\n"
+           "    if (result == Result<T>.error) return result.(Result<T>.error);\n"
+           "    return panic \"Result.error() called on a value result\";\n"
+           "}\n"
            "func (result Result<T>) unwrap() T {\n"
            "    if (result == Result<T>.value) return result.(Result<T>.value);\n"
            "    return panic result.(Result<T>.error);\n"
