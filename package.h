@@ -17,6 +17,8 @@ packageBuild *loadCheckPackageWithSources(const char *location, const packageSou
 /* Additional CLI validation graph; NULL when the selected package has no tests. */
 packageBuild *loadPackageTests(const char *location);
 const char *packageDirectory(packageBuild *build);
+char *packageTestPath(const char *location);
+char *packageTestLocation(const char *location);
 /* Editor queries may inspect successfully parsed sources after binding errors. */
 parseResult *packagePartialProgram(packageBuild *build);
 parseResult *packageProgram(packageBuild *build);

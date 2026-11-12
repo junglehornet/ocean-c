@@ -1031,54 +1031,55 @@ production `main` function is preserved for normal builds and replaced by the
 generated test entry point only in test builds. Imported packages' tests do not
 run as part of the target package's suite.
 
-`testing.T` supports `Run(name, callback) bool`, `Parallel(name, callback)`,
+`testing.T` supports `Run(name, callback) bool`, `Parallel()`,
 `Error`, `Errorf`, `Fatal`,
 `Fatalf`, `Fail`, `FailNow`, `Failed`, `Log`, `Logf`, `Skip`, `Skipf`, `SkipNow`,
 `Skipped`, `Name`, `Cleanup`, and `Helper`. Format methods use Ocean's `{}`
 format placeholders. `Error` marks failure and continues; `Fatal` stops the
 current test, runs its defers and cleanup callbacks, and lets other tests run.
-`Run` waits for its subtest and cleanups, returns false on failure, and propagates
-failure to the parent. `Cleanup` callbacks run in reverse order, including after fatal errors
+`Run` waits until its subtest finishes or pauses; failures propagate to the parent. `Cleanup` callbacks run in reverse order, including after fatal errors
 and panics. A panic fails the current test; subsequent tests continue. `Helper`
 is accepted but does not currently alter source-location reporting. There is no
 benchmark API yet. Do not call fatal/skip methods from a thread
 created by the test; they terminate their calling thread.
 
-Top-level `Test*` functions run through one shared work queue with up to 16
-managed OS worker threads by default (or fewer when there are fewer tests).
-Each worker pulls another function when it finishes. Use `-t N` to choose a
-positive worker count or `--single-threaded` for one top-level worker. Workers
-are reused across tests; workers stopped by Fatal, skips, or threads.Return
-are joined and replaced when pending work remains.
+Each package first runs its top-level `Test*` functions serially. Calling
+`t.Parallel()` pauses the calling test and releases its execution slot so the
+next serial test can start. Once that package's serial phase finishes, its
+paused tests resume, sharing the command-wide worker budget with other packages.
+Packages run concurrently, rather than one after another.
 
-`t.Run(name, callback) bool` starts a synchronous subtest and waits for its
-completion and cleanup. `t.Parallel(name, callback)` starts an asynchronous
-subtest on an additional OS thread and returns immediately, with no result.
-The pool limit does not cap subtest threads: Parallel may start more than 16
-children, including with `-t 1` or `--single-threaded`. This is an async version
-of Run, rather than Go’s no-argument Parallel scheduling marker.
+The default budget is 16 active test workers across all selected packages.
+`-t N` sets this shared limit; `--single-threaded` sets it to one. Parallel still
+pauses and resumes with a limit of one, but does not bypass the limit. Paused
+tests retain parked native threads for their stacks; only actively executing
+tests occupy shared worker slots.
 
-After a parent body returns or stops, the runner joins all of its async children
-before running the parent’s Cleanup callbacks and reporting its final status.
-This applies recursively to nested subtests. Child failures propagate to the
-parent. Ordinary defers run when the body exits; use `t.Cleanup` for resources
-that async children still need. Subtests cannot be started from cleanup.
-`testing.T` synchronizes its failure/skip flags, cleanup registrations, and
-subtest bookkeeping, and serializes log events. Protect shared test fixtures
-with synchronization or use `--single-threaded` for sequential top-level tests.
+`t.Run(name, callback) bool` runs a subtest until it finishes or calls Parallel.
+A parallel subtest resumes after its parent body returns. The parent releases
+its slot while waiting for children, then runs Cleanup callbacks after all
+children finish. Child failures propagate to the parent. Ordinary defers run as
+the body exits; use Cleanup for resources needed by parallel children. Parallel
+must be called on the test's own thread, at most once, and before cleanup.
+The earlier `Parallel(name, callback)` API is removed.
 
 ```ocean
 func TestConcurrent(t *testing.T) {
-    t.Parallel("first", func(t *testing.T) { /* first check */ });
-    t.Parallel("second", func(t *testing.T) { /* second check */ });
-    // Both subtests can run before this body returns.
+    t.Parallel(); // pause here until this package's serial phase ends
+    // This body now shares the command-wide worker pool.
+}
+func TestCases(t *testing.T) {
+    t.Run("first", func(t *testing.T) {
+        t.Parallel(); // resumes after TestCases' body returns
+    });
 }
 ```
 
 Interactive terminals show a live [tang](https://github.com/ansel1/tang)-style
 TUI implemented in Ocean with `term/tui`. It updates running and completed tests,
 nested subtests, live output, status counts (▶ / ⏸ / ✓ / ✗ / ∅ / ∑), and elapsed
-time. Subtests stay grouped under their nearest parent, including when parallel
+time. Test rows show `=== RUN`, `=== PAUSE`, `=== CONT`, and `--- PASS`/`FAIL`/`SKIP`
+with status styling. Completed packages fold to their package row. Subtests stay grouped under their nearest parent, including when parallel
 tests emit interleaved events. The frontend handles terminal resizing; use ↑/↓ or
 Page Up/Page Down to scroll, `f` or End to follow recent tests, and `q` or Ctrl+C to stop the suite.
 After execution, the live view is cleared and the final report is printed.
@@ -1104,8 +1105,8 @@ files are plain text. The report counts both tests and subtests, as tang does.
 ocean test .
 ocean test . -v                         # include passed tests in the final report
 ocean test . --notty                    # disable the live TUI
-ocean test . -t 4                       # up to four top-level workers
-ocean test . --single-threaded          # one top-level worker
+ocean test . -t 4                       # four shared test workers
+ocean test . --single-threaded          # one shared test worker
 ocean test . --json                     # JSON events on stdout
 ocean test . --outfile results.txt      # save the plain report too
 ocean test . --jsonfile results.jsonl    # save JSON events too
@@ -1126,10 +1127,24 @@ executable is removed when the command finishes.
 JSON output consists of one event per line with `Time`, `Action`, `Package`,
 `Elapsed` (seconds), and optional `Test` and `Output` fields. Actions include
 `start`, `run`, `output`, `pass`, `fail`, and `skip`; slash-separated test names
-identify nested subtests. Package completion reflects the actual process exit.
+identify nested subtests. `pause` and `cont` events mark parallel suspension and
+resumption. Package completion reflects the actual process exit.
 Arbitrary stdout/stderr becomes package-level `output` events, so it cannot
 corrupt the JSON stream. `t.Log`/error messages are associated with their test.
 The event shape can also be consumed by tang. Tests currently require a native
 host target and the matching `testing`, `threads`, and `sync` library sources.
 Test binaries are compiled separately without using normal package object cache
-entries. This command accepts one package location per invocation.
+entries. Pass multiple package locations to run several suites. Use `./...` to include
+all packages below the current directory, or `engine/...` to include engine and
+its subpackages. The base directory is included when it contains Ocean source.
+Discovery skips hidden directories, vendor, node_modules, and directory symlinks;
+overlapping selections run once. Packages run concurrently and share the configured
+worker budget. Multi-package JSON and TUI results use module-qualified
+package paths, with functions and subtests grouped beneath each package. Report
+files contain all selected suites, and any package failure makes the command fail.
+
+```sh
+ocean test engine parser
+ocean test ./...
+ocean test engine/... -t 4
+```

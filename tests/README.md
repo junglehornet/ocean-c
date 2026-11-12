@@ -893,6 +893,6 @@ tests, while normal builds and dependency loading exclude test sources.
 pseudo-terminal: incremental completion, nested tests, resize/input, NO_COLOR,
 Ctrl+C, external signals, timeout, renderer crashes, and noninteractive modes.
 
-`ocean_test_parallel_test.py` checks the default 16-worker pool, explicit worker
-counts, OS thread reuse, shared-queue scheduling, worker replacement after fatal
-failures/skips, async subtests beyond the pool limit, and parent cleanup ordering.
+`ocean_test_parallel_test.py` checks serial package phases, no-argument Parallel
+markers, pause/continue events, the shared cross-package worker budget, nested
+parallel subtests, cleanup ordering, and slot reclamation after package failure.

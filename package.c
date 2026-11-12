@@ -1070,6 +1070,35 @@ static packageBuild *loadTestPackageWithSources(const char *location, const char
     if (b->errors) return b;
     return finishPackage(b);
 }
+char *packageTestLocation(const char *location) {
+    packageBuild *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    char *path = canonical(b, location);
+    if (!path) {
+        char *cwd = getcwd(NULL, 0);
+        Module *module = cwd ? findModule(b, cwd) : NULL;
+        if (module && module->name && prefix(location, module->name))
+            path = canonical(b, format(b, "%s%s", module->root, location + strlen(module->name)));
+        else if (cwd) {
+            Package from = {.directory = cwd, .module = module};
+            Package *resolved = resolveImport(b, &from, location);
+            if (resolved) path = resolved->directory;
+        }
+        free(cwd);
+    }
+    char *result = path ? strdup(path) : NULL;
+    freePackage(b); return result;
+}
+char *packageTestPath(const char *location) {
+    packageBuild *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    char *path = canonical(b, location);
+    if (!path) { freePackage(b); return NULL; }
+    if (!directory(path)) path = parent(b, path);
+    Module *module = findModule(b, path);
+    char *result = strdup(module && module->name ? format(b, "%s%s", module->name, path + strlen(module->root)) : path);
+    freePackage(b); return result;
+}
 packageBuild *loadTestDisplay(void) {
     packageBuild *lookup = calloc(1, sizeof(*lookup));
     if (!lookup) return NULL;

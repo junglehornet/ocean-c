@@ -26,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-live-test-') as directory:
 import "testing";
 import "time";
 import "io";
+func TestPaused(t *testing.T) { t.Parallel(); time.Sleep(200000000); t.Log("resumed worker"); }
 func TestFirst(t *testing.T) {
     time.Sleep(200000000);
     t.Run("child", func(t *testing.T) { time.Sleep(200000000); });
@@ -90,13 +91,13 @@ func TestSkip(t *testing.T) { t.Skip("not available"); }
         assert not termios.tcgetattr(slave)[3] & (termios.ECHO | termios.ICANON)
         expect(b'TestFirst/child')
         expect(b'TestSecond')
-        expect('✓     TestFirst'.encode())
+        expect(b'--- PASS: TestFirst')
         # A complete live frame must keep First's child beneath its parent,
         # regardless of which concurrent root function started first.
         deadline = time.monotonic() + 3
         while True:
             frames = SGR.sub(b'', received).split(b'\x1b[J')
-            complete = [frame for frame in frames if '✓     TestFirst'.encode() in frame
+            complete = [frame for frame in frames if b'--- PASS: TestFirst' in frame
                         and b'TestFirst/child ' in frame and b'TestSecond ' in frame
                         and '↑/↓ scroll'.encode() in frame]
             if complete:
@@ -113,7 +114,7 @@ func TestSkip(t *testing.T) { t.Skip("not available"); }
         # First has finished while Second is still running: this must be a live
         # completion, not output printed after the test executable has exited.
         assert process.poll() is None
-        assert re.search('✓ +TestFirst'.encode(), SGR.sub(b'', received))
+        assert b'--- PASS: TestFirst' in SGR.sub(b'', received)
         data = [json.loads(line) for line in events.read_text().splitlines()]
         assert any(e['Action'] == 'pass' and e.get('Test') == 'TestFirst' for e in data)
         assert not any(e['Action'] == 'fail' and e.get('Test') == 'TestSecond' for e in data)
@@ -123,6 +124,7 @@ func TestSkip(t *testing.T) { t.Skip("not available"); }
 
     code, screen = session(['--jsonfile', events, '--outfile', report], progress)
     assert code == 1 and b'\x1b[?25h' in screen
+    assert b'=== PAUSE' in screen and b'=== CONT' in screen and b'--- PASS:' in screen
     assert '∅'.encode() in screen and b'visible failure' in screen
     assert all(m.group(0) in (b'\x1b[0m', b'\x1b[m') for m in SGR.finditer(screen)), 'NO_COLOR must suppress styling without disabling terminal redraws'
     assert '\x1b' not in report.read_text() and 'Summary' in report.read_text()

@@ -2,6 +2,7 @@
  * source standard library. A separate descriptor keeps arbitrary test stdout
  * from corrupting machine-readable results. */
 #include <poll.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <time.h>
 #include <termios.h>
@@ -21,13 +22,17 @@ typedef struct testReporter {
     testResult *results, **tail;
     char *packageOutput; size_t packageOutputSize;
     int displayFD, displayInterrupted, terminalSaved;
+    int grantFD, heldSlots, waitingSlots;
     pid_t displayPID;
     struct termios savedTerminal;
     char *displayPending; size_t displayPendingSize, displayPendingOffset;
 } testReporter;
+static int multiMode, multiLive, multiTextOpened, multiJSONOpened, sharedBudget;
+static testReporter multiUI;
 /* The frontend owns all terminal rendering through term/tui. This bridge only
  * transports events and restores the terminal if the frontend crashes. */
 static void testFlushDisplay(testReporter *r) {
+    if (multiMode && r != &multiUI) r = &multiUI;
     while (r->displayFD >= 0 && r->displayPendingOffset < r->displayPendingSize) {
         ssize_t n = write(r->displayFD, r->displayPending + r->displayPendingOffset,
                           r->displayPendingSize - r->displayPendingOffset);
@@ -42,7 +47,9 @@ static void testFlushDisplay(testReporter *r) {
     }
 }
 static void testDisplaySend(testReporter *r, const char *action, const char *name, const char *output, double elapsed) {
-    if (r->displayFD < 0) return;
+    const char *package = r->package;
+    if (multiMode && r != &multiUI) r = &multiUI;
+    if (r->displayFD < 0 && !(multiMode && multiLive && !r->displayInterrupted)) return;
     char *frame = NULL; size_t length = 0;
     FILE *stream = open_memstream(&frame, &length);
     if (!stream) return;
@@ -50,7 +57,11 @@ static void testDisplaySend(testReporter *r, const char *action, const char *nam
     const char *fields[] = {name, output};
     for (size_t i = 0; i < 2; i++) {
         for (const unsigned char *p = (const unsigned char *)fields[i]; *p; p++) fprintf(stream, "%02x", *p);
-        fputc(i ? '\n' : '\t', stream);
+        fputc(i ? (multiMode ? '\t' : '\n') : '\t', stream);
+    }
+    if (multiMode) {
+        for (const unsigned char *p = (const unsigned char *)(package ? package : ""); *p; p++) fprintf(stream, "%02x", *p);
+        fputc('\n', stream);
     }
     fclose(stream);
     size_t remaining = r->displayPendingSize - r->displayPendingOffset;
@@ -60,7 +71,7 @@ static void testDisplaySend(testReporter *r, const char *action, const char *nam
     r->displayPending = pending;
     memcpy(pending + remaining, frame, length);
     r->displayPendingSize = remaining + length; r->displayPendingOffset = 0;
-    testFlushDisplay(r);
+    if (r->displayFD >= 0) testFlushDisplay(r);
     free(frame);
 }
 static void testRestoreTerminal(testReporter *r) {
@@ -70,6 +81,7 @@ static void testRestoreTerminal(testReporter *r) {
     }
 }
 static void testCheckDisplay(testReporter *r) {
+    if (multiMode && r != &multiUI) r = &multiUI;
     if (r->displayPID <= 0) return;
     int status = 0;
     pid_t result = waitpid(r->displayPID, &status, WNOHANG);
@@ -87,7 +99,8 @@ static void testCheckDisplay(testReporter *r) {
     }
 }
 static void testStartDisplay(testReporter *r, const char *executable, int events[2], int output[2]) {
-    if (!executable) return;
+    if (multiMode && r != &multiUI) r = &multiUI;
+    if (!executable || r->displayPID > 0 || r->displayInterrupted) return;
     int input[2];
     if (pipe(input)) { perror("ocean test: live display pipe"); return; }
     r->terminalSaved = tcgetattr(STDIN_FILENO, &r->savedTerminal) == 0;
@@ -110,6 +123,7 @@ static void testStartDisplay(testReporter *r, const char *executable, int events
     fcntl(r->displayFD, F_SETFL, O_NONBLOCK);
 }
 static void testStopDisplay(testReporter *r, double elapsed, int status) {
+    if (multiMode && r != &multiUI) return;
     if (r->displayPID <= 0) return;
     testDisplaySend(r, "done", "", status ? "1" : "0", elapsed);
     for (int attempts = 0; attempts < 200 && r->displayFD >= 0 && r->displayPendingSize; attempts++) {
@@ -142,7 +156,8 @@ static void testPrint(testReporter *r, const char *fmt, ...) {
     FILE *buffer = open_memstream(&text, &size);
     if (!buffer) { va_end(a); return; }
     vfprintf(buffer, fmt, a); va_end(a); fclose(buffer);
-    if (!r->json) fputs(text, stdout);
+    if (!r->json && !multiLive) fputs(text, stdout);
+    if (multiLive && multiUI.report) fputs(text, multiUI.report);
     if (r->report) {
         /* Reports stay plain even when the terminal uses color. */
         for (char *p = text; *p; p++) {
@@ -203,9 +218,24 @@ static void testJSON(testReporter *r, const char *action, const char *name, cons
         fprintf(out, ",\"Elapsed\":%.9f}\n", elapsed); fflush(out);
     }
 }
+static void testGrant(testReporter *r) {
+    while (r->waitingSlots > 0 && r->heldSlots < r->workers) {
+        if (write(r->grantFD, "+", 1) != 1) break;
+        r->waitingSlots--; r->heldSlots++;
+    }
+}
 static void testEvent(testReporter *r, const char *line) {
     char *action = testField(line, "Action"), *name = testField(line, "Test"), *output = testField(line, "Output");
     if (!action || !name || !output) { free(action); free(name); free(output); return; }
+    if (!strcmp(action, "acquire") || !strcmp(action, "release")) {
+        if (sharedBudget) testJSON(r, action, "", "", 0);
+        else {
+            if (!strcmp(action, "acquire")) r->waitingSlots++;
+            else if (r->heldSlots > 0) r->heldSlots--;
+            testGrant(r);
+        }
+        free(action); free(name); free(output); return;
+    }
     const char *e = strstr(line, "\"Elapsed\":");
     double elapsed = e ? strtod(e + 10, NULL) : 0;
     if (!strcmp(action, "complete")) {
@@ -325,16 +355,25 @@ static void testSummary(testReporter *r, double elapsed, int status) {
     }
 }
 static int testExecute(testReporter *r, const char *executable, const char *displayExecutable) {
-    int events[2], output[2];
+    int events[2], output[2], grants[2] = {-1, -1};
+    if (!sharedBudget && pipe(grants)) { perror("ocean test: worker slots"); return 1; }
     if (pipe(events)) { perror("ocean test: pipe"); return 1; }
     if (pipe(output)) { close(events[0]); close(events[1]); perror("ocean test: pipe"); return 1; }
+    if (multiMode) { multiUI.color = r->color; multiUI.includeSkipped = r->includeSkipped; }
     testStartDisplay(r, displayExecutable, events, output);
+    testReporter *ui = multiMode ? &multiUI : r;
     double start = testClock();
     pid_t child = fork();
     if (!child) {
         close(events[0]); close(output[0]);
-        if (r->displayFD >= 0) {
-            close(r->displayFD);
+        if (!sharedBudget) {
+            close(grants[1]);
+            if (dup2(grants[0], 199) < 0) _exit(127);
+            if (grants[0] != 199) close(grants[0]);
+            fcntl(199, F_SETFL, O_NONBLOCK);
+        }
+        if (ui->displayFD >= 0) {
+            close(ui->displayFD);
             int empty = open("/dev/null", O_RDONLY);
             if (empty >= 0) { dup2(empty, STDIN_FILENO); close(empty); }
         }
@@ -346,6 +385,7 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
         execl(executable, executable, "--ocean-test-workers", workers, (char *)NULL); _exit(127);
     }
     close(events[1]); close(output[1]);
+    if (!sharedBudget) { close(grants[0]); r->grantFD = grants[1]; fcntl(r->grantFD, F_SETFL, O_NONBLOCK); }
     if (child < 0) { close(events[0]); close(output[0]); testStopDisplay(r, 0, 1); perror("ocean test: fork"); return 1; }
     runningChild = child;
     if (interrupted) kill(child, interrupted);
@@ -354,6 +394,7 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
     char *pending = NULL; size_t pendingSize = 0;
     int openCount = 2;
     while (openCount) {
+        if (!sharedBudget) testGrant(r);
         testCheckDisplay(r);
         if (!timedOut && r->timeout > 0 && testClock() - start >= r->timeout) {
             timedOut = 1; kill(child, SIGKILL);
@@ -361,8 +402,8 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
             char message[100]; snprintf(message, sizeof(message), "test timed out after %.3fs\n", r->timeout);
             testPackageOutput(r, message);
         }
-        descriptors[2].fd = r->displayFD;
-        descriptors[2].events = r->displayPendingSize ? POLLOUT : 0;
+        descriptors[2].fd = ui->displayFD;
+        descriptors[2].events = ui->displayPendingSize ? POLLOUT : 0;
         if (poll(descriptors, 3, 100) < 0) { if (errno == EINTR) continue; break; }
         if (descriptors[2].revents & (POLLOUT | POLLHUP | POLLERR)) testFlushDisplay(r);
         for (int i = 0; i < 2; i++) {
@@ -391,19 +432,20 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
     int status = 0; pid_t waited;
     do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
     runningChild = 0;
+    if (r->grantFD >= 0) { close(r->grantFD); r->grantFD = -1; }
     status = waited < 0 ? 1 : WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
     if (!r->completed && !status) status = 1;
     if (r->failed && !status) status = 1;
     testStopDisplay(r, testClock() - start, status);
-    if (r->displayInterrupted) status = 130;
+    if (ui->displayInterrupted) status = 130;
     testJSON(r, status ? "fail" : "pass", "", !r->completed ? "test process did not complete" : "", testClock() - start);
     testSummary(r, testClock() - start, status);
     return status;
 }
-static int testMain(int argc, char **argv) {
+static int testOneMain(int argc, char **argv) {
     const char *location = ".", *reportPath = NULL, *jsonPath = NULL;
     int haveLocation = 0, noTTY = 0;
-    testReporter reporter = {.includeSkipped = 1, .timeout = 600, .displayFD = -1, .workers = 16}; reporter.tail = &reporter.results;
+    testReporter reporter = {.includeSkipped = 1, .timeout = 600, .displayFD = -1, .workers = 16, .grantFD = -1}; reporter.tail = &reporter.results;
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "--help") || !strcmp(arg, "-h")) {
@@ -414,8 +456,8 @@ static int testMain(int argc, char **argv) {
                  "--json emits newline-delimited test events; --jsonfile saves them.\n"
                  "--outfile (or -o) saves the plain tang-style report. NO_COLOR disables color.\n"
                  "Interactive terminals use the term/tui live display; --notty disables it.\n"
-                 "Timeout defaults to 10m; 0 disables it. Top-level workers default to 16.\n"
-                 "-t sets the worker count; --single-threaded sets it to 1. Parallel subtests are unbounded.");
+                 "Timeout defaults to 10m; 0 disables it. The command-wide worker limit defaults to 16.\n"
+                 "-t sets the shared worker limit; --single-threaded sets it to 1. Parallel tests obey this limit.");
             return 0;
         } else if (!strcmp(arg, "--single-threaded")) reporter.workers = 1;
         else if (!strcmp(arg, "-t")) {
@@ -475,7 +517,7 @@ static int testMain(int argc, char **argv) {
     if (!failed) failed = nativeBuild(NULL, program, executable, 0, 0);
     char displayExecutable[sizeof(directory) + 16];
     snprintf(displayExecutable, sizeof(displayExecutable), "%s/display", directory);
-    if (!failed && live) {
+    if (!failed && live && (!multiMode || multiUI.displayPID <= 0)) {
         packageBuild *displayBuild = loadTestDisplay();
         parseResult *displayProgram = packageProgram(displayBuild);
         int displayFailed = !displayProgram || analyzeSemantics(displayProgram).nErrors != 0;
@@ -484,10 +526,12 @@ static int testMain(int argc, char **argv) {
         closeBuildCache(cache); freePackage(displayBuild);
         if (displayFailed) { fputs("ocean test: live display unavailable; using final report\n", stderr); live = 0; }
     }
-    if (!failed && reportPath && !(reporter.report = fopen(reportPath, "w"))) { perror("ocean test: report file"); failed = 1; }
-    if (!failed && jsonPath && !(reporter.jsonFile = fopen(jsonPath, "w"))) { perror("ocean test: JSON file"); failed = 1; }
-    char *packagePath = realpath(location, NULL);
-    if (packagePath) {
+    if (!failed && reportPath && !(reporter.report = fopen(reportPath, multiMode && multiTextOpened ? "a" : "w"))) { perror("ocean test: report file"); failed = 1; }
+    if (!failed && jsonPath && !(reporter.jsonFile = fopen(jsonPath, multiMode && multiJSONOpened ? "a" : "w"))) { perror("ocean test: JSON file"); failed = 1; }
+    if (reporter.report) multiTextOpened = 1;
+    if (reporter.jsonFile) multiJSONOpened = 1;
+    char *packagePath = multiMode ? packageTestPath(location) : realpath(location, NULL);
+    if (packagePath && !multiMode) {
         struct stat info;
         if (!stat(packagePath, &info) && !S_ISDIR(info.st_mode)) {
             char *slash = strrchr(packagePath, '/');
@@ -495,6 +539,7 @@ static int testMain(int argc, char **argv) {
         }
     }
     reporter.package = packagePath ? packagePath : location;
+    int ran = 0;
     if (!failed) {
         struct sigaction action = {0}, oldInt, oldTerm, oldHup, oldPipe, ignorePipe = {0};
         action.sa_handler = forwardSignal; sigemptyset(&action.sa_mask);
@@ -502,9 +547,14 @@ static int testMain(int argc, char **argv) {
         sigaction(SIGINT, &action, &oldInt); sigaction(SIGTERM, &action, &oldTerm); sigaction(SIGHUP, &action, &oldHup);
         ignorePipe.sa_handler = SIG_IGN; sigemptyset(&ignorePipe.sa_mask);
         sigaction(SIGPIPE, &ignorePipe, &oldPipe);
+        ran = 1;
         failed = testExecute(&reporter, executable, live ? displayExecutable : NULL);
         sigaction(SIGPIPE, &oldPipe, NULL);
         sigaction(SIGINT, &oldInt, NULL); sigaction(SIGTERM, &oldTerm, NULL); sigaction(SIGHUP, &oldHup, NULL);
+    }
+    if (multiMode && !ran) {
+        testJSON(&reporter, "fail", "", "package could not be compiled", 0);
+        testPrint(&reporter, "FAIL %s: package could not be compiled\n", reporter.package);
     }
     if (reporter.report) {
         int ioFailed = ferror(reporter.report);
@@ -521,4 +571,115 @@ static int testMain(int argc, char **argv) {
     free(reporter.packageOutput); free(reporter.displayPending);
     free(packagePath); freePackage(build); unlink(executable); unlink(displayExecutable); rmdir(directory);
     return failed;
+}
+
+typedef struct testLocations { char **items; size_t count; int failed; } testLocations;
+static void testAddLocation(testLocations *list, const char *path) {
+    char *resolved = packageTestLocation(path);
+    if (!resolved) { perror(path); list->failed = 1; return; }
+    struct stat info;
+    if (!stat(resolved, &info) && !S_ISDIR(info.st_mode)) {
+        size_t n = strlen(resolved);
+        if (n < 3 || strcmp(resolved + n - 3, ".oc")) {
+            fprintf(stderr, "ocean test: expected an Ocean file or package directory: %s\n", path);
+            free(resolved); list->failed = 1; return;
+        }
+        char *slash = strrchr(resolved, '/'); if (slash) *slash = 0;
+    }
+    for (size_t i = 0; i < list->count; i++) if (!strcmp(list->items[i], resolved)) { free(resolved); return; }
+    char **grown = realloc(list->items, (list->count + 1) * sizeof(*grown));
+    if (!grown) exit(1);
+    list->items = grown; list->items[list->count++] = resolved;
+}
+static void testFindLocations(testLocations *list, const char *path) {
+    struct dirent **entries = NULL;
+    int count = scandir(path, &entries, NULL, alphasort), sources = 0;
+    if (count < 0) { perror(path); list->failed = 1; return; }
+    for (int i = 0; i < count; i++) {
+        const char *name = entries[i]->d_name; size_t n = strlen(name);
+        if (n > 3 && !strcmp(name + n - 3, ".oc")) sources = 1;
+    }
+    if (sources) testAddLocation(list, path);
+    for (int i = 0; i < count; i++) {
+        const char *name = entries[i]->d_name;
+        if (*name != '.' && strcmp(name, "vendor") && strcmp(name, "node_modules")) {
+            char *child = malloc(strlen(path) + strlen(name) + 2);
+            sprintf(child, "%s/%s", path, name);
+            struct stat info;
+            if (!lstat(child, &info) && S_ISDIR(info.st_mode)) testFindLocations(list, child);
+            free(child);
+        }
+        free(entries[i]);
+    }
+    free(entries);
+}
+#include "test_packages.inc"
+
+static int testMain(int argc, char **argv) {
+    int count = 0, recursive = 0;
+    const char *report = NULL, *jsonFile = NULL;
+    char **flags = calloc((size_t)argc + 2, sizeof(*flags)); int nflags = 2;
+    flags[0] = argv[0]; flags[1] = argv[1];
+    testLocations list = {0};
+    int json = 0, notty = 0;
+    for (int i = 2; i < argc; i++) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "--help") || !strcmp(arg, "-h")) {
+            puts("Usage: ocean test [packages...] [options]\n"
+                 "Locations may be directories or files; ./... and engine/... recursively select packages.\n"
+                 "Overlapping selections run once. Packages share the configured worker limit.\n"
+                 "Options: --json --outfile path --jsonfile path -v --no-color --hide-skipped\n"
+                 "         --timeout duration --notty -t nthreads --single-threaded");
+            free(flags); return 0;
+        }
+        if (*arg == '-') {
+            flags[nflags++] = argv[i];
+            if (!strcmp(arg, "--json") || !strcmp(arg, "-json")) json = 1;
+            if (!strcmp(arg, "--notty") || !strcmp(arg, "-notty") || !strcmp(arg, "--no-tui")) notty = 1;
+            int value = !strcmp(arg, "-t") || !strcmp(arg, "--timeout") || !strcmp(arg, "-timeout") ||
+                !strcmp(arg, "--outfile") || !strcmp(arg, "-outfile") || !strcmp(arg, "-o") ||
+                !strcmp(arg, "--jsonfile") || !strcmp(arg, "-jsonfile");
+            if (value && i + 1 < argc) {
+                flags[nflags++] = argv[++i];
+                if (strstr(arg, "jsonfile")) jsonFile = argv[i];
+                else if (!strcmp(arg, "-o") || strstr(arg, "outfile")) report = argv[i];
+            }
+            continue;
+        }
+        count++;
+        size_t n = strlen(arg);
+        if (!strcmp(arg, "...") || (n >= 4 && !strcmp(arg + n - 4, "/..."))) {
+            recursive = 1;
+            char *base = !strcmp(arg, "...") ? strdup(".") : strndup(arg, n - 4);
+            char *resolved = packageTestLocation(*base ? base : "/");
+            if (resolved) { testFindLocations(&list, resolved); free(resolved); }
+            else { fprintf(stderr, "ocean test: package not found: %s\n", base); list.failed = 1; }
+            free(base);
+        } else testAddLocation(&list, arg);
+    }
+    if (count == 0) {
+        for (size_t i = 0; i < list.count; i++) free(list.items[i]);
+        free(list.items); free(flags); return testOneMain(argc, argv);
+    }
+    if (count == 1 && !recursive && !list.failed && list.count == 1) {
+        flags[nflags] = list.items[0];
+        int result = testOneMain(nflags + 1, flags);
+        free(list.items[0]); free(list.items); free(flags); return result;
+    }
+    if (list.failed || !list.count) {
+        if (!list.count) fputs("ocean test: no packages matched\n", stderr);
+        for (size_t i = 0; i < list.count; i++) free(list.items[i]);
+        free(list.items); free(flags); return 1;
+    }
+    // Protect sources in later packages before any report gets truncated.
+    const char *outputs[] = {report, jsonFile};
+    for (int i = 0; i < 2; i++) if (outputs[i]) {
+        size_t n = strlen(outputs[i]);
+        if (n >= 3 && !strcmp(outputs[i] + n - 3, ".oc")) {
+            fputs("ocean test: output would overwrite an Ocean source file\n", stderr); list.failed = 1;
+        }
+    }
+    int status = list.failed ? 1 : testPackages(argc, flags, nflags, &list, report, jsonFile, json, notty);
+    for (size_t i = 0; i < list.count; i++) free(list.items[i]);
+    free(list.items); free(flags); return status;
 }

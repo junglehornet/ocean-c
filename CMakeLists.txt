@@ -87,6 +87,12 @@ if(BUILD_TESTING)
         set_tests_properties(ocean_test_tui_test PROPERTIES TIMEOUT 120
             ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
     endif()
+    if(UNIX)
+        add_test(NAME ocean_test_packages_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/ocean_test_packages_test.py" "$<TARGET_FILE:ocean-c>")
+        set_tests_properties(ocean_test_packages_test PROPERTIES TIMEOUT 120
+            ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
+    endif()
     add_test(NAME ocean_test_parallel_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/ocean_test_parallel_test.py" "$<TARGET_FILE:ocean-c>")
     set_tests_properties(ocean_test_parallel_test PROPERTIES TIMEOUT 120
