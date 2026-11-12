@@ -91,6 +91,25 @@ func TestSkip(t *testing.T) { t.Skip("not available"); }
         expect(b'TestFirst/child')
         expect(b'TestSecond')
         expect('✓     TestFirst'.encode())
+        # A complete live frame must keep First's child beneath its parent,
+        # regardless of which concurrent root function started first.
+        deadline = time.monotonic() + 3
+        while True:
+            frames = SGR.sub(b'', received).split(b'\x1b[J')
+            complete = [frame for frame in frames if '✓     TestFirst'.encode() in frame
+                        and b'TestFirst/child ' in frame and b'TestSecond ' in frame
+                        and '↑/↓ scroll'.encode() in frame]
+            if complete:
+                frame = complete[-1]
+                parent = frame.index(b'TestFirst ')
+                child = frame.index(b'TestFirst/child ')
+                assert parent < child, frame
+                for other in (b'TestSecond ', b'TestSkip '):
+                    assert other not in frame or not parent < frame.index(other) < child, frame
+                break
+            assert time.monotonic() < deadline, bytes(received)[-4000:]
+            if select.select([master], [], [], .1)[0]:
+                received.extend(os.read(master, 65536))
         # First has finished while Second is still running: this must be a live
         # completion, not output printed after the test executable has exited.
         assert process.poll() is None

@@ -1068,8 +1068,9 @@ func TestConcurrent(t *testing.T) {
 Interactive terminals show a live [tang](https://github.com/ansel1/tang)-style
 TUI implemented in Ocean with `term/tui`. It updates running and completed tests,
 nested subtests, live output, status counts (▶ / ⏸ / ✓ / ✗ / ∅ / ∑), and elapsed
-time. The frontend handles terminal resizing; use ↑/↓ or Page Up/Page Down to
-scroll, `f` or End to follow recent tests, and `q` or Ctrl+C to stop the suite.
+time. Subtests stay grouped under their nearest parent, including when parallel
+tests emit interleaved events. The frontend handles terminal resizing; use ↑/↓ or
+Page Up/Page Down to scroll, `f` or End to follow recent tests, and `q` or Ctrl+C to stop the suite.
 After execution, the live view is cleared and the final report is printed.
 
 The TUI requires terminal stdin/stdout and a TERM other than `dumb`.
