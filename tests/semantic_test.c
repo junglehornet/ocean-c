@@ -135,7 +135,7 @@ int main(void) {
     analyze("func f() (int result) { result = 1; return; }", 1);
     analyze("func main() { later(1); } func later(x int) {}", 1);
     analyze("func main() { if (1) {} }", 0);
-    analyze("func identity[T any](value T) T { return value; } func main() { f := identity[int]; x "
+    analyze("func identity<T any>(value T) T { return value; } func main() { f := identity<int>; x "
             ":= f(1); }",
             1);
     parseResult p = analyze("func main() { callbacks := {func(x int) int { return x; }}; i := 0; "
@@ -259,8 +259,8 @@ int main(void) {
     analyze("struct P { x int; } struct Box<T any>(T parameter, int tag) { value T; } func main() { b: Box<P> = {{1}, 2, {3}}; b.parameter.x = 4; }", 0);
     analyze("struct Box<T any>(T parameter) { value T; } func main() { b := Box<int>{1, 2}; b.value = 3; }", 1);
     analyze("struct Box<T any>(T parameter) { value T; } func main() { b := Box<int>{1, 2}; b.parameter = 3; }", 0);
-    analyze("struct Box[T any](T parameter) { value T; } func main() { b := Box[int]{1, 2}; b.value = 3; }", 1);
-    analyze("struct Box[T any](T parameter) { value T; } func main() { b := Box[int]{1, 2}; b.parameter++; }", 0);
+    analyze("struct Box<T any>(T parameter) { value T; } func main() { b := Box<int>{1, 2}; b.value = 3; }", 1);
+    analyze("struct Box<T any>(T parameter) { value T; } func main() { b := Box<int>{1, 2}; b.parameter++; }", 0);
     analyze("struct Box<T any>(T parameter) { value T; } func main() { b: Box<int> = {true, 2}; }", 0);
     analyze("struct Box<T any>(T parameter) {} func use(b Box<int>) {} func main() { b := Box<bool>{true}; use(b); }", 0);
     analyze("struct Box<T any>(T parameter) { value T; } func main() { b: Box<int, bool> = {1, 2}; }", 0);

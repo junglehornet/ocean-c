@@ -1945,51 +1945,6 @@ static Type *expression(Context *c, expr *e) {
     }
     case EXPR_TYPE_INSTANTIATION: {
         struct expr_instantiation *v = e->underlying;
-        typeTokens constructorType;
-        Symbol *namedType =
-            v->parent.type == EXPR_TYPE_IDENTIFIER
-                ? lookup(c, ((struct expr_identifier *)v->parent.underlying)->lexeme.lexeme)
-                : NULL;
-        int genericRecord = namedType && namedType->isType && namedType->type->record &&
-                            namedType->type->record->nTypeParams;
-        if (!genericRecord && v->nTypeArguments == 1 &&
-            typeExpression(c, &v->parent, &constructorType)) {
-            free(constructorType.tokens);
-            expr *count = parseBufferDimension(v->typeArguments[0]);
-            if (!count) {
-                error(c, at, "invalid array item count");
-                return &unknown;
-            }
-            struct expr_index *index = malloc(sizeof(*index));
-            if (!index)
-                exit(1);
-            *index = (struct expr_index){v->parent, *count, v->location};
-            free(count);
-            free(v->typeArguments[0].tokens);
-            free(v->typeArguments);
-            free(v);
-            e->type = EXPR_TYPE_INDEX;
-            e->underlying = index;
-            return expression(c, e);
-        }
-        if (v->nTypeArguments == 1 && v->typeArguments[0].nTokens == 1) {
-            token arg = v->typeArguments[0].tokens[0];
-            Symbol *s = lookup(c, arg.lexeme);
-            if ((s && !s->isType) || !strcmp(arg.lexeme, "true") || !strcmp(arg.lexeme, "false")) {
-                struct expr_index *idx = malloc(sizeof(*idx));
-                struct expr_identifier *id = malloc(sizeof(*id));
-                if (!idx || !id)
-                    exit(1);
-                *id = (struct expr_identifier){.lexeme = arg};
-                *idx = (struct expr_index){v->parent, {EXPR_TYPE_IDENTIFIER, id, arg}, v->location};
-                free(v->typeArguments[0].tokens);
-                free(v->typeArguments);
-                free(v);
-                e->type = EXPR_TYPE_INDEX;
-                e->underlying = idx;
-                return expression(c, e);
-            }
-        }
         Type *base = expression(c, &v->parent), *t = allocate(c, sizeof(*t));
         if (base->enumeration && v->location.type == LEFT_BRACKET) {
             error(c, v->location, "Enum type arguments require angle brackets <...>"); return &unknown;

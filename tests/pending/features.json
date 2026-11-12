@@ -39,7 +39,7 @@
         },
         {
           "id": "instantiation",
-          "source": "identity[int](1);",
+          "source": "identity<int>(1);",
           "check": "accept",
           "stdout": "(INSTANTIATION"
         }
@@ -205,7 +205,7 @@
       "cases": [
         {
           "id": "substitution",
-          "source": "func identity[T any](value T) T { return value; } func main() { x := identity[int](1); }",
+          "source": "func identity<T any>(value T) T { return value; } func main() { x := identity<int>(1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -215,7 +215,7 @@
         },
         {
           "id": "arity",
-          "source": "func identity[T any](value T) T { return value; } func main() { identity[int, string](1); }",
+          "source": "func identity<T any>(value T) T { return value; } func main() { identity<int, string>(1); }",
           "expected": {
             "ok": false,
             "diagnostic": "type_argument_count"
@@ -249,7 +249,7 @@
         },
         {
           "id": "generic_callable",
-          "source": "func identity[T any](value T) T { return value; } func main() { identity[int](1); }",
+          "source": "func identity<T any>(value T) T { return value; } func main() { identity<int>(1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -267,7 +267,7 @@
       "cases": [
         {
           "id": "callable",
-          "source": "func identity[T any](value T) T { return value; } func main() { f := identity[int]; result := f(1); }",
+          "source": "func identity<T any>(value T) T { return value; } func main() { f := identity<int>; result := f(1); }",
           "expected": {
             "ok": true,
             "facts": {
@@ -297,7 +297,7 @@
         },
         {
           "id": "type_argument",
-          "source": "struct Box[T any] { value T; } type IntBox Box[int];",
+          "source": "struct Box<T any> { value T; } type IntBox Box<int>;",
           "expected": {
             "ok": true,
             "facts": {
@@ -308,7 +308,7 @@
         },
         {
           "id": "reserved_type",
-          "source": "struct Box[T any] { value T; } type Bad Box[index];",
+          "source": "struct Box<T any> { value T; } type Bad Box<index>;",
           "expected": {
             "ok": false,
             "diagnostic": "reserved_type_name"
@@ -474,7 +474,7 @@
       "cases": [
         {
           "id": "substitution",
-          "source": "struct Matrix[T any](u64 width, height) { data T[height][width]; } type M Matrix[int](3, 2);",
+          "source": "struct Matrix<T any>(u64 width, height) { data T[height][width]; } type M Matrix<int>(3, 2);",
           "expected": {
             "ok": true,
             "facts": {
@@ -537,7 +537,7 @@
       "cases": [
         {
           "id": "success",
-          "source": "struct Box[T any] { value T; } func f() { x := Box[int]{value: 1}; }",
+          "source": "struct Box<T any> { value T; } func f() { x := Box<int>{value: 1}; }",
           "expected": {
             "ok": true,
             "facts": {

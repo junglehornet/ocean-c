@@ -535,6 +535,10 @@ No standard-library import or build/module configuration change is required.
 
 ## User types and generics
 
+Generic parameters and arguments use only angle brackets: `func identity<T>(x T) T`
+and `identity<int>(42)`. Square brackets denote indexing, slicing, array dimensions,
+or map key types; `vars[v.name]` is a map lookup, never generic specialization.
+
 Interface values, including `any`, are nullable. Uninitialized interfaces and
 `zero(InterfaceType)` equal `null`; assign, pass, or return `null` where an
 interface is expected. Check with `iface == null` or `iface != null`. Calling a

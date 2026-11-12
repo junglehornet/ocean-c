@@ -98,7 +98,7 @@ int main(void) {
     struct stmt_type *type = r.statements[0].value;
     assert(type->underlying.nTokens == 7 && type->underlying.tokens[6].type == GREATER_THAN);
     valid("type Deep Box<Box<Box<int>>>;");
-    valid("type Mixed Box<Box[int], Pair<int, []string>>;");
+    valid("type Mixed Box<Box<int>, Pair<int, []string>>;");
     valid("interface Derived<T Box<int>> { Read(value Box<T>) Box<T>; }");
     valid("func constrained<T Box<Box<int>>>(value T) T { return value; }");
     r = valid("struct Constrained<T Box<int>> { value T; }");
@@ -132,27 +132,31 @@ int main(void) {
     invalid("type Empty Box<>;"); invalid("type Broken Box<int,,string>;");
     invalid("type Broken Box<Box<int>;");
 
-    e = expression("identity := func[T any](value T) T { return value; };");
+    e = expression("identity := func<T any>(value T) T { return value; };");
     assert(e.type == EXPR_TYPE_FUNCTION);
     function = e.underlying;
     assert(function->nTypeParams == 1 && function->nParams == 1 && function->nResults == 1);
     e = expression("identity := func<T any>(value T) T { return value; };");
     assert(e.type == EXPR_TYPE_FUNCTION && ((struct stmt_func*)e.underlying)->nTypeParams == 1);
-    invalid("x := func[]() {};"); invalid("x := func[T any, T any]() {};");
-    invalid("x := func[T any](x ...T, y T) {};");
+    invalid("x := func[]() {};"); invalid("x := func<T any, T any>() {};");
+    invalid("x := func<T any>(x ...T, y T) {};");
     invalid("struct Bad { +[T any]() {} }");
 
-    inst = instance(expression("identity[int];"), 1);
+    inst = instance(expression("identity<int>;"), 1);
     assert(inst->parent.type == EXPR_TYPE_IDENTIFIER);
-    inst = instance(expression("callback := pkg.identity[int];"), 1);
+    inst = instance(expression("callback := pkg.identity<int>;"), 1);
     assert(inst->parent.type == EXPR_TYPE_DOT);
     instance(expression("identity<int>;"), 1);
     instance(expression("identity<int,>;"), 1);
-    instance(expression("identity[Box<int>, []string,];"), 2);
-    instance(expression("a[i];"), 1); // Type/value ambiguity is retained for name resolution.
+    instance(expression("identity<Box<int>, []string,>;"), 2);
+    e = expression("a[i];"); assert(e.type == EXPR_TYPE_INDEX);
+    e = expression("vars[v.name];"); assert(e.type == EXPR_TYPE_INDEX);
+    e = expression("identity[int];"); assert(e.type == EXPR_TYPE_INDEX);
+    invalid("func legacy[T]() {}"); invalid("struct Legacy[T] {}");
+    invalid("interface Legacy[T] {}");
     e = expression("a[i + 1];"); assert(e.type == EXPR_TYPE_INDEX);
     e = expression("a[0];"); assert(e.type == EXPR_TYPE_INDEX);
-    invalid("identity[int,,string];"); invalid("identity[[]];");
+    invalid("identity<int,,string>;"); invalid("identity<[]>;");
 
     e = expression("self[];");
     assert(e.type == EXPR_TYPE_INDEX && ((struct expr_index*)e.underlying)->index.type == EXPR_TYPE_NULL);

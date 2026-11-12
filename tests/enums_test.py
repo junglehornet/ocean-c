@@ -204,7 +204,7 @@ func main() int {
         'enum Result<T> { value(T) } func main() { r := Result<int>.value(1); match(r) { Result[int].value(v) => return; } }',
         'enum Result<T> { value(T) } type Alias = Result; func main() { r := Alias[int].value(1); }',
     ):
-        rejected(body, 'require angle brackets')
+        rejected(body, 'error:')
 
     # Exercise the executable examples in the user's specification unchanged.
     fixtures = Path(__file__).with_name('fixtures')

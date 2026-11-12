@@ -976,8 +976,10 @@ func main() {
 }
 ```
 
-Direct generic function calls require explicit type arguments (`<int>` or
-`[int]`) and are specialized for each concrete argument list. Generic function
+Generic type parameters and arguments use angle brackets only. Square brackets
+are reserved for indexing, slicing, array dimensions, and map key types.
+Direct generic function calls require explicit type arguments (`<int>`)
+and are specialized for each concrete argument list. Generic function
 values require an explicit specialization; type argument inference remains unsupported. `zero(...)`, like
 `sizeof(...)`, uses builtin syntax; a bare variable named `zero` is allowed.
 

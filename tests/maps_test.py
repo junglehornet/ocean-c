@@ -40,6 +40,23 @@ with tempfile.TemporaryDirectory(prefix='ocean maps ') as directory:
         assert built.returncode == 0, built.stderr
         assert run(str(executable)).returncode != 0, body
 
+    program('''struct Variable { name string; }
+    func lookup(vars map[string]float, v Variable) float {
+        val, ok := vars[v.name];
+        if (!ok) return -1;
+        return val;
+    }
+    func main() int {
+        vars := map[string]float{"ans": 3}; v := Variable{"ans"};
+        if (lookup(vars, v) != 3 || lookup(vars, Variable{"missing"}) != -1) return 1;
+        vars[v.name] = 5;
+        if (vars[v.name] != 5) return 2;
+        vars[v.name] += 2;
+        val, ok := vars[v.name];
+        if (!ok || val != 7) return 3;
+        return 0;
+    }''')
+
     program('''func main() int {
         m := map[string]int{"one": 1, "two": 2, "one": 4};
         if (len(m) != 2 || m["one"] != 4) return 1;

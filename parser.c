@@ -447,7 +447,7 @@ static expr primary(parserState *state) {
                     break;
                 }
                 struct expr_instantiation instance = {.parent = parent, .location = tok};
-                if (tryCallTypeArguments(state, &instance)) {
+                if (angle && tryCallTypeArguments(state, &instance)) {
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_INSTANTIATION, instance, result);
                     parent = result;
                     break;
@@ -1181,31 +1181,11 @@ static char parseAngleTypes(parserState *state, size_t depth) {
     return closeAngle(state);
 }
 
-static char parseTypeBrackets(parserState *state, size_t depth, char prefix) {
+static char parseTypeBrackets(parserState *state, size_t depth) {
     if (depth >= PARSER_MAX_RECURSION_DEPTH)
         return signatureError(state, "Type nesting limit exceeded");
     token tok = advance(state);
     if (tok.type == RIGHT_BRACKET) { advance(state); return 1; }
-    if (!prefix) {
-        // A suffix may be generic arguments or an Ocean array dimension. Try
-        // types on an isolated cursor; only commit after the complete list.
-        parserState trial = *state;
-        trial.quietErrors = 1;
-        char ok = 1;
-        do {
-            if (!parseSignatureType(&trial, depth + 1)) { ok = 0; break; }
-            tok = currentToken(&trial);
-            if (tok.type != COMMA) break;
-            tok = advance(&trial);
-            if (tok.type == RIGHT_BRACKET) break;
-        } while (1);
-        if (ok && tok.type == RIGHT_BRACKET) {
-            state->tokenIndex = trial.tokenIndex;
-            state->pendingGreater = trial.pendingGreater;
-            advance(state);
-            return 1;
-        }
-    }
     if (!parseTypeDimension(state, depth + 1, 1)) return 0;
     SET_TOK;
     if (tok.type != RIGHT_BRACKET) return signatureError(state, "Expected closing array dimension bracket");
@@ -1383,7 +1363,7 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
         return parseSignatureType(state, depth + 1);
     }
     if (tok.type == LEFT_BRACKET) {
-        if (!parseTypeBrackets(state, depth + 1, 1)) return 0;
+        if (!parseTypeBrackets(state, depth + 1)) return 0;
         return parseSignatureType(state, depth + 1);
     }
     if (tok.type == STRUCT || tok.type == INTERFACE) {
@@ -1446,22 +1426,21 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
             advance(state);
         } else if (tok.type == LESS_THAN) {
             if (!parseAngleTypes(state, depth + 1)) return 0;
-        } else if (!parseTypeBrackets(state, depth + 1, 0)) return 0;
+        } else if (!parseTypeBrackets(state, depth + 1)) return 0;
         SET_TOK;
     }
     return 1;
 }
 
 // Speculate using the type grammar without changing the expression cursor.
-// Bracketed type lists also represent standalone generic values.
 // Angle lists in expressions require a call, composite literal, or expression
 // delimiter after the closing angle to distinguish relational operators.
 static char tryCallTypeArguments(parserState *state, struct expr_instantiation *result) {
     parserState trial = *state;
     trial.quietErrors = 1;
-    char angle = currentToken(state).type == LESS_THAN;
+    if (currentToken(state).type != LESS_THAN) return 0;
     token tok = advance(&trial);
-    if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) return 0;
+    if (angleEnd(tok)) return 0;
     typeTokens *arguments = nullptr;
     size_t count = 0;
     do {
@@ -1474,19 +1453,14 @@ static char tryCallTypeArguments(parserState *state, struct expr_instantiation *
         tok = currentToken(&trial);
         if (tok.type != COMMA) break;
         tok = advance(&trial);
-        if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) break;
+        if (angleEnd(tok)) break;
     } while (1);
-    if (angle) {
-        if (!angleEnd(tok) || !closeAngle(&trial)) goto notTypes;
-        tok = currentToken(&trial);
-        if (tok.type != LEFT_PAREN && tok.type != LEFT_CURLY_BRACE && tok.type != LEFT_BRACKET &&
-            tok.type != SEMICOLON && tok.type != COMMA && tok.type != RIGHT_PAREN &&
-            tok.type != RIGHT_BRACKET && tok.type != RIGHT_CURLY_BRACE &&
-            tok.type != DOT && tok.type != FAT_ARROW && tok.type != EOF_TOKEN) goto notTypes;
-    } else {
-        if (tok.type != RIGHT_BRACKET) goto notTypes;
-        advance(&trial);
-    }
+    if (!angleEnd(tok) || !closeAngle(&trial)) goto notTypes;
+    tok = currentToken(&trial);
+    if (tok.type != LEFT_PAREN && tok.type != LEFT_CURLY_BRACE && tok.type != LEFT_BRACKET &&
+        tok.type != SEMICOLON && tok.type != COMMA && tok.type != RIGHT_PAREN &&
+        tok.type != RIGHT_BRACKET && tok.type != RIGHT_CURLY_BRACE &&
+        tok.type != DOT && tok.type != FAT_ARROW && tok.type != EOF_TOKEN) goto notTypes;
     state->tokenIndex = trial.tokenIndex;
     state->pendingGreater = trial.pendingGreater;
     result->nTypeArguments = count;
@@ -1501,7 +1475,7 @@ notTypes:
 // Retain the type grammar's handling of nested angle closers and array dimensions.
 char parseTypeApplicationArguments(typeTokens span, typeTokens **arguments, size_t *count) {
     *arguments = nullptr; *count = 0;
-    if (span.nTokens < 3 || (span.tokens[1].type != LEFT_BRACKET && span.tokens[1].type != LESS_THAN)) return 0;
+    if (span.nTokens < 3 || span.tokens[1].type != LESS_THAN) return 0;
     token *tokens = calloc(span.nTokens + 1, sizeof(*tokens));
     CHECK_MALLOC(tokens);
     memcpy(tokens, span.tokens, span.nTokens * sizeof(*tokens));
@@ -1677,14 +1651,14 @@ static char parseTypeConstraint(parserState *state) {
 }
 
 // Type parameter declarations retain Go's name-before-constraint order:
-// [T, U any, V ~int | ~string] or <T, U any, V ~int | ~string>.
+// <T, U any, V ~int | ~string>.
 // Omitted constraints default to any. These names are types, not value parameters.
 static char parseTypeParameters(parserState *state, signatureFields *fields) {
     DEFINE_TOK;
-    char angle = tok.type == LESS_THAN;
+    if (tok.type != LESS_THAN) return signatureError(state, "Type parameters require angle brackets <...>");
     tok = advance(state);
-    if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) return signatureError(state, "Expected type parameter");
-    while (tok.type != RIGHT_BRACKET && !(angle && angleEnd(tok))) {
+    if (angleEnd(tok)) return signatureError(state, "Expected type parameter");
+    while (!angleEnd(tok)) {
         size_t namesStart = state->tokenIndex, count = 0;
         do {
             if (tok.type != IDENTIFIER) return signatureError(state, "Expected type parameter name");
@@ -1694,9 +1668,9 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
             tok = advance(state);
             if (tok.type != COMMA) break;
             tok = advance(state);
-            if ((!angle && tok.type == RIGHT_BRACKET) || (angle && angleEnd(tok))) break;
+            if (angleEnd(tok)) break;
         } while (1);
-        char implicitAny = (!angle && tok.type == RIGHT_BRACKET) || (angle && angleEnd(tok));
+        char implicitAny = angleEnd(tok);
         size_t start = state->tokenIndex;
         if (!implicitAny && !parseTypeConstraint(state)) return 0;
         SET_TOK;
@@ -1714,13 +1688,11 @@ static char parseTypeParameters(parserState *state, signatureFields *fields) {
                 constraint->tokens[0].lexeme = "any";
             }
         }
-        if (tok.type == RIGHT_BRACKET || (angle && angleEnd(tok))) break;
+        if (angleEnd(tok)) break;
         if (tok.type != COMMA) return signatureError(state, "Expected comma after type constraint");
         tok = advance(state);
     }
-    if (angle) return closeAngle(state);
-    advance(state);
-    return 1;
+    return closeAngle(state);
 }
 
 // Receiver arguments declare names, rather than specializing the method.
@@ -1732,7 +1704,7 @@ static char bindReceiverParameters(parserState *state, struct stmt_func *functio
     if (!base.nTokens || base.tokens[0].type != IDENTIFIER)
         return signatureError(state, "Expected a struct receiver type or pointer to one");
     if (base.nTokens == 1) return 1;
-    if (base.tokens[1].type != LESS_THAN && base.tokens[1].type != LEFT_BRACKET)
+    if (base.tokens[1].type != LESS_THAN)
         return signatureError(state, "Expected a struct receiver type or pointer to one");
     typeTokens *arguments = NULL;
     size_t count = 0;
