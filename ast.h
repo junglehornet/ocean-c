@@ -156,6 +156,7 @@ struct stmt_switch {
     stmt initializer; // STMT_NULL when absent.
     char isTypeSwitch;
     char isMatch;
+    char exhaustiveMatch; // Lowered enum match covers every variant without a default.
     token binding; // EOF_TOKEN when the type guard has no binding.
     expr *value; // NULL for a condition-only switch.
     size_t nCases;

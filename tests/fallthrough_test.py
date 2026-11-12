@@ -74,6 +74,41 @@ with tempfile.TemporaryDirectory(prefix="ocean fallthrough ") as directory:
     program("func noExit() int { again: goto again; } "
             "func choose(x any) int { switch (x.(type)) { default: {} case any: return 3; } } "
             "func main() int { return choose(true); }", 0, 3)
+    # Exhaustive enum matches have no unmatched path, including when nested.
+    program('''enum Operation { Negate }
+    func negate(res Result<float>, op Operation) Result<float> {
+        switch (op) {
+            case Operation.Negate:
+                match (res) {
+                    Result<float>.error => return res;
+                    Result<float>.value => return Result<float>.value(-res.unwrap());
+                }
+            default: panic "unknown operation";
+        }
+    }
+    func main() int {
+        result := negate(Result<float>.value(3), Operation.Negate);
+        if (result.unwrap() != -3) return 1;
+        result = negate(Result<float>.error("expected"), Operation.Negate);
+        if (!result.hasError() || result.error() != "expected") return 2;
+        return 0;
+    }''', 0)
+    # Covering all variants does not imply that all branch bodies return.
+    program('''enum Choice { A, B }
+    func empty(c Choice) int { match(c) { Choice.A => return 4; Choice.B => {} } }
+    func conditional(c Choice, flag bool) int { match(c) { Choice.A => return 3; Choice.B => { if (flag) return 2; } } }
+    func main() int { return empty(Choice.A) + empty(Choice.B) + conditional(Choice.A, false) + conditional(Choice.B, false); }
+    ''', 2, 7)
+    # Missing variants still warn about both coverage and possible fallthrough.
+    program('''enum Choice { A, B }
+    func partial(c Choice) int { match(c) { Choice.A => return 4; } }
+    func main() int { return partial(Choice.A) + partial(Choice.B); }
+    ''', 2, 4)
+    program('''enum Choice { A, B }
+    func fallback(c Choice) int { match(c) { Choice.A => return 4; Choice => return 3; } }
+    func main() int { return fallback(Choice.A) + fallback(Choice.B); }
+    ''', 0, 7)
+
     # A generic declaration warns once, independent of specialization/call count.
     text = 'package main;\nfunc missing<T>() T {\n}\nfunc main() int { return missing<int>(); }\n'
     source.write_text(text)

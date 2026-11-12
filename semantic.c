@@ -1172,7 +1172,7 @@ static FlowNode *flowStatement(Flow *f, stmt *s, FlowNode *next, FlowNode *break
                     }
                 }
         }
-        if (!exhaustive) flowEdge(f, node, fallback);
+        if (!exhaustive && !sw->exhaustiveMatch) flowEdge(f, node, fallback);
         return flowStatement(f, &sw->initializer, node, breakTo, continueTo, fallTo, NULL);
     }
     default: flowEdge(f, node, next); return node;

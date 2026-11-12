@@ -304,6 +304,10 @@ func main() int {
 }
 ```
 
+Return-path analysis recognizes exhaustive enum `match` statements. When every
+variant returns or panics, the match does not trigger an implicit-zero-return
+warning. Covering every variant still warns if a reachable arm can fall through.
+
 Control flow includes `if`/`else`, `for`, range loops, `switch`, `break`,
 `continue`, and explicit `fallthrough`. A one-binding range receives the index,
 not the element. Use `_` in either binding to discard it, such as

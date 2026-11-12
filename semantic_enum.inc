@@ -211,7 +211,9 @@ static void lowerMatch(Context *c, struct stmt_switch *v, Type *subject, token a
             /* A bare variant intentionally ignores its entire payload. */
         }
     }
+    v->exhaustiveMatch = !fallback;
     if (!fallback) for (size_t i = 0; i < decl->nMembers; i++) if (!seen[i]) {
+        v->exhaustiveMatch = 0;
         diagnostic(programSource(c->program, at.filename), at, "semantic", "warning", "non-exhaustive enum match: missing %s", decl->names[i].lexeme);
     }
     free(seen); v->isMatch = 0;
