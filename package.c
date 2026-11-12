@@ -618,6 +618,13 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
                 continue;
             }
             char *alias = node->importedName ? node->importedName : imported->name;
+            if (!node->importedName && imported->module &&
+                !strcmp(imported->directory, imported->module->root)) {
+                // Use the importing module path, including when a dependency
+                // is replaced by a module with a different declared name.
+                const char *slash = strrchr(node->path, '/');
+                alias = pkgString(b, slash ? slash + 1 : node->path);
+            }
             if (!alias) continue;
             for (Import *old = file->imports; old; old = old->next)
                 if (!strcmp(old->alias, alias) && strcmp(alias, "_") && strcmp(alias, "."))
@@ -1221,6 +1228,10 @@ static void candidateDirectory(packageBuild *b, const char *directoryPath, const
         }
     }
     closedir(dir);
+    if (name && !depth && *importPath) {
+        const char *slash = strrchr(importPath, '/');
+        name = pkgString(b, slash ? slash + 1 : importPath);
+    }
     if (name && strcmp(name, "main") && *importPath &&
         (!b->root || strcmp(directoryPath, b->root->directory)) &&
         (!b->testDirectory || strcmp(directoryPath, b->testDirectory))) visit(name, importPath, context);

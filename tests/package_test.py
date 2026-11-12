@@ -251,6 +251,23 @@ with tempfile.TemporaryDirectory(prefix="ocean packages ") as temporary:
           'func main() int { return deeper.Answer(); }')
     invoke("run", ".", status=11)
 
+    # Module roots use the module path's final component, not their declared
+    # package name. Local replacements retain the importing module's name.
+    write(external / "ocean.mod", 'module example.com/replacement\n')
+    for declared in ('main', 'different'):
+        write(external / 'value.oc', 'package ' + declared + '; '
+              'func Answer() int { return 13; } '
+              'func main() { panic "imported entry point must not run"; }')
+        for binding, qualifier in (('', 'dependency'), (' as dep', 'dep'), (' .', '')):
+            import_stmt = ('import . "github.com/example/dependency";' if binding == ' .'
+                           else 'import "github.com/example/dependency"' + binding + ';')
+            write(root / 'main.oc', 'package main; ' + import_stmt +
+                  ' func main() int { return ' + (qualifier + '.' if qualifier else '') + 'Answer(); }')
+            invoke('run', '.', status=13)
+    write(external / 'ocean.mod', 'module github.com/example/dependency\n')
+    write(root / 'main.oc', 'package main; import "github.com/example/dependency/sub/deeper"; '
+          'func main() int { return deeper.Answer(); }')
+
     # Exercise the real Git download path without accessing the network.
     def git(*args):
         result = run(['git', *map(str, args)])

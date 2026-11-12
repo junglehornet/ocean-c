@@ -176,8 +176,12 @@ func main() int { return helper.Answer(); }
 
 Imports resolve within the module, the standard-library source tree, or external
 Git repositories over HTTPS. Module-relative imports such as `"helper"` work.
-The default qualifier is the imported package's declared name; `as alias`, dot
-imports, and blank imports are supported. Import bindings are file-scoped.
+The default qualifier is the imported package's declared name, except at a module
+root: importing any root package uses the final component of the module import
+path, regardless of its package declaration (including `package main;`). For
+example, `import "example.com/calculator";` binds `calculator`. Explicit
+`as alias`, dot imports, and blank imports override the default. Import bindings
+are file-scoped.
 Capitalized names are exported (including types, globals, and receiver methods);
 lowercase names remain package-private. Extern declarations are file-scoped and
 are not exported. Import cycles and conflicting declarations fail.

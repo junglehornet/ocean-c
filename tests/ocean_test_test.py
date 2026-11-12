@@ -140,6 +140,17 @@ func TestEscaping(t *testing.T) { t.Log("quote: \\" slash: \\\\ tab: \\t newline
     run('test', app)
     assert run('run', app, ok=False).returncode == 19
 
+    # External tests import any module-root package by the module name.
+    (app / 'ocean.mod').write_text('module calculator\n')
+    for declared in ('main', 'arithmetic'):
+        (app / 'main.oc').write_text('package ' + declared + '; '
+                                   'func Answer() int { return 42; } func main() {}')
+        (app / 'main_test.oc').write_text('package ' + declared + '_test; '
+            'import "testing"; import "calculator"; '
+            'func TestRoot(t *testing.T) { if (calculator.Answer() != 42) t.Fatal("answer"); }')
+        run('check', app)
+        assert 'TestRoot' in run('test', app, '-v').stdout
+
     # A production package may itself have a name ending in _test.
     suffix = root / 'suffix'; suffix.mkdir()
     (suffix / 'base.oc').write_text('package suffix_test; func private() int { return 7; }')
