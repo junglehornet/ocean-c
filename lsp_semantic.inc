@@ -124,7 +124,7 @@ static void locationJSON(FILE *out, parseResult *program, token t) {
     fputc('}', out);
 }
 typedef struct {
-    const char *filename, *alias;
+    const char *filename, *alias, *path;
     size_t packageId;
 } LspImport;
 typedef struct {
@@ -132,10 +132,10 @@ typedef struct {
     size_t count;
 } LspImports;
 static void collectImport(const char *filename, const char *alias, size_t packageId,
-                          void *context) {
+                          const char *path, void *context) {
     LspImports *a = context;
     a->values = realloc(a->values, (a->count + 1) * sizeof(*a->values));
-    a->values[a->count++] = (LspImport){filename, alias, packageId};
+    a->values[a->count++] = (LspImport){filename, alias, path, packageId};
 }
 static int identifierName(const char *name) {
     if (!name || !strcmp(name, "_"))
@@ -168,6 +168,59 @@ static void completionItem(FILE *out, int *comma, const char *name, const char *
     fputs(",\"detail\":", out);
     quoted(out, detail);
     fprintf(out, ",\"kind\":%d}", kind);
+}
+typedef struct {
+    FILE *out;
+    int *comma;
+    const char *prefix, *text, *display;
+    size_t prefixLength, insert, cursor, packageId;
+    LspImports *imports;
+    semanticIndex *index;
+    char **seen;
+    size_t nSeen;
+} AutoImports;
+static void autoImportItem(const char *name, const char *path, void *context) {
+    AutoImports *a = context;
+    if (!identifierName(name) || strncmp(name, a->prefix, a->prefixLength)) return;
+    for (size_t i = 0; i < a->imports->count; i++)
+        if (!strcmp(a->imports->values[i].filename, a->display) &&
+            (!strcmp(a->imports->values[i].alias, name) ||
+             !strcmp(a->imports->values[i].path, path))) return;
+    for (size_t i = 0; i < a->index->nSymbols; i++) {
+        semanticSymbol *s = &a->index->symbols[i];
+        if (s->member || s->packageId != a->packageId || strcmp(s->name, name)) continue;
+        if (s->global || (!strcmp(s->declaration.filename, a->display) &&
+            a->cursor >= s->begin && a->cursor <= s->end &&
+            tokenPosition(a->text, s->declaration) <= a->cursor)) return;
+    }
+    for (size_t i = 0; i < a->nSeen; i++) if (!strcmp(a->seen[i], path)) return;
+    a->seen = realloc(a->seen, (a->nSeen + 1) * sizeof(*a->seen));
+    a->seen[a->nSeen++] = strdup(path);
+    if ((*a->comma)++) fputc(',', a->out);
+    fputs("{\"label\":", a->out); quoted(a->out, name);
+    fputs(",\"kind\":9,\"detail\":", a->out); quoted(a->out, path);
+    fputs(",\"additionalTextEdits\":[{\"range\":{\"start\":", a->out);
+    positionJSON(a->out, a->text, a->insert);
+    fputs(",\"end\":", a->out); positionJSON(a->out, a->text, a->insert);
+    fputs("},\"newText\":", a->out);
+    char *edit = malloc(strlen(path) + 16);
+    sprintf(edit, "\nimport \"%s\";", path);
+    quoted(a->out, edit); free(edit);
+    fputs("}]}", a->out);
+}
+// Find the end of a real package declaration, skipping comments and strings via tokens.
+static size_t importPosition(const char *text, const char *filename) {
+    tokenlist *tokens = scanTokensForEditor((char *)text, (char *)filename);
+    size_t result = 0;
+    for (size_t i = 0; i + 2 < tokens->top; i++) {
+        token t = get_tokenlist(tokens, i);
+        if (t.type != PACKAGE) continue;
+        token semi = get_tokenlist(tokens, i + 2);
+        if (semi.type == SEMICOLON) result = tokenPosition(text, semi) + 1;
+        break;
+    }
+    free_tokenlist(tokens); free(tokens);
+    return result;
 }
 static void semanticWorker(FILE *out, const char *method, Json *params, Document *doc,
                            Document *documents) {
@@ -211,7 +264,7 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
         slash[1] = 0;
     else
         *slash = 0;
-    packageBuild *build = loadCheckPackageWithSources(directory, overlays, count);
+    packageBuild *build = loadEditorPackage(directory, overlays, count);
     parseResult *program = packagePartialProgram(build);
     if (!program) {
         fputs(completion ? "{\"isIncomplete\":true,\"items\":[]}" : "null", out);
@@ -315,6 +368,16 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
                     identifierName(imports.values[i].alias) &&
                     !strncmp(imports.values[i].alias, prefix, prefixLength))
                     completionItem(out, &comma, imports.values[i].alias, "package", 9);
+            size_t insert = importPosition(doc->text, display);
+            if (prefixLength && insert && insert < begin) {
+                AutoImports autoImports = {.out = out, .comma = &comma, .prefix = prefix,
+                    .text = doc->text, .display = display, .prefixLength = prefixLength,
+                    .insert = insert, .cursor = cursor, .packageId = packageId,
+                    .imports = &imports, .index = &index};
+                visitPackageCandidates(build, autoImportItem, &autoImports);
+                for (size_t j = 0; j < autoImports.nSeen; j++) free(autoImports.seen[j]);
+                free(autoImports.seen);
+            }
             free(imports.values);
             for (i = 0; i < index.nSymbols; i++) {
                 semanticSymbol *s = &index.symbols[i];

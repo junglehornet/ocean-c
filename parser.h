@@ -64,6 +64,8 @@ static inline const char *programSource(parseResult *program, const char *filena
 
 parseResult parseTokens(tokenlist *tokens);
 parseResult parseTokensWithSource(tokenlist *tokens, const char *source);
+/* Editor recovery retains valid statements around syntax errors. */
+parseResult parseTokensForEditor(tokenlist *tokens, const char *source);
 struct stmt_interface *parseInterfaceType(typeTokens span);
 struct stmt_func *parseFunctionType(typeTokens span);
 expr *parseBufferDimension(typeTokens dimension);

@@ -3,6 +3,7 @@
 #include "lsp.h"
 #include "package.h"
 #include "semantic.h"
+#include "scanner.h"
 #include "source_path.h"
 #include <ctype.h>
 #include <errno.h>
@@ -218,8 +219,8 @@ static void publish(Document *doc, Document *documents, int clear) {
             for (Document *d = documents; d; d = d->next) sources[i++] = (packageSource){d->path, d->text};
             char *directory = strdup(doc->path), *slash = strrchr(directory, '/');
             if (slash == directory) slash[1] = 0; else *slash = 0;
-            packageBuild *build = loadCheckPackageWithSources(directory, sources, count);
-            parseResult *program = packageProgram(build);
+            packageBuild *build = loadEditorPackage(directory, sources, count);
+            parseResult *program = packagePartialProgram(build);
             if (program) analyzeSemantics(program);
             fflush(stderr); _exit(0); /* Also releases parser allocations on scanner failure. */
         }

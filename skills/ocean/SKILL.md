@@ -12,6 +12,11 @@ examples. Parser acceptance alone does not establish backend support. Prefer
 `ocean check` to validate complete programs. This file is self-contained so it can
 be downloaded and installed as `ocean/SKILL.md` in an agent's skills directory.
 
+Argument-count errors point at the call and report expected and actual counts
+(including the minimum for variadic functions). Return-count errors point at the
+return statement. Type mismatches show expected and actual Ocean types at the
+argument or returned expression; strings display as `string`.
+
 ## Tooling and build workflow
 
 An installed compiler is named `ocean`; `ocean-c` accepts the same interface.
@@ -94,6 +99,16 @@ Protocol positions use UTF-16. Completion includes visible locals, parameters,
 package functions/types, import qualifiers, struct fields, interface/receiver
 methods, enum variants (including specialized generic enums), and collection
 operations. Names are filtered by the typed prefix and lexical scope.
+Completing an unimported package name supplies `additionalTextEdits` to insert
+its import after the package declaration. Candidates come from installed standard
+packages, the current module, local replacements, and cached declared dependencies;
+discovery does not download packages. Existing imports and visible bindings
+suppress conflicting suggestions. Package suggestions require a nonempty prefix.
+Editor analysis recovers valid statements and declarations around scanner, syntax,
+package-resolution, and type errors, including errors in sibling files. Recovery
+is best effort: an unterminated string/comment or malformed declaration can hide
+symbols in the damaged region. CLI builds remain strict. Arity diagnostics point
+at the call; return-count errors point at the return statement.
 The maintained Helix token grammar and queries live in `editors/helix/` in the
 compiler checkout; see its README for installation and regeneration. In Helix,
 use `completion` for a manual completion key binding (for example Ctrl-Space);
@@ -101,7 +116,8 @@ use `completion` for a manual completion key binding (for example Ctrl-Space);
 When an editor starts a checkout binary, set its server environment's `OCEAN_SRC`
 to the matching standard-library source tree. The installed-layout default
 `<executable-directory>/../src` usually does not exist for a checkout binary;
-unresolved standard-library imports can prevent semantic completion.
+unresolved standard-library imports prevent completing their exports; unrelated
+local symbols remain available when recoverable.
 
 Native objects are cached under `~/.cache/ocean-build`; override with
 `OCEAN_BUILD_CACHE` or set it to `off`. Package keys hash source contents/paths,

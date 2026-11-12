@@ -30,7 +30,7 @@ typedef struct Module {
 } Module;
 typedef struct Package Package;
 typedef struct Symbol Symbol;
-typedef struct Import { char *alias; Package *package; struct Import *next; } Import;
+typedef struct Import { char *alias; Package *package; struct Import *next; const char *path; } Import;
 typedef struct File {
     parseResult ast;
     char *path, *text, *displayPath;
@@ -64,6 +64,7 @@ struct packageBuild {
     int errors;
     const char *testDirectory, *harnessDirectory;
     int loadingExternal;
+    int editorRecovery;
 };
 static void *alloc(packageBuild *b, size_t size) {
     void *data = calloc(1, size ? size : 1);
@@ -517,8 +518,10 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         char *display = relativeSourcePath(file->path);
         file->displayPath = pkgString(b, display ? display : file->path);
         free(display);
-        tokenlist *tokens = scanTokens(file->text, file->displayPath);
-        file->ast = parseTokensWithSource(tokens, file->text); free(tokens);
+        tokenlist *tokens = b->editorRecovery ? scanTokensForEditor(file->text, file->displayPath)
+                                           : scanTokens(file->text, file->displayPath);
+        file->ast = b->editorRecovery ? parseTokensForEditor(tokens, file->text)
+                                    : parseTokensWithSource(tokens, file->text); free(tokens);
         file->ast.sourceFilename = file->displayPath; file->ast.sourceText = file->text;
         if (target && testFilename(file->path) && file->ast.packageName) {
             size_t n = strlen(file->ast.packageName);
@@ -534,7 +537,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
             }
         }
         *tail = file; tail = &file->next;
-        if (file->ast.hasError) { b->errors++; continue; }
+        if (file->ast.hasError) { b->errors++; if (!b->editorRecovery) continue; }
         if (!file->ast.packageName) { error(b, file->path, "expected package declaration at the top of the file"); continue; }
         const char *packageName = file->ast.packageName;
         int validName = (*packageName >= 'a' && *packageName <= 'z') ||
@@ -601,14 +604,19 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         }
         p->files = sorted;
     }
-    if (b->errors) { p->order = b->nFinished++; p->state = 2; return p; }
+    if (b->errors && !b->editorRecovery) { p->order = b->nFinished++; p->state = 2; return p; }
     for (File *file = p->files; file; file = file->next)
         for (size_t i = 0; i < file->ast.nStatements; i++) {
             stmt *s = &file->ast.statements[i];
             if (s->type != STMT_IMPORT) continue;
             struct stmt_import *node = s->value;
             Package *imported = resolveImport(b, p, node->path);
-            if (!imported) continue;
+            if (!imported) {
+                if (b->editorRecovery)
+                    diagnostic(file->text, s->location, "package", "error",
+                               "could not resolve import: %s", node->path);
+                continue;
+            }
             char *alias = node->importedName ? node->importedName : imported->name;
             if (!alias) continue;
             for (Import *old = file->imports; old; old = old->next)
@@ -616,7 +624,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
                     error(b, file->path, "duplicate import name: %s", alias);
             if (symbol(p, alias)) error(b, file->path, "import name collides with package declaration: %s", alias);
             Import *import = alloc(b, sizeof(*import));
-            *import = (Import){alias, imported, file->imports}; file->imports = import;
+            *import = (Import){alias, imported, file->imports, node->path}; file->imports = import;
         }
     p->order = b->nFinished++;
     p->state = 2;
@@ -949,10 +957,14 @@ static packageBuild *finishPackage(packageBuild *b);
 packageBuild *loadPackage(const char *location) {
     return loadPackageWithSources(location, NULL, 0);
 }
+static packageBuild *loadSourcePackage(const char *location, const packageSource *sources, size_t count, int recovery);
 packageBuild *loadPackageWithSources(const char *location, const packageSource *sources, size_t count) {
+    return loadSourcePackage(location, sources, count, 0);
+}
+static packageBuild *loadSourcePackage(const char *location, const packageSource *sources, size_t count, int recovery) {
     packageBuild *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
-    b->editorSources = sources; b->nEditorSources = count;
+    b->editorSources = sources; b->nEditorSources = count; b->editorRecovery = recovery;
     char *path = canonical(b, location);
     if (!path) { error(b, location, "location does not exist"); return b; }
     if (!directory(path)) {
@@ -961,7 +973,7 @@ packageBuild *loadPackageWithSources(const char *location, const packageSource *
         path = parent(b, path);
     }
     b->root = loadDirectory(b, path);
-    if (b->errors || !b->root->name) return b;
+    if ((b->errors && !recovery) || !b->root->name) return b;
     return finishPackage(b);
 }
 static packageBuild *finishPackage(packageBuild *b) {
@@ -1012,10 +1024,10 @@ static packageBuild *finishPackage(packageBuild *b) {
     return b;
 }
 static packageBuild *loadTestPackageWithSources(const char *location, const char *harnessDirectory,
-                                              const packageSource *sources, size_t count) {
+                                              const packageSource *sources, size_t count, int recovery) {
     packageBuild *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
-    b->editorSources = sources; b->nEditorSources = count;
+    b->editorSources = sources; b->nEditorSources = count; b->editorRecovery = recovery;
     char *path = canonical(b, location);
     if (!path) { error(b, location, "location does not exist"); return b; }
     if (!directory(path)) {
@@ -1029,10 +1041,11 @@ static packageBuild *loadTestPackageWithSources(const char *location, const char
     b->harnessDirectory = pkgString(b, harnessDirectory);
     Package *internal = loadDirectory(b, path);
     if (!b->errors && !internal->name) error(b, path, "no package under test; add ordinary source or same-package test files");
-    if (b->errors) return b;
+    if (b->errors && !recovery) return b;
     b->loadingExternal = 1;
     Package *external = loadDirectory(b, path);
-    if (b->errors) return b;
+    if (b->errors && !recovery) return b;
+    if (!internal->name) { b->root = internal; return b; }
     if (external->name && strcmp(external->name, format(b, "%s_test", internal->name))) {
         error(b, path, "external test package must be %s_test", internal->name); return b;
     }
@@ -1067,7 +1080,7 @@ static packageBuild *loadTestPackageWithSources(const char *location, const char
     b->editorSources = overlay; b->nEditorSources = count + 1;
     b->root = loadDirectory(b, harnessDirectory);
     b->editorSources = NULL; b->nEditorSources = 0;
-    if (b->errors) return b;
+    if (b->errors && !recovery) return b;
     return finishPackage(b);
 }
 char *packageTestLocation(const char *location) {
@@ -1108,7 +1121,7 @@ packageBuild *loadTestDisplay(void) {
     return result;
 }
 packageBuild *loadTestPackage(const char *location, const char *harnessDirectory) {
-    return loadTestPackageWithSources(location, harnessDirectory, NULL, 0);
+    return loadTestPackageWithSources(location, harnessDirectory, NULL, 0, 0);
 }
 /* Reuse test discovery and its synthetic harness without executing any tests.
  * Editor buffers must remain visible while loading both test package variants. */
@@ -1134,17 +1147,104 @@ static int hasTestSources(const char *location, const packageSource *sources, si
 }
 packageBuild *loadCheckPackageWithSources(const char *location, const packageSource *sources, size_t count) {
     if (!hasTestSources(location, sources, count)) return loadPackageWithSources(location, sources, count);
-    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", sources, count);
+    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", sources, count, 0);
+}
+packageBuild *loadEditorPackage(const char *location, const packageSource *sources, size_t count) {
+    if (!hasTestSources(location, sources, count)) return loadSourcePackage(location, sources, count, 1);
+    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", sources, count, 1);
 }
 packageBuild *loadPackageTests(const char *location) {
     if (!hasTestSources(location, NULL, 0)) return NULL;
-    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", NULL, 0);
+    return loadTestPackageWithSources(location, "/tmp/.ocean-check-harness", NULL, 0, 0);
 }
 parseResult *packagePartialProgram(packageBuild *b) {
     return b && b->program.nSources ? &b->program : NULL;
 }
 parseResult *packageProgram(packageBuild *b) {
     return b && !b->errors ? &b->program : NULL;
+}
+/* Read only the package header. Completion must not parse every candidate body. */
+static char *candidateName(packageBuild *b, const char *filename) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) return NULL;
+    char text[4096];
+    size_t n = fread(text, 1, sizeof(text) - 1, file);
+    fclose(file); text[n] = 0;
+    char *p = text;
+    for (;;) {
+        while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+        if (!strncmp(p, "//", 2)) { p += strcspn(p, "\n"); continue; }
+        if (!strncmp(p, "/*", 2)) {
+            unsigned depth = 1; p += 2;
+            while (*p && depth) {
+                if (!strncmp(p, "/*", 2)) { depth++; p += 2; }
+                else if (!strncmp(p, "*/", 2)) { depth--; p += 2; }
+                else p++;
+            }
+            if (depth) return NULL;
+            continue;
+        }
+        break;
+    }
+    if (strncmp(p, "package", 7) || (p[7] != ' ' && p[7] != '\t' && p[7] != '\n')) return NULL;
+    p += 7; while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    char *start = p;
+    while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+           (*p >= '0' && *p <= '9') || *p == '_') p++;
+    if (p == start) return NULL;
+    char *name = alloc(b, p - start + 1); memcpy(name, start, p - start);
+    return name;
+}
+static void candidateDirectory(packageBuild *b, const char *directoryPath, const char *importPath,
+                               unsigned depth, size_t *budget, packageCandidateVisitor visit, void *context) {
+    if (depth > 12 || !*budget) return;
+    (*budget)--;
+    DIR *dir = opendir(directoryPath);
+    if (!dir) return;
+    struct dirent *entry;
+    char *name = NULL;
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.' || !strcmp(entry->d_name, "internal") ||
+            !strcmp(entry->d_name, "build") || !strcmp(entry->d_name, "vendor")) continue;
+        char *path = format(b, "%s/%s", directoryPath, entry->d_name);
+        struct stat info;
+        if (lstat(path, &info)) continue; // Do not follow symlink cycles.
+        if (S_ISDIR(info.st_mode)) {
+            char *child = *importPath ? format(b, "%s/%s", importPath, entry->d_name) : pkgString(b, entry->d_name);
+            // A nested module has its own import root.
+            if (!access(format(b, "%s/ocean.mod", path), F_OK)) continue;
+            candidateDirectory(b, path, child, depth + 1, budget, visit, context);
+        } else if (!name && S_ISREG(info.st_mode)) {
+            size_t n = strlen(entry->d_name);
+            if (n > 3 && !strcmp(entry->d_name + n - 3, ".oc") && !testFilename(entry->d_name))
+                name = candidateName(b, path);
+        }
+    }
+    closedir(dir);
+    if (name && strcmp(name, "main") && *importPath &&
+        (!b->root || strcmp(directoryPath, b->root->directory)) &&
+        (!b->testDirectory || strcmp(directoryPath, b->testDirectory))) visit(name, importPath, context);
+}
+void visitPackageCandidates(packageBuild *b, packageCandidateVisitor visit, void *context) {
+    if (!b) return;
+    size_t budget = 4096;
+    const char *standard = standardSource(b);
+    if (standard) candidateDirectory(b, standard, "", 0, &budget, visit, context);
+    Module *module = b->testDirectory ? findModule(b, b->testDirectory) : b->root ? b->root->module : NULL;
+    if (!module) return;
+    candidateDirectory(b, module->root, module->name ? module->name : "", 0, &budget, visit, context);
+    for (Dependency *d = module->dependencies; d; d = d->next) {
+        char *root;
+        if (d->replacement && (*d->replacement == '.' || *d->replacement == '/'))
+            root = *d->replacement == '/' ? d->replacement : format(b, "%s/%s", module->root, d->replacement);
+        else {
+            const char *cache = getenv("OCEAN_MOD_CACHE"), *home = getenv("HOME");
+            if (!cache) cache = format(b, "%s/.cache/ocean/modules", home ? home : "/tmp");
+            root = format(b, "%s/%s@%s", cache, d->replacement ? d->replacement : d->name,
+                          d->replacementVersion ? d->replacementVersion : d->version ? d->version : "latest");
+        }
+        candidateDirectory(b, root, d->name, 0, &budget, visit, context);
+    }
 }
 void freePackage(packageBuild *b) {
     if (!b) return;
@@ -1165,5 +1265,5 @@ const char *packageDirectory(packageBuild *build) {
 
 void visitPackageImports(packageBuild *build, packageImportVisitor visitor, void *context) {
     for(Package *p=build->packages;p;p=p->next)for(File *file=p->files;file;file=file->next)
-        for(Import *i=file->imports;i;i=i->next)visitor(file->displayPath,i->alias,i->package->id+1,context);
+        for(Import *i=file->imports;i;i=i->next)visitor(file->displayPath,i->alias,i->package->id+1,i->path,context);
 }

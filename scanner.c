@@ -170,7 +170,14 @@ static void scanAssembly(struct scannerState *state) {
     scanning_error = 1;
 }
 
+static tokenlist *scanTokensMode(char *source, char *filename, int recovery);
 tokenlist *scanTokens(char *source, char *filename) {
+    return scanTokensMode(source, filename, 0);
+}
+tokenlist *scanTokensForEditor(char *source, char *filename) {
+    return scanTokensMode(source, filename, 1);
+}
+static tokenlist *scanTokensMode(char *source, char *filename, int recovery) {
     scanning_error = 0;
     populate_keyword_hashes();
 
@@ -420,16 +427,23 @@ tokenlist *scanTokens(char *source, char *filename) {
                     push_tokenlist(list, (token){.type = !strcmp(lexeme,"_") ? UNDERSCORE : get_keyword_type(lexeme), .lexeme = lexeme, .line = state.thisLine, .column = state.thisColumn, .filename = filename});
                 }
         }
-        if (scanning_error) goto end_loop;
+        if (scanning_error) {
+            if (!recovery) goto end_loop;
+            scanning_error = 0;
+            if (!state.source[state.offset]) goto end_loop;
+        }
     }
     
     end_loop:
     
-    if (scanning_error) {
+    if (scanning_error && !recovery) {
         printf("One or more errors encountered during scanning, quitting.\n");
         exit(1);
     }
 
+    if (recovery && (!list->top || get_tokenlist(list, list->top - 1).type != EOF_TOKEN))
+        push_tokenlist(list, (token){.type = EOF_TOKEN, .lexeme = "EOF", .line = state.line,
+                                   .column = state.column, .filename = filename});
     free_charlist(state.lexeme);
     return list;
 }
