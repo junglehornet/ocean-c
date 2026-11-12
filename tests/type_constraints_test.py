@@ -142,5 +142,31 @@ with tempfile.TemporaryDirectory(prefix="ocean constraints ") as directory:
     """, 0)
     rejected("func main() { n := 0; x: float = n; }", "type mismatch")
     rejected("func f(x float) {} func main() { n := 0; f(n); }", "type mismatch")
-    rejected("func main() { x: float = 0.0; n := 0; if (x == n) {} }", "type mismatch")
+    program("""
+        func product(n int, x float) float { return n * x; }
+        func quotient(n, d int) int { return n / d; }
+        func isFloat(x any) bool { switch (x.(type)) { case float: return true; default: return false; } }
+        func isF32(x any) bool { switch (x.(type)) { case f32: return true; default: return false; } }
+        func main() int {
+            n := 5; x := 2.0;
+            if (n + x != 7.0 || x + n != 7.0 || n - x != 3.0 || x - n != -3.0) return 1;
+            if (product(n, x) != 10.0 || x * n != 10.0 || n / x != 2.5 || x / n != 0.4) return 2;
+            if (quotient(5, 3) != 1 || quotient(-5, 3) != -1 || 5 / 3 != 1) return 3;
+            if (n == x || x == n || !(n != x) || !(x != n)) return 4;
+            if (!(n > x && n >= x && x < n && x <= n)) return 5;
+            equal := 5.0;
+            if (!(n == equal && equal == n && n <= equal && equal >= n)) return 6;
+            if (!isFloat(n * x) || !isFloat(x * n) || !isFloat((n + 1) / x)) return 7;
+            y: f32 = 2.0;
+            if (!isF32(n * y) || !isF32(y * n) || n / y != 2.5) return 8;
+            small: i8 = -3; unsigned: u32 = 4294967295;
+            if (small * x != -6.0 || unsigned + x != 4294967297.0) return 9;
+            x += n; x -= n; x *= n; x /= n;
+            if (x != 2.0 || !isFloat(n / x) || !isFloat(x / n)) return 10;
+            return 0;
+        }
+    """, 0)
+    rejected("func main() { n := 5; x := 2.0; n += x; }", "type mismatch")
+    for op in ("%", "&", "|", "^", "<<", ">>"):
+        rejected(f"func main() {{ n := 5; x := 2.0; n {op} x; }}", "integer operands")
     rejected("func f(x float) {} func main() { f(1 + 2); }", "type mismatch")

@@ -1726,6 +1726,14 @@ static int numericType(Type *t) {
     Type *base = representation(t);
     return base == &integer || base == &signedByte || base == &floating;
 }
+static Type *floatOperatorType(Type *a, Type *b) {
+    if (!numericType(a) || !numericType(b) || definedType(a) || definedType(b)) return NULL;
+    int af = representation(a) == &floating, bf = representation(b) == &floating;
+    if (!af && !bf) return NULL;
+    if (!af) return b;
+    if (!bf) return a;
+    return identicalTypes(a, b) ? a : &floating;
+}
 static enum binaryExprType baseOperation(enum binaryExprType operation) {
     static const enum binaryExprType operations[] = {
         EXPR_ADD, EXPR_SUBTRACT,      EXPR_MULTIPLY,       EXPR_DIVIDE,      EXPR_MODULO,
@@ -1744,6 +1752,7 @@ static int equalityCompatible(Type *a, Type *b) {
         canonical(a) == &any || canonical(b) == &any || a->interface || b->interface ||
         typeSetSpan(a).nTokens || typeSetSpan(b).nTokens) return 1;
     if (definedType(a) || definedType(b)) return compatibleTypes(a, b);
+    if (floatOperatorType(a, b)) return 1;
     int leftCollection = !strcmp(a->name, "dynamic-array") || !strcmp(a->name, "fixed-array");
     int rightCollection = !strcmp(b->name, "dynamic-array") || !strcmp(b->name, "fixed-array");
     if (leftCollection && rightCollection) {
@@ -1810,7 +1819,8 @@ static Type *operatorResult(Context *c, enum binaryExprType op, Type *a, Type *b
         if (!arithmetic && !comparison && !(integral && !isFloat)) return NULL;
         int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);
         if (!isFloat && aw && bw && au != bu && (au ? aw : bw) == 64) return NULL;
-        return comparison ? &boolean : identicalTypes(a, b) ? a : isFloat ? &floating : &integer;
+        Type *floatResult = floatOperatorType(a, b);
+        return comparison ? &boolean : floatResult ? floatResult : identicalTypes(a, b) ? a : isFloat ? &floating : &integer;
     }
     if (canonical(a) == &boolean && canonical(b) == &boolean &&
         (op == EXPR_LOGICAL_AND || op == EXPR_LOGICAL_OR || op == EXPR_EQUALITY ||
@@ -2431,6 +2441,23 @@ static Type *expression(Context *c, expr *e) {
                 v->checkedResult.tokens[0].lexeme = (char *)(result == &string ? "string" : result->spelling ? result->spelling : result->name);
             }
             return result;
+        }
+        Type *floatResult = floatOperatorType(a, b);
+        enum binaryExprType numericOp = baseOperation(v->operation);
+        if (floatResult && v->operation != EXPR_ASSIGNMENT && v->operation != EXPR_COMMA) {
+            if (!((numericOp >= EXPR_ADD && numericOp <= EXPR_DIVIDE) ||
+                  (numericOp >= EXPR_EQUALITY && numericOp <= EXPR_GREATER_EQUALS))) {
+                error(c, at, "operator requires integer operands");
+                return &unknown;
+            }
+            if (numericOp != v->operation) {
+                if (!writable(c, &v->left))
+                    mutationError(c, &v->left, at, "assignment requires a writable value");
+                check(c, a, floatResult, at);
+                return a;
+            }
+            return numericOp >= EXPR_EQUALITY && numericOp <= EXPR_GREATER_EQUALS
+                       ? &boolean : floatResult;
         }
         Type *integerResult = NULL;
         int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);

@@ -237,8 +237,14 @@ arithmetic needs a cast if no signed 64-bit type can represent both ranges.
 
 Integer literals (including negative literals) automatically convert in float contexts,
 including typed initializers, assignments, arguments, returns, arithmetic, and
-comparisons such as `myFloat == 0`. Integer variables and integer expressions
-require an explicit cast; `value := 0` still infers `int`.
+comparisons such as `myFloat == 0`. Integer variables and expressions also mix
+with floats in `+`, `-`, `*`, `/`, and all six numeric comparisons. Arithmetic
+with a float operand produces a float; comparisons produce `bool`. Two integer
+operands keep an integer result: `5 / 3 == 1`, truncating toward zero. Bitwise
+operators and `%` require integers. Float compound assignments accept integer
+operands; storing a float result in an integer requires an explicit cast.
+Integer variables and expressions still require an explicit cast in float
+initializers, ordinary assignments, arguments, and returns; `value := 0` infers `int`.
 
 Use `value -> Type` for casts and parentheses for compound targets, such as
 `raw -> (*Point)` or `value -> (pkg.Type)`. Arithmetic, bit operations,
