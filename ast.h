@@ -92,6 +92,7 @@ struct stmt_var {
 struct stmt_struct {
     token name;
     char enumPayload; // Private payload layout; explicit any arguments remain concrete.
+    struct stmt_enum *enumeration; // Owning enum declaration for reflection.
     char enumStorage; // Private enum representation, excluded from struct reflection.
     token indexField; // Field delegated to by []; EOF_TOKEN if none is designated.
     size_t nTypeParams;
@@ -115,6 +116,7 @@ struct stmt_type {
 
 struct stmt_enum {
     token name;
+    const char *displayName; // Original source name, before package qualification.
     size_t nTypeParams;
     token *typeParamNames;
     typeTokens *typeParamConstraints;
@@ -180,7 +182,7 @@ struct stmt_interface {
     typeTokens *fieldTypes;
 };
 
-enum compilerIntrinsic { INTRINSIC_NONE, INTRINSIC_REFLECT_FIELDS, INTRINSIC_REFLECT_IS_STRUCT, INTRINSIC_THREAD_SPAWN, INTRINSIC_THREAD_RETURN };
+enum compilerIntrinsic { INTRINSIC_NONE, INTRINSIC_REFLECT_FIELDS, INTRINSIC_REFLECT_IS_STRUCT, INTRINSIC_REFLECT_IS_ENUM, INTRINSIC_REFLECT_ENUM_VARIANT, INTRINSIC_THREAD_SPAWN, INTRINSIC_THREAD_RETURN };
 
 struct stmt_func {
     enum compilerIntrinsic compilerIntrinsic; // Set only by the trusted standard-library loader.

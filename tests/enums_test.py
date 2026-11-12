@@ -228,7 +228,7 @@ func main() {
 enum Event { A(int), B }
 func main() int {
     e := Event.A(3); box: any = e;
-    if (reflect.IsStruct(box) || len(reflect.Fields(box)) != 0) return 99;
+    if (reflect.IsStruct(box) || len(reflect.Fields(box)) != 1 || reflect.Fields(box)[0].Value.(int) != 3) return 99;
     return 0;
 }''')
 

@@ -48,6 +48,19 @@ func main() int {
 }
 ''', 'ab\n\nx12yQz\na{b\\q{c\\d\n0 12345 -987 -9223372036854775808\n7 -8 9 1.25\n2.00 -0.125\n2.0 1.25 2\n[1 3]\n[1 two true]\n[a b]\n[[1 2] [3]]\n', library=True)
 
+    program('''enum Event { Load, Key(i8), Click{x, y int}, Fixed := "constant" }
+    enum Box<T> { Value(T), Empty }
+    struct Record { event Event; }
+    func main() int {
+        Println(Event.Load, Event.Key(65), Event.Click{2, 3}, Event.Fixed);
+        Println(Box<Event>.Value(Event.Key(7)));
+        Println(Record{Event.Load});
+        Println(Event[]{Event.Load, Event.Key(1)});
+        Println(Sprintf("event={}", Event.Key(9)).unwrap());
+        Println(Optional<int>.value(4), Optional<int>.none);
+        return 0;
+    }''', 'Event.Load Event.Key(65) Event.Click(x: 2, y: 3) Event.Fixed(constant)\nBox.Value(Event.Key(7))\n{event: Event.Load}\n[Event.Load Event.Key(1)]\nevent=Event.Key(9)\nOptional.value(4) Optional.none\n', library=True)
+
     # Byte arrays print numeric bytes; strings retain their text identity.
     program(r'''func main() int {
         bytes := i8[]{1, 5, 3}; Println(bytes);

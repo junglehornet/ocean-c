@@ -639,6 +639,19 @@ Enums support value and pointer receiver methods, including generic receivers
 names or named payload fields. Methods are called on values; `Result.unwrap(v)`
 is not a variant constructor or match pattern.
 
+`reflect.IsEnum(value any)` identifies enum values, including generic enums,
+`Optional<T>`, and `Result<T>`. `reflect.EnumVariant(value any)` returns the
+qualified declaration name such as `Event.Key` (without generic arguments), or
+an empty string for a non-enum. Pointers are not dereferenced.
+`reflect.Fields` also snapshots the active enum payload: record fields keep
+their names, tuple entries have empty names, fixed payloads return one unnamed
+field, and unit variants return no fields. The same deep-copy rules apply.
+`reflect.IsStruct` returns false for enum values.
+
+`io.Print`, `io.Println`, `io.Sprint`, and formatted output use this reflection
+to print enums recursively: `Event.Load`, `Event.Key(65)`, and
+`Event.Click(x: 2, y: 3)`. Fixed payloads print as `Number.One(1)`.
+
 ## Native calls and current limits
 
 ```ocean

@@ -132,6 +132,40 @@ int64_t liveAllocations(void) { return live; }
         return 0;
     }''')
 
+    program('''enum Event { Load, Key(i8, string), Click{x, y int}, Fixed := "fixed" }
+    enum Box<T> { Value(T), Empty }
+    struct Nested { event Event; }
+    func snapshot() array<reflect.Field> {
+        return reflect.Fields(Box<string[]>.Value(string[]{"original"}));
+    }
+    func exercise() int {
+        for (i := 0; i < 30; i++) {
+            unit := Event.Load; key := Event.Key(7, "key"); click := Event.Click{2, 3};
+            if (!reflect.IsEnum(unit) || reflect.IsStruct(unit) || reflect.IsEnum(1)) return 1;
+            if (reflect.EnumVariant(unit) != "Event.Load" || len(reflect.Fields(unit)) != 0) return 2;
+            if (reflect.EnumVariant(key) != "Event.Key") return 3;
+            fields := reflect.Fields(key);
+            if (len(fields) != 2 || fields[0].Name != "" || fields[0].Value.(i8) != 7 || fields[1].Value.(string) != "key") return 4;
+            named := reflect.Fields(click);
+            if (named[0].Name != "x" || named[0].Value.(int) != 2 || named[1].Name != "y") return 5;
+            payload := click.(Event.Click);
+            if (!reflect.IsStruct(payload) || reflect.Fields(payload)[0].Name != "x") return 12;
+            fixed := reflect.Fields(Event.Fixed);
+            if (len(fixed) != 1 || fixed[0].Name != "" || fixed[0].Value.(string) != "fixed") return 6;
+            stored := snapshot(); copy := stored[0].Value.(string[]); copy[0] = "changed";
+            if (stored[0].Value.(string[])[0] != "original") return 7;
+            nested := reflect.Fields(Nested{key})[0].Value;
+            if (!reflect.IsEnum(nested) || reflect.Fields(nested)[1].Value.(string) != "key") return 8;
+            if (reflect.EnumVariant(false) != "" || reflect.EnumVariant(&unit) != "" || reflect.IsEnum(&unit)) return 9;
+            optional := Optional<int>.value(4);
+            if (!reflect.IsEnum(optional) || reflect.EnumVariant(optional) != "Optional.value" || reflect.Fields(optional)[0].Value.(int) != 4) return 10;
+            result := Result<string>.value("ok");
+            if (reflect.EnumVariant(result) != "Result.value" || reflect.Fields(result)[0].Value.(string) != "ok") return 11;
+        }
+        return 0;
+    }
+    func main() int { if (exercise() != 0) return 99; return extern.liveAllocations(); }''', memory=True)
+
     # Private fields remain visible through the public snapshot API.
     (project / 'ocean.mod').write_text('module example.com/project\nocean 0.1\n')
     models = project / 'models'; models.mkdir()
@@ -142,7 +176,7 @@ int64_t liveAllocations(void) { return live; }
         return 0;
     }''', imports='import "reflect" as r; import "example.com/project/models";')
 
-    for name in ('compilerReflectFields', 'compilerReflectIsStruct'):
+    for name in ('compilerReflectFields', 'compilerReflectIsStruct', 'compilerReflectIsEnum', 'compilerReflectEnumVariant'):
         rejected('package main; func main() { ' + name + '(1); }')
     rejected(fixture)  # A package name alone does not grant privilege.
     spoof = project / 'reflect'; spoof.mkdir(); (spoof / 'reflect.oc').write_text(fixture)

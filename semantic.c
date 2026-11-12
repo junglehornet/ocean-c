@@ -2133,16 +2133,17 @@ static Type *expression(Context *c, expr *e) {
                 }
                 return spawn ? &integer : &nothing;
             }
-            int fields = !strcmp(name, "compilerReflectFields"), predicate = !strcmp(name, "compilerReflectIsStruct");
-            if (fields || predicate) {
-                enum compilerIntrinsic required = fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT;
+            int fields = !strcmp(name, "compilerReflectFields"), predicate = !strcmp(name, "compilerReflectIsStruct"),
+                isEnum = !strcmp(name, "compilerReflectIsEnum"), variant = !strcmp(name, "compilerReflectEnumVariant");
+            if (fields || predicate || isEnum || variant) {
+                enum compilerIntrinsic required = fields ? INTRINSIC_REFLECT_FIELDS : isEnum ? INTRINSIC_REFLECT_IS_ENUM : variant ? INTRINSIC_REFLECT_ENUM_VARIANT : INTRINSIC_REFLECT_IS_STRUCT;
                 if (!c->function || c->function->compilerIntrinsic != required) {
                     error(c, at, "reflection intrinsics are restricted to the standard library reflect package");
                     return &unknown;
                 }
                 if (v->nParams != 1 || v->spread) error(c, at, "reflection intrinsic requires exactly one value");
                 for (size_t i = 0; i < v->nParams; i++) expression(c, &v->params[i]);
-                return fields ? typeOf(c, c->function->resultTypes[0]) : &boolean;
+                return (fields || variant) ? typeOf(c, c->function->resultTypes[0]) : &boolean;
             }
         }
         if (v->func.type == EXPR_TYPE_DOT) {

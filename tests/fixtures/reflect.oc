@@ -7,7 +7,8 @@ struct Field {
 }
 
 // Fields returns every field in declaration order, including struct value parameters.
-// Non-struct values return an empty array. Pointers are not dereferenced.
+// Enum values return their active payload: record names, unnamed tuple entries,
+// or one unnamed fixed value. Unit variants and other values return an empty array. Pointers are not dereferenced.
 // The compiler grants these intrinsics only to this standard-library package.
 func Fields(value any) array<Field> {
     return compilerReflectFields(value);
@@ -16,4 +17,14 @@ func Fields(value any) array<Field> {
 // IsStruct distinguishes an empty struct from a non-struct value.
 func IsStruct(value any) bool {
     return compilerReflectIsStruct(value);
+}
+
+// IsEnum identifies enum values, including generic enums and Optional/Result.
+func IsEnum(value any) bool {
+    return compilerReflectIsEnum(value);
+}
+
+// EnumVariant returns "Type.Variant", or an empty string for non-enums.
+func EnumVariant(value any) string {
+    return compilerReflectEnumVariant(value);
 }

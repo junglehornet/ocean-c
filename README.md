@@ -189,9 +189,22 @@ fields := reflect.Fields(Person{"Ada", 36});
 `reflect.Fields(value any)` returns `array<reflect.Field>` in declaration order;
 each `Field` has `Name string` and `Value any`. It includes private fields and
 struct value parameters. Field values are independent deep copies, with normal
-scope cleanup; pointer fields remain non-owning address copies. Non-structs
+scope cleanup; pointer fields remain non-owning address copies. Values other than structs and enums
 return an empty array, and pointers are not automatically dereferenced.
 `reflect.IsStruct(value any)` distinguishes an empty struct from a non-struct.
+
+`reflect.IsEnum(value any)` identifies enum values, including generic enums,
+`Optional<T>`, and `Result<T>`. `reflect.EnumVariant(value any)` returns the
+qualified declaration name such as `Event.Key` (without generic arguments), or
+an empty string for a non-enum. Pointers are not dereferenced.
+`reflect.Fields` also snapshots the active enum payload: record fields keep
+their names, tuple entries have empty names, fixed payloads return one unnamed
+field, and unit variants return no fields. The same deep-copy rules apply.
+`reflect.IsStruct` returns false for enum values.
+
+`io.Print`, `io.Println`, `io.Sprint`, and formatted output use this reflection
+to print enums recursively: `Event.Load`, `Event.Key(65)`, and
+`Event.Click(x: 2, y: 3)`. Fixed payloads print as `Number.One(1)`.
 
 Only the `reflect` package physically located under the configured standard
 library root can call the compiler primitives implementing this API. A package

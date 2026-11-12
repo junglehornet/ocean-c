@@ -2,7 +2,7 @@
 static void prepareEnum(struct stmt_enum *v) {
     if (v->prepared) return;
     v->prepared = 1;
-    v->storage = (struct stmt_struct){.name = v->name, .enumStorage = 1, .indexField = {.type = EOF_TOKEN},
+    v->storage = (struct stmt_struct){.name = v->name, .enumStorage = 1, .enumeration = v, .indexField = {.type = EOF_TOKEN},
         .nFields = 2, .nVarParams = 2, .nTypeParams = v->nTypeParams,
         .typeParamNames = v->typeParamNames, .typeParamConstraints = v->typeParamConstraints};
     v->storage.fieldNames = calloc(2, sizeof(token));

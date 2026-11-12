@@ -223,7 +223,7 @@ typedef struct {
     TypeConstraint *constraints;
     unsigned nConstraints;
     int arrayViewUsed, homogeneousUsed;
-    int reflectionUsed;
+    int reflectionUsed, reflectionVariantUsed;
     Kind reflectionFieldsKind;
     unsigned fixedCScalars;
     Value boxRegion;
@@ -2236,9 +2236,11 @@ static Kind expressionKind(Backend *b, expr *e) {
             if (!strcmp(name, "compilerThreadSpawn") && b->function && b->function->compilerIntrinsic == INTRINSIC_THREAD_SPAWN) return INT;
             if (!strcmp(name, "compilerThreadReturn") && b->function && b->function->compilerIntrinsic == INTRINSIC_THREAD_RETURN) return VOID;
             if (!strcmp(name, "recover") && !findFunction(b, "recover")) return SCALAR_ANY;
-            if (!strcmp(name, "compilerReflectFields") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_FIELDS)
+            if ((!strcmp(name, "compilerReflectFields") || !strcmp(name, "compilerReflectEnumVariant")) && b->function &&
+                (b->function->compilerIntrinsic == INTRINSIC_REFLECT_FIELDS || b->function->compilerIntrinsic == INTRINSIC_REFLECT_ENUM_VARIANT))
                 return resultType(b, b->function);
-            if (!strcmp(name, "compilerReflectIsStruct") && b->function && b->function->compilerIntrinsic == INTRINSIC_REFLECT_IS_STRUCT)
+            if ((!strcmp(name, "compilerReflectIsStruct") || !strcmp(name, "compilerReflectIsEnum")) && b->function &&
+                (b->function->compilerIntrinsic == INTRINSIC_REFLECT_IS_STRUCT || b->function->compilerIntrinsic == INTRINSIC_REFLECT_IS_ENUM))
                 return BOOL;
         }
         struct stmt_func *f = directCallee(b, &v->func, &typeArguments, &count);
@@ -4361,20 +4363,23 @@ static Value expressionImpl(Backend *b, expr *e) {
             fprintf(b->body, "  %s = call i64 @ocean_threads_spawn(ptr %s, ptr %s)\n", result.operand, code.operand, environment.operand);
             return result;
         }
-        if (!strcmp(name, "compilerReflectFields") || !strcmp(name, "compilerReflectIsStruct")) {
-            int fields = !strcmp(name, "compilerReflectFields");
-            if (!b->function || b->function->compilerIntrinsic != (fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT) ||
+        if (!strcmp(name, "compilerReflectFields") || !strcmp(name, "compilerReflectIsStruct") ||
+            !strcmp(name, "compilerReflectIsEnum") || !strcmp(name, "compilerReflectEnumVariant")) {
+            int fields = !strcmp(name, "compilerReflectFields"), isEnum = !strcmp(name, "compilerReflectIsEnum"),
+                variant = !strcmp(name, "compilerReflectEnumVariant");
+            if (!b->function || b->function->compilerIntrinsic != (fields ? INTRINSIC_REFLECT_FIELDS : isEnum ? INTRINSIC_REFLECT_IS_ENUM : variant ? INTRINSIC_REFLECT_ENUM_VARIANT : INTRINSIC_REFLECT_IS_STRUCT) ||
                 v->nParams != 1 || v->spread) {
                 fail(b, "reflection intrinsics are restricted to the standard library reflect package");
                 return value(b, BAD, "0");
             }
-            Kind kind = fields ? resultType(b, b->function) : BOOL;
+            Kind kind = (fields || variant) ? resultType(b, b->function) : BOOL;
             Value source = coerce(b, expression(b, &v->params[0]), SCALAR_ANY), result = temp(b, kind);
             b->reflectionUsed = 1;
             if (fields) b->reflectionFieldsKind = kind;
+            if (variant) b->reflectionVariantUsed = 1;
             fprintf(b->body, "  %s = call %s @__ocean.reflect.%s({ ptr, i64 } %s)\n", result.operand,
-                    irType(b, kind), fields ? "fields" : "is_struct", source.operand);
-            if (fields) {
+                    irType(b, kind), fields ? "fields" : isEnum ? "is_enum" : variant ? "enum_variant" : "is_struct", source.operand);
+            if (fields || variant) {
                 int previous = b->copyTransport; b->copyTransport = 2;
                 result = copyValue(b, result, 0); b->copyTransport = previous;
             }
@@ -6245,7 +6250,7 @@ static void prepareReflectionTypes(Backend *b) {
     // layouts available rather than assuming only local boxing sites can call.
     if (b->program->isLibrary && b->reflectionUsed)
         for (BufferKind *t = b->buffers; t; t = t->next)
-            if (t->shape == 5 && t->record && !t->record->enumStorage)
+            if (t->shape == 5 && t->record)
                 reflectionInput(b, t->kind);
     for (;;) {
         AnyType *a = b->anyTypes;
@@ -6256,6 +6261,18 @@ static void prepareReflectionTypes(Backend *b) {
         if (!t) continue;
         if (b->reflectionUsed && a->reflectable && t->shape == 5 && t->record && !t->record->enumStorage)
             for (size_t i = 0; i < t->count; i++) reflectionInput(b, t->members[i]);
+        if (b->reflectionUsed && a->reflectable && t->record && t->record->enumeration) {
+            struct stmt_enum *decl = t->record->enumeration;
+            for (size_t i = 0; i < decl->nMembers; i++) {
+                if (!decl->forms[i]) continue;
+                Kind payload = enumPayloadKind(b, decl, i, t->kind);
+                if (decl->forms[i] == 3) reflectionInput(b, payload);
+                else {
+                    BufferKind *record = bufferKind(b, payload);
+                    for (size_t j = 0; j < record->count; j++) reflectionInput(b, record->members[j]);
+                }
+            }
+        }
         if ((t->shape == 4 || t->fixedArray) && !t->immutableString)
             reflectionInput(b, t->element);
     }
@@ -6286,34 +6303,51 @@ static void emitReflection(Backend *b) {
         // Only types reachable through boxed values and their fields are registered.
         for (AnyType *a = b->anyTypes; a; a = a->next) {
             BufferKind *record = bufferKind(b, a->kind);
-            if (!a->reflectable || !record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
-            Value matches = temp(b, BOOL);
-            fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)a->kind);
-            unsigned body = ++b->label, next = ++b->label;
-            branch(b, matches, body, next); label(b, body);
-            Value source = unboxMatched(b, input, a->kind);
-            Value result = allocateCollection(b, b->reflectionFieldsKind, value(b, INT, "%zu", record->count));
-            for (size_t i = 0; i < record->count; i++) {
-                const char *name = record->record->fieldNames[i].lexeme;
-                size_t length = strlen(name);
-                Value nameValue = allocateCollection(b, field->members[0], value(b, INT, "%zu", length));
-                Value data = arrayData(b, nameValue), text = moduleString(b, name);
-                fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %zu, i1 false)\n", data.operand, text.operand, length);
-                b->dataCopyUsed = 1;
-                Value descriptor = emptyValue(b, field->kind);
-                descriptor = insert(b, descriptor, nameValue, 0);
-                descriptor = insert(b, descriptor, boxScalar(b, extract(b, source, i), 0), 1);
-                store(b, elementAddress(b, result, value(b, INT, "%zu", i)), descriptor);
+            if (!a->reflectable || !record || record->shape != 5 || !record->record) continue;
+            struct stmt_enum *decl = record->record->enumeration;
+            for (size_t member = 0; member < (decl ? decl->nMembers : 1); member++) {
+                Value matches = temp(b, BOOL);
+                fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)a->kind);
+                unsigned body = ++b->label, next = ++b->label;
+                branch(b, matches, body, next); label(b, body);
+                Value source = unboxMatched(b, input, a->kind);
+                BufferKind *payloadRecord = record;
+                int form = decl ? decl->forms[member] : 2;
+                if (decl) {
+                    Value valid = binary(b, EXPR_EQUALITY, extract(b, source, 0), value(b, INT, "%zu", member));
+                    unsigned active = ++b->label;
+                    branch(b, valid, active, next); label(b, active);
+                    if (form) {
+                        Kind payload = enumPayloadKind(b, decl, member, a->kind);
+                        Value boxed = extract(b, source, 1);
+                        source = payload == SCALAR_ANY ? boxed : unboxMatched(b, boxed, payload);
+                        payloadRecord = bufferKind(b, payload);
+                    }
+                }
+                size_t fields = !form ? 0 : form == 3 ? 1 : payloadRecord->count;
+                Value result = allocateCollection(b, b->reflectionFieldsKind, value(b, INT, "%zu", fields));
+                for (size_t i = 0; i < fields; i++) {
+                    const char *name = form == 2 ? payloadRecord->record->fieldNames[i].lexeme : "";
+                    size_t length = strlen(name);
+                    Value nameValue = allocateCollection(b, field->members[0], value(b, INT, "%zu", length));
+                    Value data = arrayData(b, nameValue), text = moduleString(b, name);
+                    fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %zu, i1 false)\n", data.operand, text.operand, length);
+                    b->dataCopyUsed = 1;
+                    Value descriptor = emptyValue(b, field->kind);
+                    descriptor = insert(b, descriptor, nameValue, 0);
+                    descriptor = insert(b, descriptor, boxScalar(b, form == 3 ? source : extract(b, source, i), 0), 1);
+                    store(b, elementAddress(b, result, value(b, INT, "%zu", i)), descriptor);
+                }
+                b->copyTransport = 1;
+                Value returned = copyValue(b, result, 0);
+                b->copyTransport = 0; escapeDynamicArrays(b, returned);
+                cleanDynamicArrayTemps(b, mark);
+                fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
+                fprintf(b->body, "  ret ptr %s\n", returned.operand); b->terminated = 1;
+                label(b, next);
             }
-            b->copyTransport = 1;
-            Value returned = copyValue(b, result, 0);
-            b->copyTransport = 0; escapeDynamicArrays(b, returned);
-            cleanDynamicArrayTemps(b, mark);
-            fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
-            fprintf(b->body, "  ret ptr %s\n", returned.operand); b->terminated = 1;
-            label(b, next);
         }
-        // Non-structs have no fields. Pointers are intentionally not followed.
+        // Other inputs have no fields. Pointers are intentionally not followed.
         Value result = allocateCollection(b, b->reflectionFieldsKind, value(b, INT, "0"));
         b->copyTransport = 1; Value returned = copyValue(b, result, 0); b->copyTransport = 0;
         escapeDynamicArrays(b, returned); cleanDynamicArrayTemps(b, mark);
@@ -6324,17 +6358,63 @@ static void emitReflection(Backend *b) {
         fprintf(b->out, "}\n"); fclose(b->slots); fclose(b->body);
         clearScope(&scope);
     }
-    fprintf(b->out, "define internal i1 @__ocean.reflect.is_struct({ ptr, i64 } %%input) {\nentry:\n  %%tag = extractvalue { ptr, i64 } %%input, 0\n");
-    unsigned count = 0;
-    for (AnyType *a = b->anyTypes; a; a = a->next) {
-        BufferKind *record = bufferKind(b, a->kind);
-        if (!a->reflectable || !record || record->shape != 5 || !record->record || record->record->enumStorage) continue;
-        fprintf(b->out, "  %%m%u = icmp eq ptr %%tag, @__ocean.any.type.%u\n", count, (unsigned)a->kind);
-        if (count) fprintf(b->out, "  %%r%u = or i1 %s%u, %%m%u\n", count, count == 1 ? "%m" : "%r", count - 1, count);
-        count++;
+    // Qualified variant names are owned strings, just like reflected field names.
+    if (b->reflectionVariantUsed) {
+        Scope scope = {.parent = b->globalScope}; b->scope = &scope;
+        b->body = tmpfile(); b->slots = tmpfile(); b->boxRegion = (Value){0}; b->terminated = 0;
+        DynamicArrayTemporary *mark = dynamicArrayTempMark(b);
+        Value input = value(b, SCALAR_ANY, "%%input"), tag = temp(b, RAW_POINTER);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %%input, 0\n", tag.operand);
+        for (AnyType *a = b->anyTypes; a; a = a->next) {
+            BufferKind *record = bufferKind(b, a->kind);
+            struct stmt_enum *decl = record && record->record ? record->record->enumeration : NULL;
+            if (!a->reflectable || !decl) continue;
+            for (size_t member = 0; member < decl->nMembers; member++) {
+                Value matches = temp(b, BOOL);
+                fprintf(b->body, "  %s = icmp eq ptr %s, @__ocean.any.type.%u\n", matches.operand, tag.operand, (unsigned)a->kind);
+                unsigned body = ++b->label, next = ++b->label, active = ++b->label;
+                branch(b, matches, body, next); label(b, body);
+                Value source = unboxMatched(b, input, a->kind);
+                Value valid = binary(b, EXPR_EQUALITY, extract(b, source, 0), value(b, INT, "%zu", member));
+                branch(b, valid, active, next); label(b, active);
+                const char *owner = decl->displayName ? decl->displayName : decl->name.lexeme;
+                if (decl->isBuiltin) owner = !strcmp(owner, OCEAN_BUILTIN_OPTIONAL_NAME) ? "Optional" : "Result";
+                size_t length = strlen(owner) + strlen(decl->names[member].lexeme) + 1;
+                char *name = checked(length + 1);
+                snprintf(name, length + 1, "%s.%s", owner, decl->names[member].lexeme);
+                Value result = allocateCollection(b, stringKind(b), value(b, INT, "%zu", length));
+                Value data = arrayData(b, result), text = moduleString(b, name); free(name);
+                fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %zu, i1 false)\n", data.operand, text.operand, length);
+                b->dataCopyUsed = 1;
+                b->copyTransport = 1; Value returned = copyValue(b, result, 0); b->copyTransport = 0;
+                escapeDynamicArrays(b, returned); cleanDynamicArrayTemps(b, mark);
+                fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
+                fprintf(b->body, "  ret ptr %s\n", returned.operand); b->terminated = 1;
+                label(b, next);
+            }
+        }
+        Value result = allocateCollection(b, stringKind(b), value(b, INT, "0"));
+        b->copyTransport = 1; Value returned = copyValue(b, result, 0); b->copyTransport = 0;
+        escapeDynamicArrays(b, returned); cleanDynamicArrayTemps(b, mark);
+        fprintf(b->body, "  call void @__ocean.any.clean(ptr %s, ptr null)\n", boxRegion(b).operand);
+        fprintf(b->body, "  ret ptr %s\n", returned.operand);
+        fprintf(b->out, "define internal ptr @__ocean.reflect.enum_variant({ ptr, i64 } %%input) {\nentry:\n");
+        if (copy(b->slots, b->out) || copy(b->body, b->out)) fail(b, "could not emit enum variant reflection");
+        fprintf(b->out, "}\n"); fclose(b->slots); fclose(b->body); clearScope(&scope);
     }
-    if (count) fprintf(b->out, "  ret i1 %s%u\n}\n", count == 1 ? "%m" : "%r", count - 1);
-    else fprintf(b->out, "  ret i1 false\n}\n");
+    for (int enumeration = 0; enumeration < 2; enumeration++) {
+        fprintf(b->out, "define internal i1 @__ocean.reflect.%s({ ptr, i64 } %%input) {\nentry:\n  %%tag = extractvalue { ptr, i64 } %%input, 0\n", enumeration ? "is_enum" : "is_struct");
+        unsigned count = 0;
+        for (AnyType *a = b->anyTypes; a; a = a->next) {
+            BufferKind *record = bufferKind(b, a->kind);
+            if (!a->reflectable || !record || record->shape != 5 || !record->record || (!!record->record->enumStorage != enumeration)) continue;
+            fprintf(b->out, "  %%m%u = icmp eq ptr %%tag, @__ocean.any.type.%u\n", count, (unsigned)a->kind);
+            if (count) fprintf(b->out, "  %%r%u = or i1 %s%u, %%m%u\n", count, count == 1 ? "%m" : "%r", count - 1, count);
+            count++;
+        }
+        if (count) fprintf(b->out, "  ret i1 %s%u\n}\n", count == 1 ? "%m" : "%r", count - 1);
+        else fprintf(b->out, "  ret i1 false\n}\n");
+    }
     b->body = previousBody; b->slots = previousSlots; b->scope = previousScope;
     b->function = previousFunction; b->boxRegion = previousRegion; b->copyTransport = previousTransport;
 }

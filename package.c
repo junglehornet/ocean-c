@@ -397,8 +397,9 @@ static int standardPackageSource(packageBuild *b, Package *p, File *file, const 
 }
 static void markReflectionIntrinsic(packageBuild *b, Package *p, File *file, struct stmt_func *f) {
     if (!standardPackageSource(b, p, file, "reflect")) return;
-    int fields = !strcmp(f->name.lexeme, "Fields"), predicate = !strcmp(f->name.lexeme, "IsStruct");
-    if (!fields && !predicate) return;
+    int fields = !strcmp(f->name.lexeme, "Fields"), predicate = !strcmp(f->name.lexeme, "IsStruct"),
+        isEnum = !strcmp(f->name.lexeme, "IsEnum"), variant = !strcmp(f->name.lexeme, "EnumVariant");
+    if (!fields && !predicate && !isEnum && !variant) return;
     typeTokens element;
     int valid = !f->isExtern && !f->isVariadic && !f->receiverType.nTokens && !f->nTypeParams &&
                 f->nParams == 1 && f->paramTypeNames[0].nTokens == 1 &&
@@ -406,10 +407,12 @@ static void markReflectionIntrinsic(packageBuild *b, Package *p, File *file, str
     if (valid && fields)
         valid = unsizedArrayTypeParts(f->resultTypes[0], &element) && element.nTokens == 1 &&
                 !strcmp(element.tokens[0].lexeme, "Field");
-    if (valid && predicate)
+    if (valid && (predicate || isEnum))
         valid = f->resultTypes[0].nTokens == 1 && !strcmp(f->resultTypes[0].tokens[0].lexeme, "bool");
+    if (valid && variant)
+        valid = f->resultTypes[0].nTokens == 1 && !strcmp(f->resultTypes[0].tokens[0].lexeme, "string");
     if (!valid) { error(b, file->path, "invalid standard reflect intrinsic signature: %s", f->name.lexeme); return; }
-    f->compilerIntrinsic = fields ? INTRINSIC_REFLECT_FIELDS : INTRINSIC_REFLECT_IS_STRUCT;
+    f->compilerIntrinsic = fields ? INTRINSIC_REFLECT_FIELDS : isEnum ? INTRINSIC_REFLECT_IS_ENUM : variant ? INTRINSIC_REFLECT_ENUM_VARIANT : INTRINSIC_REFLECT_IS_STRUCT;
 }
 static void markThreadIntrinsic(packageBuild *b, Package *p, File *file, struct stmt_func *f) {
     if (!standardPackageSource(b, p, file, "threads")) return;
@@ -900,6 +903,7 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
     case STMT_DEFER: rewriteExpr(r, scope, ((struct stmt_defer *)s->value)->call); break;
     case STMT_ENUM: {
         struct stmt_enum *v = s->value;
+        v->displayName = v->name.lexeme;
         if (top) rewriteToken(r, NULL, &v->name); else scope = bindLocal(r, scope, v->name);
         Local *inner = scope;
         for (size_t i = 0; i < v->nTypeParams; i++) inner = bindLocal(r, inner, v->typeParamNames[i]);

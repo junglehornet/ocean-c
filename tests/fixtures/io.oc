@@ -128,6 +128,18 @@ func sprintItem(item any) string {
 			}
 			return str + "]";
 		default:
+			if (reflect.IsEnum(item)) {
+				str := reflect.EnumVariant(item);
+				fields := reflect.Fields(item);
+				if (len(fields) == 0) return str;
+				str += "(";
+				for (i, field := range fields) {
+					if (i > 0) str += ", ";
+					if (field.Name != "") str += field.Name + ": ";
+					str += sprintItem(field.Value);
+				}
+				return str + ")";
+			}
 			if (reflect.IsStruct(item)) {
 				str := "{";
 				for (i, field := range reflect.Fields(item)) {
