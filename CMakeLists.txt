@@ -263,6 +263,12 @@ if(BUILD_TESTING)
         target_compile_definitions(runtime_threads_test PRIVATE _POSIX_C_SOURCE=200809L)
         target_compile_options(runtime_threads_test PRIVATE -include sys/wait.h)
     endif()
+    if(EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/os/exec/exec.oc")
+        add_test(NAME release_smoke_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_smoke_test.py" "$<TARGET_FILE:ocean-c>")
+        set_tests_properties(release_smoke_test PROPERTIES TIMEOUT 180
+            ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
+    endif()
     add_test(NAME runtime_threads_test COMMAND runtime_threads_test)
     set_tests_properties(runtime_threads_test PROPERTIES TIMEOUT 30)
     if(EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/threads/tests/test_threads.py")

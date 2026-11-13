@@ -7305,6 +7305,10 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
             if (object) {
                 if (!coffObject && (threadObject || processObject)) {
                     args[n++] = "-r"; args[n++] = "-nostdlib";
+#if defined(__APPLE__)
+                    // Other package objects still import hidden support symbols.
+                    if (!backendWasm()) args[n++] = "-Wl,-keep_private_externs";
+#endif
                 } else args[n++] = "-c";
             }
             args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
@@ -7417,7 +7421,13 @@ int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, in
 #endif
     }
     if(staticLink&&!library)args[n++]="-static";
-    if(library){args[n++]="-r";args[n++]="-nostdlib";}
+    if(library){
+        args[n++]="-r";args[n++]="-nostdlib";
+#if defined(__APPLE__)
+        // Preserve hidden definitions for callers of the relocatable library.
+        if (!backendWasm()) args[n++]="-Wl,-keep_private_externs";
+#endif
+    }
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
     if (processObject) args[n++] = processObject;
     args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
