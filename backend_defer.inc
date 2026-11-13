@@ -253,11 +253,20 @@ static const char *deferSetjmpArguments(void) {
 #endif
     return "";
 }
+// Darwin's _setjmp does not save the signal mask; only _longjmp can restore
+// that buffer. Mixing it with longjmp reads state that was never initialized.
+static const char *deferLongjmpNameForTarget(int darwin) {
+    return darwin ? "_longjmp" : "longjmp";
+}
 static const char *deferLongjmpName(void) {
 #if defined(_WIN32) && defined(__aarch64__)
     if (!backendWasm()) return "__mingw_longjmp";
 #endif
-    return "longjmp";
+#ifdef __APPLE__
+    return deferLongjmpNameForTarget(!backendWasm());
+#else
+    return deferLongjmpNameForTarget(0);
+#endif
 }
 
 // The native driver and recovery buffers use the compiler host's libc ABI.

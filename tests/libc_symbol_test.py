@@ -8,7 +8,7 @@ import tempfile
 probe, clang = sys.argv[1:]
 nm = shutil.which('llvm-nm')
 assert nm, 'llvm-nm is required for the cross-target libc symbol regression'
-names = {'malloc', 'calloc', 'free', 'memcmp', 'atexit', 'write', 'setjmp', 'longjmp'}
+names = {'malloc', 'calloc', 'free', 'memcmp', 'atexit', 'write', '_setjmp'}
 with tempfile.TemporaryDirectory(prefix='ocean-libc-symbols-') as directory:
     root = Path(directory)
     for target, darwin in [('x86_64-apple-macosx11.0', True),
@@ -22,7 +22,9 @@ with tempfile.TemporaryDirectory(prefix='ocean-libc-symbols-') as directory:
         subprocess.run([clang, '-target', target, '-Wno-override-module', '-c', str(source), '-o', str(obj)], check=True, timeout=30)
         symbols = subprocess.check_output([nm, '--undefined-only', str(obj)], text=True)
         actual = {line.split()[-1] for line in symbols.splitlines() if line.strip()}
-        expected = {('_' if darwin else '') + name for name in names}
+        imports = names | {'_longjmp' if darwin else 'longjmp'}
+        expected = {('_' if darwin else '') + name for name in imports}
+        assert ('_longjmp' if darwin else '__longjmp') not in actual, (target, symbols)
         assert expected <= actual, (target, expected - actual, symbols)
-        assert not ({name if darwin else '_' + name for name in names} & actual), (target, symbols)
+        assert not ({name if darwin else '_' + name for name in imports} & actual), (target, symbols)
         print(target + ': libc imports match target ABI')

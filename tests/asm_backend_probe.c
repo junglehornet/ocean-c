@@ -5,10 +5,11 @@
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--libc-symbols")) {
         Backend b = {0};
-        const char *names[] = {"malloc", "calloc", "free", "memcmp", "atexit", "write", "setjmp", "longjmp"};
+        const char *names[] = {"malloc", "calloc", "free", "memcmp", "atexit", "write", "_setjmp", NULL};
         int darwin = !strcmp(argv[2], "darwin");
         for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
-            const char *symbol = libcSymbolForTarget(&b, names[i], darwin);
+            const char *name = names[i] ? names[i] : deferLongjmpNameForTarget(darwin);
+            const char *symbol = libcSymbolForTarget(&b, name, darwin);
             fprintf(stdout, "declare void %s()\ndefine void @probe%zu() { call void %s()\nret void }\n",
                     symbol, i, symbol);
         }
