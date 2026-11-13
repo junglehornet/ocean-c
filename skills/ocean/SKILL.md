@@ -117,6 +117,8 @@ buffer on all hosts, including Windows; it does not create a temporary file for
 each LLVM line.
 Compiler runtime libc imports preserve each target's symbol spelling: Mach-O
 imports have a leading underscore, while ELF, Win64 COFF, and Wasm do not.
+POSIX worker threads reserve at least 8 MiB of stack, preserving larger host
+defaults; this also applies to native test workers on macOS.
 Native Darwin recovery pairs `_setjmp` with `_longjmp`; WebAssembly and
 Windows keep their target-specific recovery ABI.
 The embedded process runtime enables Darwin extensions for spawn working-directory support.

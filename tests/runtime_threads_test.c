@@ -65,12 +65,28 @@ static void forever(void *argument) {
     for (;;) ocean_threads_checkpoint();
 }
 static void early(void *argument) { (void)argument; ocean_runtime_thread_return(); assert(0); }
+#if !defined(_WIN32)
+// This deliberately exceeds Darwin's default 512 KiB pthread stack. Touch
+// every page and check the values so optimized builds must retain the storage.
+static void stack_heavy(void *argument) {
+    (void)argument;
+    volatile unsigned char bytes[1024 * 1024];
+    for (size_t i = 0; i < sizeof(bytes); i += 4096) bytes[i] = (unsigned char)(i / 4096);
+    for (size_t i = 0; i < sizeof(bytes); i += 4096) assert(bytes[i] == (unsigned char)(i / 4096));
+}
+#endif
 int main(void) {
     assert(ocean_threads_current() == 0);
     assert(ocean_threads_wake(-1) == -1);
     assert(ocean_threads_kill(INT64_MAX) == -1);
     assert(ocean_threads_is_done(-1) == -1);
     assert(ocean_threads_await(0) == -2);
+
+#if !defined(_WIN32)
+    int64_t stack_thread = ocean_threads_spawn((void *)stack_heavy, NULL);
+    assert(stack_thread > 0);
+    assert(!ocean_threads_await(stack_thread));
+#endif
     int64_t ids[8];
     assert(!ocean_threads_group_add(&group, 8));
     for (int i = 0; i < 8; i++) { ids[i] = ocean_threads_spawn((void *)counter, NULL); assert(ids[i] > 0); }

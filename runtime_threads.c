@@ -167,7 +167,19 @@ int64_t ocean_threads_spawn(void *code, void *environment) {
     t->handle = CreateThread(NULL, 0, start, t, 0, NULL);
     int failed = t->handle == NULL;
 #else
-    int failed = pthread_create(&t->handle, NULL, start, t);
+    // Darwin defaults new pthreads to 512 KiB, which is too small for native
+    // Ocean parsing and other recursive code. Preserve larger host defaults.
+    pthread_attr_t attributes;
+    int failed = pthread_attr_init(&attributes);
+    if (!failed) {
+        size_t stack_size = 0;
+        failed = pthread_attr_getstacksize(&attributes, &stack_size);
+        const size_t minimum_stack = 8 * 1024 * 1024;
+        if (!failed && stack_size < minimum_stack)
+            failed = pthread_attr_setstacksize(&attributes, minimum_stack);
+        if (!failed) failed = pthread_create(&t->handle, &attributes, start, t);
+        pthread_attr_destroy(&attributes);
+    }
 #endif
     if (failed) { unlock(&registry); free(t); return -1; }
     next_id++;
