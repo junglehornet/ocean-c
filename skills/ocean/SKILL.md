@@ -112,7 +112,9 @@ for JavaScript/Wasm, including cached programs with shared method specialization
 
 With caching enabled, native builds emit LLVM directly into one module per source
 package and a shared support module for globals, startup, concrete specializations,
-and runtime helpers.
+and runtime helpers. Native-module symbol serialization uses an in-memory
+buffer on all hosts, including Windows; it does not create a temporary file for
+each LLVM line.
 Each source package compiles all its ordinary functions, so the same cached object
 can serve callers using different functions. Executable linking removes unreachable
 functions and data using function/data sections (`--gc-sections`, or `-dead_strip`
