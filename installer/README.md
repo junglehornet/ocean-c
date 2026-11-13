@@ -11,8 +11,9 @@ is required. Git is needed to inspect tags and clone the matching stdlib; tar is
 needed when selecting a dependency bundle. HTTPS uses verified libcurl transport.
 
 The installer detects its compiled OS and architecture, lists release tags merged
-into the compiler's main branch with matching stdlib tags, and offers latest
-(stable preferred) or an explicit version. Compiler downloads use
+into either the compiler's stable or nightly branch with matching stdlib tags, and offers `latest`
+(stable branch, excluding prereleases), `latest-nightly` (nightly branch), or an
+explicit version. Neither latest option falls back to the other channel. Compiler downloads use
 `ocean-c_<tag>_<arch>-<os>.tar`. Temporary downloads and clones are deleted after
 success, cancellation, or failure. Compiler release metadata is checked against
 the selected tag and recorded in `installation.json`, including version, compiler

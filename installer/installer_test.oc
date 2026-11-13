@@ -13,10 +13,14 @@ func TestProfileBlock(t *testing.T) {
     if (psQuote("a'b") != "'a''b'" || shQuote("a'b") != "'a'\"'\"'b'") t.Fatal("path quoting");
 }
 func TestLatestSelection(t *testing.T) {
-    beta: Release; beta.version="2.0.0-beta";beta.prerelease=true;
-    stable: Release;stable.version="1.0.0";
-    unavailable: Release;unavailable.reason="missing artifact";
-    if (latest(Release[]{beta,unavailable,stable}) != 2 || latest(Release[]{unavailable}) != -1 || latest(Release[]{beta}) != 0) t.Fatal("latest selection");
+    beta: Release; beta.version="2.0.0-beta";beta.prerelease=true;beta.nightly=true;
+    stable: Release;stable.version="1.0.0";stable.stable=true;
+    unavailable: Release;unavailable.reason="missing artifact";unavailable.stable=true;unavailable.nightly=true;
+    releases := Release[]{beta,unavailable,stable};
+    if (latest(releases,false) != 2 || latest(releases,true) != 0) t.Fatal("channel selection");
+    if (latest(Release[]{beta},false) != -1 || latest(Release[]{stable},true) != -1) t.Fatal("channel fallback");
+    beta.stable=true;
+    if (latest(Release[]{beta},false) != -1 || latest(Release[]{unavailable},true) != -1) t.Fatal("unavailable/prerelease stable selection");
 }
 func TestRedirectsAndDependencyPlans(t *testing.T) {
     if (redirectURL("https://example.com/a/b","/asset") != "https://example.com/asset") t.Fatal("root redirect");
