@@ -124,4 +124,12 @@ with tempfile.TemporaryDirectory(prefix="ocean array values ") as directory:
             "result = recur(n - 1); result[0]++; return; } "
             "func main() int { a := recur(9); return a[0]; }", 12)
 
+    # Large byte copies must retain value isolation and initialize every byte.
+    # This is also the request-body path exercised by HTTP upload deadlines.
+    program("func clone(a i8[]) i8[] { return a; } func main() int { "
+            "a := i8[8388608]; a[0] = 7; a[len(a)-1] = 8; b := clone(a); b[0] = 9; "
+            "if (a[0] != 7 || b[0] != 9 || b[1] != 0 || b[len(b)-1] != 8) return 1; "
+            "text := b -> string; c := text -> i8[]; c[0] = 10; "
+            "if (b[0] != 9 || text[0] != 9 || c[len(c)-1] != 8) return 2; return 0; }")
+
 print(f"{checks} array value checks passed at -O0 and -O2")

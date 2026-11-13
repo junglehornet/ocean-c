@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
     assert failure.returncode == 1 and "Panic: release panic" in failure.stderr, failure
     source.write_text("package main; func main() {}", encoding="utf-8")
     test = root / "main_test.oc"
-    test.write_text('package main; import "testing"; func TestRelease(t *testing.T) { if (9223372036854775807 < 0) t.Fatal("integer width"); }', encoding="utf-8")
+    test.write_text('package main; import "testing"; func TestRelease(t *testing.T) { if (9223372036854775807 < 0) t.Fatal("integer width"); } func TestRecovery(t *testing.T) { defer func() { if (recover() == null) t.Fatal("missing panic"); }(); panic "native recovery"; }', encoding="utf-8")
     execute("test", "--notty", str(root), env=environment)
     other = root / "other"
     other.mkdir()

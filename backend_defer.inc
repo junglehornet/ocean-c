@@ -238,13 +238,35 @@ static Value scheduleIntrinsicDefer(Backend *b, expr *callExpression) {
     return value(b, VOID, "");
 }
 
+// ARM64 MinGW supplies a paired non-SEH implementation; x64 _setjmp takes
+// a frame argument (null requests the matching non-unwinding longjmp path).
+static const char *deferSetjmpName(void) {
+#if defined(_WIN32) && defined(__aarch64__)
+    if (!backendWasm()) return "__mingw_setjmp";
+#endif
+    return "_setjmp";
+}
+static const char *deferSetjmpArguments(void) {
+#if defined(_WIN32) && defined(__x86_64__)
+    if (!backendWasm()) return ", ptr null";
+#endif
+    return "";
+}
+static const char *deferLongjmpName(void) {
+#if defined(_WIN32) && defined(__aarch64__)
+    if (!backendWasm()) return "__mingw_longjmp";
+#endif
+    return "longjmp";
+}
+
 // The native driver and recovery buffers use the compiler host's libc ABI.
 static void emitDeferRuntime(Backend *b) {
+    fprintf(b->out, "declare i32 @\"\\01%s\"(ptr%s) returns_twice\n"
+            "declare void @\"\\01%s\"(ptr, i32) noreturn\n",
+            deferSetjmpName(), *deferSetjmpArguments() ? ", ptr" : "", deferLongjmpName());
     fputs(
         "@__ocean.defer_head = internal thread_local global ptr null\n"
         "@__ocean.recovery_head = internal thread_local global ptr null\n"
-        "declare i32 @\"\\01_setjmp\"(ptr) returns_twice\n"
-        "declare void @\"\\01longjmp\"(ptr, i32) noreturn\n"
         "\n"
         "define internal void @__ocean.enter(ptr %frame) {\n"
         "  %parent = load ptr, ptr @__ocean.defer_head\n"
@@ -369,8 +391,9 @@ static void emitDeferRuntime(Backend *b) {
         "  br i1 %recovered, label %resume, label %next\n"
         "resume:\n"
         "  %environment = getelementptr %__ocean.defer_frame, ptr %frame, i32 0, i32 3\n"
-        "  %buffer = load ptr, ptr %environment\n"
-        "  call void @\"\\01longjmp\"(ptr %buffer, i32 1)\n"
+        "  %buffer = load ptr, ptr %environment\n", b->out);
+    fprintf(b->out, "  call void @\"\\01%s\"(ptr %%buffer, i32 1)\n", deferLongjmpName());
+    fputs(
         "  unreachable\n"
         "next:\n"
         "  call void @__ocean.discard_defers(ptr %frame)\n"

@@ -23,6 +23,11 @@ An installed compiler is named `ocean`; `ocean-c` accepts the same interface.
 From a compiler checkout, build it with a C23 compiler, CMake, and libffi development
 headers. Clang must be on PATH to check, link, or run Ocean programs. LLVM development
 libraries are unnecessary: Ocean emits textual LLVM IR and invokes Clang.
+Wasm program/package code uses `-O1` for register coloring to stay within
+JavaScript engine local-variable limits; large shared reflection support keeps
+the default pipeline to bound compilation time. Native Windows executables
+reserve an 8 MiB default stack. Native Windows run/test helpers use `.exe`
+paths, and deferred recovery uses the matching host CRT ABI.
 
 ```sh
 cmake -S . -B build

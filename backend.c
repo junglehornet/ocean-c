@@ -2133,6 +2133,17 @@ static Value mapCountAddress(Backend *b, Value map) {
 }
 static Value collectionCopy(Backend *b, Value source, Kind target) {
     Value count = arrayLength(b, source), result = allocateCollection(b, target, count);
+    BufferKind *from = bufferKind(b, source.kind), *to = bufferKind(b, target);
+    if (from->element == to->element && !ownsArrays(b, to->element)) {
+        Value data = arrayData(b, source), destination = arrayData(b, result);
+        Value bytes = temp(b, INT), stride = storageSize(b, to->element);
+        fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, count.operand, stride.operand);
+        fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
+                destination.operand, data.operand, bytes.operand);
+        b->dataCopyUsed = 1;
+        if (to->map) rawStore(b, mapCountAddress(b, result), load(b, mapCountAddress(b, source)));
+        return result;
+    }
     Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
     unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
     jump(b, condition); label(b, condition);
@@ -2694,6 +2705,14 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
 static void initializeArray(Backend *b, Value array, Value count) {
     BufferKind *t = bufferKind(b, array.kind);
     count = coerce(b, count, INT);
+    // Byte collections dominate string/request preparation. Avoid an unoptimized
+    // checked element loop for every zeroed byte, especially under emulation.
+    if (t->element == I8 || t->element == U8) {
+        Value data = arrayData(b, array);
+        fprintf(b->body, "  call void @llvm.memset.p0.i64(ptr %s, i8 0, i64 %s, i1 false)\n", data.operand, count.operand);
+        b->dataCopyUsed = 1;
+        return;
+    }
     Value cursor = slot(b, INT);
     rawStore(b, cursor, value(b, INT, "0"));
     unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
@@ -5958,7 +5977,7 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         fprintf(b->slots, "  %s = alloca [%zu x i8], align %zu\n", buffer.operand, sizeof(jmp_buf), (size_t)_Alignof(jmp_buf));
         fprintf(b->body, "  %s = getelementptr %%__ocean.defer_frame, ptr %s, i32 0, i32 3\n", environment.operand, b->deferFrame.operand);
         fprintf(b->body, "  store ptr %s, ptr %s\n", buffer.operand, environment.operand);
-        fprintf(b->body, "  %s = call i32 @\"\\01_setjmp\"(ptr %s)\n", resumed.operand, buffer.operand);
+        fprintf(b->body, "  %s = call i32 @\"\\01%s\"(ptr %s%s)\n", resumed.operand, deferSetjmpName(), buffer.operand, deferSetjmpArguments());
         fprintf(b->body, "  %s = icmp ne i32 %s, 0\n", recovering.operand, resumed.operand);
         recoverLabel = ++b->label;
         unsigned startLabel = ++b->label;
@@ -7002,7 +7021,8 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     if (b.stringComparisonUsed)
         fprintf(output, "declare i32 @\"\\01memcmp\"(ptr, ptr, i64)\n");
     if (b.dataCopyUsed)
-        fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n");
+        fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n"
+                        "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)\n");
     if (b.newUsed) fprintf(output, "declare ptr @\"\\01calloc\"(i64, i64)\n");
     {
         // Deferred captures and boxed values use libc allocation. Distinct IR
@@ -7216,6 +7236,11 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         args[n++] = "clang"; args[n++] = "-Wno-override-module";
         if (backendWasm()) {
             args[n++] = "--target=wasm32-unknown-unknown";
+            // Package support can contain very large reflection dispatchers.
+            // Keep their compilation bounded; user/package code needs register
+            // coloring to stay within JavaScript's per-function local limit.
+            const char *base = strrchr(irPath, '/'); base = base ? base + 1 : irPath;
+            if (strcmp(base, "support.ll")) { args[n++] = "-O1"; args[n++] = "-fno-inline"; }
             if (!object) { args[n++] = "-nostdlib"; args[n++] = "-Wl,--no-entry"; args[n++] = "-Wl,--export=main"; args[n++] = "-Wl,--allow-undefined"; }
         }
         args[n++] = "-ffunction-sections"; args[n++] = "-fdata-sections";
@@ -7241,7 +7266,7 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         args[n++] = "-o"; args[n++] = staged;
         if (!object) {
 #if defined(_WIN32)
-            if (!backendWasm()) { args[n++] = "-lkernel32"; args[n++] = "-lshell32"; }
+            if (!backendWasm()) { args[n++] = "-lkernel32"; args[n++] = "-lshell32"; args[n++] = "-Wl,--stack,8388608"; }
 #endif
             if (needsFFI && !backendWasm()) args[n++] = "-lffi";
             if (needsCurl && !backendWasm()) args[n++] = "-lcurl";
@@ -7328,7 +7353,7 @@ int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, in
     args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
     if(curl&&!library&&!backendWasm())args[n++]="-lcurl";
 #if defined(_WIN32)
-    if(!library&&!backendWasm()){args[n++]="-lkernel32";args[n++]="-lshell32";}
+    if(!library&&!backendWasm()){args[n++]="-lkernel32";args[n++]="-lshell32";args[n++]="-Wl,--stack,8388608";}
 #endif
 #if !defined(_WIN32)
     if (threads && !library && !backendWasm()) args[n++]="-pthread";

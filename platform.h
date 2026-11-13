@@ -5,7 +5,9 @@
 #include <stdio.h>
 #ifdef _WIN32
 #include "windows/compat.h"
+#define OCEAN_EXECUTABLE_SUFFIX ".exe"
 #else
+#define OCEAN_EXECUTABLE_SUFFIX ""
 #include <sys/types.h>
 #include <sys/wait.h>
 #endif
