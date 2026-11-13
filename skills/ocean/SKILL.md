@@ -67,8 +67,9 @@ provide optional toolchain and library bundles.
 
 Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
 CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a
-Windows GNU/MinGW Clang toolchain on PATH. Integer literals use fixed 64-bit
-storage on every native host, including Windows where C `long` is 32-bit.
+Windows GNU/MinGW Clang toolchain on PATH. Decimal floating-point literals are
+converted directly to binary64 rather than accumulated in host `long double`, including on Windows ARM64.
+Integer literals use fixed 64-bit storage on every native host, including Windows where C `long` is 32-bit.
 Windows LSP requests run in isolated re-executed workers with editor overlays;
 Windows unit tests use captured reports, not the Unix live terminal frontend.
 Package/module resolution and installed `bin/`/`src/` layout are unchanged.
@@ -103,8 +104,11 @@ Fix errors and inspect warnings before using `run` for behavior checks.
 `build` produces a native executable for a root `main` package; other packages
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
-Library objects and bundled native thread runtime objects use relocatable linking
-(`-r -nostdlib`), without executable-only PIE options.
+Unix and Wasm library objects use relocatable linking (`-r -nostdlib`).
+Native Windows library artifacts and cached objects bundled with C runtimes are
+indexed COFF archives, even when named `.o`; `llvm-ar` must be on PATH with Clang.
+CI uses Clang 23 on x86-64/AArch64 and native Clang 21 on RISC-V. Use Clang 23
+for JavaScript/Wasm, including cached programs with shared method specializations.
 
 With caching enabled, native builds emit LLVM directly into one module per source
 package and a shared support module for globals, startup, concrete specializations,

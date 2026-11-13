@@ -7198,6 +7198,22 @@ invalid:
 }
 static void freeCurlFlags(char **flags, size_t count) { for (size_t i = 0; i < count; i++) free(flags[i]); free(flags); }
 
+#ifdef _WIN32
+// COFF has no relocatable link. Keep runtime and generated objects together in
+// an indexed archive, flattening previous archives when packaging libraries.
+static int archiveWindowsObjects(const char *output, const char **objects, size_t count) {
+    char **args = checked((count + 5) * sizeof(*args));
+    args[0] = "llvm-ar"; args[1] = "qcLs"; args[2] = (char *)output;
+    for (size_t i = 0; i < count; i++) args[i + 3] = (char *)objects[i];
+    args[count + 3] = NULL;
+    // mkstemp reserves the output path; llvm-ar needs an absent or valid archive.
+    unlink(output);
+    int failed = oceanRun(args); free(args);
+    if (failed) fputs("backend error: llvm-ar failed to package COFF objects\n", stderr);
+    return failed;
+}
+#endif
+
 static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath, int staticLink) {
     size_t len = strlen(outputPath) + 16;
     char *staged = checked(len);
@@ -7230,6 +7246,10 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     if (needsThreads && (!object || ownsThreadRuntime) && !threadObject) { unlink(staged); free(staged); return 1; }
     char *processObject = needsProcess && (!object || ownsProcessRuntime) ? compileProcessRuntime() : NULL;
     if (needsProcess && (!object || ownsProcessRuntime) && !processObject) { if (threadObject) { unlink(threadObject); free(threadObject); } unlink(staged); free(staged); return 1; }
+    int coffObject = 0;
+#ifdef _WIN32
+    coffObject = object && !backendWasm();
+#endif
     size_t curlCount = 0; char **curlFlags = needsCurl && staticLink && !object ? staticCurlFlags(&curlCount) : NULL;
     if (needsCurl && staticLink && !object && !curlFlags) { if (processObject) { unlink(processObject); free(processObject); } if (threadObject) { unlink(threadObject); free(threadObject); } unlink(staged); free(staged); return 1; }
         char **args = checked((48 + curlCount) * sizeof(*args)); size_t n = 0;
@@ -7255,14 +7275,14 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         if (objectPath) args[n++] = (char *)objectPath;
         else {
             if (object) {
-                if (threadObject || processObject) {
+                if (!coffObject && (threadObject || processObject)) {
                     args[n++] = "-r"; args[n++] = "-nostdlib";
                 } else args[n++] = "-c";
             }
             args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
         }
-        if (threadObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = threadObject; }
-        if (processObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = processObject; }
+        if (threadObject && !coffObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = threadObject; }
+        if (processObject && !coffObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = processObject; }
         args[n++] = "-o"; args[n++] = staged;
         if (!object) {
 #if defined(_WIN32)
@@ -7277,6 +7297,17 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         for (size_t i = 0; i < curlCount; i++) args[n++] = curlFlags[i];
         args[n] = NULL;
     int failed = oceanRun(args);
+#ifdef _WIN32
+    if (!failed && coffObject && (threadObject || processObject)) {
+        char *archive = checked(strlen(staged) + 3); sprintf(archive, "%s.a", staged);
+        const char *objects[3] = {staged}; size_t count = 1;
+        if (threadObject) objects[count++] = threadObject;
+        if (processObject) objects[count++] = processObject;
+        failed = archiveWindowsObjects(archive, objects, count);
+        if (!failed) { unlink(staged); failed = rename(archive, staged) != 0; }
+        unlink(archive); free(archive);
+    }
+#endif
     free(args); freeCurlFlags(curlFlags, curlCount);
     if (processObject) { unlink(processObject); free(processObject); }
     if (failed == 127) fputs("could not execute clang (install clang and add it to PATH)\n", stderr);
@@ -7327,6 +7358,17 @@ int checkBackend(parseResult *program) {
 }
 
 int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, int curl, int processes, const char *output, int library, int staticLink) {
+#ifdef _WIN32
+    if (library && !backendWasm()) {
+        char *staged = checked(strlen(output) + 16); sprintf(staged, "%s.XXXXXX", output);
+        int fd = mkstemp(staged);
+        if (fd < 0) { perror("could not create library output"); free(staged); return 1; }
+        close(fd);
+        int failed = archiveWindowsObjects(staged, objects, count);
+        if (!failed && rename(staged, output)) { perror("could not save library"); failed = 1; }
+        unlink(staged); free(staged); return failed;
+    }
+#endif
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
     (void)processes; /* The support package object owns the process ABI. */

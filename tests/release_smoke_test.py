@@ -44,6 +44,24 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
     (other / "sample_test.oc").write_text('package sample; import "testing"; func TestOther(t *testing.T) { t.Parallel(); }', encoding="utf-8")
     execute("test", "--notty", "-t", "2", str(root), str(other), env=environment)
     test.unlink()
+    # Cached support includes both native runtimes. COFF packages must use
+    # archive composition, not an unsupported relocatable (-r) link.
+    runtime = root / "runtime"
+    runtime.mkdir()
+    (runtime / "main.oc").write_text('package main; import "sync"; import "os/exec"; '
+        'func main() int { m: sync.Mutex; m.Lock(); m.Unlock(); '
+        'if (!exec.LookPath("ocean-missing-release-fixture-9861").hasError()) return 1; return 0; }')
+    runtime_binary = root / ("runtime output" + suffix)
+    for _ in range(2):
+        execute("build", str(runtime), "-o", str(runtime_binary), env=environment)
+        subprocess.run([*runner, str(runtime_binary)], check=True, timeout=30)
+    library = root / "runtime.o"
+    (runtime / "main.oc").write_text('package nativefixture; import "sync"; import "os/exec"; '
+        'func Probe() { m: sync.Mutex; m.Lock(); m.Unlock(); exec.LookPath("ocean-missing-release-fixture-9861"); }')
+    execute("build", str(runtime), "-o", str(library), env=environment)
+    if os.name == "nt":
+        assert library.read_bytes().startswith(b"!<arch>\n")
+
     # LSP receives overlays through the native Windows re-exec worker too.
     server = subprocess.Popen([*runner, compiler, "check", "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     def send(method, params=None, number=None):

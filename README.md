@@ -57,7 +57,9 @@ A file location selects its containing package directory. Every non-test `.oc` f
 that directory belongs to one package and shares Ocean functions, types, and variables.
 Every ordinary file must begin with the same declaration, for example `package main;`.
 Only the root package named `main` gets an executable entry point. Other packages
-build to native object files; `run` rejects them. Imported functions named `main`
+build to native library artifacts; `run` rejects them. Native Windows libraries
+use indexed COFF archives (also when named `.o`) and require `llvm-ar` on PATH.
+Unix and Wasm use relocatable objects. Imported functions named `main`
 are ordinary functions and are never called automatically.
 
 The compiler scans, parses, checks semantics, emits textual LLVM IR, then invokes
@@ -1832,7 +1834,9 @@ Use `OCOS=js OCARCH=wasm ocean build -o main.wasm` to emit a
 environment variables together; leaving both unset uses the native host.
 The same target selection applies to `ocean check`, `--emit-llvm`, library
 objects, and cached package builds. Clang with WebAssembly support and
-`wasm-ld` must be installed. LLVM output includes the Wasm target triple.
+`wasm-ld` must be installed. Use Clang/LLD 23 for JavaScript/Wasm; earlier
+code generators can exceed JavaScript engine local-variable limits in cached
+method specializations. LLVM output includes the Wasm target triple.
 
 The module exports `main` and imports unresolved runtime/extern functions
 from `env`. The JavaScript host must supply those imports, including any
