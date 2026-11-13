@@ -1,7 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "backend.h"
 #include "build_cache.h"
 #include "runtime_threads_source.h"
+#include "runtime_process_source.h"
 #include <ctype.h>
 #include "diagnostic.h"
 #include "array_type.h"
@@ -37,6 +39,15 @@ static void emitTarget(FILE *out) {
     if (backendWasm()) fputs("target triple = \"wasm32-unknown-unknown\"\n", out);
 }
 
+#ifdef _WIN32
+// Keep the backend's private kind names separate from Win32 typedefs/macros.
+#undef VOID
+#define VOID OCEAN_KIND_VOID
+#define INT OCEAN_KIND_INT
+#define FLOAT OCEAN_KIND_FLOAT
+#define BOOL OCEAN_KIND_BOOL
+#define UINT OCEAN_KIND_UINT
+#endif
 typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER } Kind;
 typedef struct {
     Kind kind;
@@ -2200,7 +2211,7 @@ static Kind expressionKind(Backend *b, expr *e) {
         if (allocation->buffer) {
             if (allocation->count.type == EXPR_TYPE_LITERAL &&
                 ((struct expr_literal *)allocation->count.underlying)->type == LITERAL_TYPE_INT)
-                return arrayKind(b, k, *(long *)((struct expr_literal *)allocation->count.underlying)->value);
+                return arrayKind(b, k, *(int64_t *)((struct expr_literal *)allocation->count.underlying)->value);
             return pointerBufferKind(b, k);
         }
         return k == SCALAR_ANY ? constrainedArrayKind(b, constraintKind(b, element), 0) : dynamicArrayKind(b, k);
@@ -4074,8 +4085,8 @@ static Value expressionImpl(Backend *b, expr *e) {
         struct expr_literal *v = e->underlying;
         if (v->type == LITERAL_TYPE_NULL) return value(b, NULL_VALUE, "@__ocean.null");
         if (v->type == LITERAL_TYPE_INT) {
-            if (v->unsignedLiteral) return value(b, UINT, "%lu", (unsigned long)*(long *)v->value);
-            return value(b, INT, "%ld", *(long *)v->value);
+            if (v->unsignedLiteral) return value(b, UINT, "%" PRIu64, *(uint64_t *)v->value);
+            return value(b, INT, "%" PRId64, *(int64_t *)v->value);
         }
         if (v->type == LITERAL_TYPE_FLOAT) {
             union {
@@ -5702,6 +5713,26 @@ static void emitBoundsRuntime(Backend *b) {
     if (!b->boundsUsed)
         return;
     struct stmt_func *print = findFunction(b, "dprintf"), *quit = findFunction(b, "exit");
+    const char *printName = "dprintf";
+#if defined(_WIN32)
+    if (!backendWasm()) {
+        printName = "__ocean.dprintf";
+        // Windows va_list is a pointer on both x64 and ARM64. Keep diagnostics
+        // on stderr without requiring the POSIX dprintf entry point.
+        fputs("declare ptr @__acrt_iob_func(i32)\n"
+              "declare i32 @vfprintf(ptr, ptr, ptr)\n"
+              "declare void @llvm.va_start(ptr)\n"
+              "declare void @llvm.va_end(ptr)\n"
+              "define internal i32 @__ocean.dprintf(i32 %fd, ptr %format, ...) {\n"
+              "  %args = alloca ptr, align 8\n"
+              "  call void @llvm.va_start(ptr %args)\n"
+              "  %list = load ptr, ptr %args\n"
+              "  %stream = call ptr @__acrt_iob_func(i32 %fd)\n"
+              "  %result = call i32 @vfprintf(ptr %stream, ptr %format, ptr %list)\n"
+              "  call void @llvm.va_end(ptr %args)\n"
+              "  ret i32 %result\n}\n", b->out);
+    } else
+#endif
     if (!print || !print->isExtern)
         fprintf(b->out, "declare i32 @dprintf(i32, ptr, ...)\n");
     if (!quit || !quit->isExtern)
@@ -5718,8 +5749,8 @@ static void emitBoundsRuntime(Backend *b) {
         "define internal void @__ocean.runtime_diagnostic(ptr %%file, i64 "
         "%%line, i64 %%column, ptr %%snippet) noreturn {\n"
         "entry:\n"
-        "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %%snippet)\n"
-        "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s)\n"
+        "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %s, ptr %%snippet)\n"
+        "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %s)\n"
         "  %%head = load ptr, ptr @__ocean.trace_head\n"
         "  br label %%trace\n"
         "trace:\n"
@@ -5738,7 +5769,7 @@ static void emitBoundsRuntime(Backend *b) {
         "  %%caller.line = load i64, ptr %%line.slot\n"
         "  %%column.slot = getelementptr %%__ocean.trace, ptr %%frame, i32 0, i32 4\n"
         "  %%caller.column = load i64, ptr %%column.slot\n"
-        "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %%name, ptr %%trace.file, i64 "
+        "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %s, ptr %%name, ptr %%trace.file, i64 "
         "%%trace.line, i64 %%trace.column)\n"
         "  %%parent.slot = getelementptr %%__ocean.trace, ptr %%frame, i32 0, i32 0\n"
         "  %%previous = load ptr, ptr %%parent.slot\n"
@@ -5747,7 +5778,7 @@ static void emitBoundsRuntime(Backend *b) {
         "  call void @%s(i32 1)\n"
         "  unreachable\n"
         "}\n",
-        snippetFormat.operand, traceTitle.operand, frameFormat.operand, b->threadsUsed ? "ocean_threads_panic_exit" : "exit");
+        printName, snippetFormat.operand, printName, traceTitle.operand, printName, frameFormat.operand, b->threadsUsed ? "ocean_threads_panic_exit" : "exit");
     fprintf(b->out,
         "define internal void @__ocean.panic(ptr %%m, i64 %%n, ptr %%f, i64 %%l, i64 %%c, ptr %%s) noreturn {\n"
         "  call void @__ocean.unwind(ptr %%m, i64 %%n, i1 false)\n"
@@ -5760,15 +5791,15 @@ static void emitBoundsRuntime(Backend *b) {
             "i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
             "  call i64 @\"\\01write\"(i32 2, ptr %s, i64 7)\n"
             "  call i64 @\"\\01write\"(i32 2, ptr %%message, i64 %%size)\n"
-            "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %%file, i64 %%line, i64 %%column)\n"
+            "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %s, ptr %%file, i64 %%line, i64 %%column)\n"
             "  call void @__ocean.runtime_diagnostic(ptr %%file, i64 %%line, i64 %%column, ptr %%snippet)\n"
             "  unreachable\n}\n"
             "define internal void @__ocean.runtime_error(ptr %%format, i64 %%index, i64 %%length, "
             "ptr %%file, i64 %%line, i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
-            "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %%format, i64 %%index, i64 %%length, "
+            "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %%format, i64 %%index, i64 %%length, "
             "ptr %%file, i64 %%line, i64 %%column)\n"
             "  call void @__ocean.runtime_diagnostic(ptr %%file, i64 %%line, i64 %%column, ptr %%snippet)\n"
-            "  unreachable\n}\n", panicPrefix.operand, panicLocation.operand);
+            "  unreachable\n}\n", panicPrefix.operand, printName, panicLocation.operand, printName);
     fprintf(b->out,
             "define internal void @__ocean.return_panic(ptr %%message, i64 %%size, ptr %%file, "
             "i64 %%line, i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
@@ -7078,7 +7109,7 @@ int emitLLVMPackages(parseResult *program, llvmPackages *units) {
 // or system-wide runtime library is needed.
 static char *compileThreadRuntime(void) {
     if (backendWasm()) { fprintf(stderr, "backend error: native threads are unavailable on WebAssembly\n"); return NULL; }
-    char source[] = "/tmp/ocean-thread-runtime-XXXXXX";
+    char source[4096]; oceanTemporary(source, sizeof(source), "ocean-thread-runtime-XXXXXX");
     int fd = mkstemp(source);
     if (fd < 0) { perror("thread runtime source"); return NULL; }
     FILE *file = fdopen(fd, "w");
@@ -7086,21 +7117,66 @@ static char *compileThreadRuntime(void) {
     int failed = fputs(oceanThreadRuntimeSource, file) == EOF;
     if (fclose(file)) failed = 1;
     char *object = checked(strlen(source) + 3); sprintf(object, "%s.o", source);
-    pid_t child = failed ? -1 : fork();
-    if (!child) {
-        execlp("clang", "clang", "-std=c11", "-O2", "-ffunction-sections", "-fdata-sections", "-x", "c", "-c", source, "-o", object, (char *)NULL);
-        perror("compiling native thread runtime"); _exit(127);
-    }
-    int status = 0;
-    if (child < 0) failed = 1;
-    else {
-        while (waitpid(child, &status, 0) < 0) if (errno != EINTR) { failed = 1; break; }
-        if (!WIFEXITED(status) || WEXITSTATUS(status)) failed = 1;
-    }
+    char *args[] = {"clang", "-std=c11", "-O2", "-ffunction-sections", "-fdata-sections", "-x", "c", "-c", source, "-o", object, NULL};
+    if (!failed) failed = oceanRun(args);
     unlink(source);
     if (failed) { unlink(object); free(object); return NULL; }
     return object;
 }
+
+static char *compileProcessRuntime(void) {
+    if (backendWasm()) { fprintf(stderr, "backend error: native processes are unavailable on WebAssembly\n"); return NULL; }
+    char source[4096]; oceanTemporary(source, sizeof(source), "ocean-process-runtime-XXXXXX");
+    int fd = mkstemp(source);
+    if (fd < 0) { perror("process runtime source"); return NULL; }
+    FILE *file = fdopen(fd, "w");
+    if (!file) { close(fd); unlink(source); return NULL; }
+    int failed = fputs(oceanProcessRuntimeSource, file) == EOF;
+    if (fclose(file)) failed = 1;
+    char *object = checked(strlen(source) + 3); sprintf(object, "%s.o", source);
+    char *args[] = {"clang", "-std=c11", "-O2", "-ffunction-sections", "-fdata-sections", "-x", "c", "-c", source, "-o", object, NULL};
+    if (!failed) failed = oceanRun(args);
+    unlink(source);
+    if (failed) { unlink(object); free(object); return NULL; }
+    return object;
+}
+
+/* Discover the full dependency closure when statically linking libcurl. */
+static char **staticCurlFlags(size_t *count) {
+    *count = 0;
+#ifdef _WIN32
+    FILE *pipe = _popen("pkg-config --static --libs libcurl", "r");
+#else
+    FILE *pipe = popen("pkg-config --static --libs libcurl", "r");
+#endif
+    if (!pipe) return NULL;
+    char buffer[32768]; size_t used = fread(buffer, 1, sizeof(buffer)-1, pipe); buffer[used] = 0;
+#ifdef _WIN32
+    int status = _pclose(pipe);
+#else
+    int status = pclose(pipe);
+#endif
+    if (status || !used || used == sizeof(buffer)-1) { fputs("backend error: static HTTP linking requires pkg-config and libcurl's static development dependencies\n", stderr); return NULL; }
+    char **result = checked(512 * sizeof(*result));
+    char *at = buffer;
+    while (*at) {
+        while (isspace((unsigned char)*at)) at++;
+        if (!*at) break;
+        if (*count == 511) goto invalid;
+        char token[32768], *out = token; char quote = 0;
+        while (*at && (quote || !isspace((unsigned char)*at))) {
+            if ((*at == '\'' || *at == '"') && (!quote || quote == *at)) { quote = quote ? 0 : *at; at++; }
+            else if (*at == '\\' && at[1] && quote != '\'') { at++; *out++ = *at++; }
+            else *out++ = *at++;
+        }
+        if (quote) goto invalid;
+        *out = 0; result[(*count)++] = strdup(token);
+    }
+    if (*count) return result;
+invalid:
+    for (size_t i = 0; i < *count; i++) free(result[i]); free(result); return NULL;
+}
+static void freeCurlFlags(char **flags, size_t count) { for (size_t i = 0; i < count; i++) free(flags[i]); free(flags); }
 
 static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath, int staticLink) {
     size_t len = strlen(outputPath) + 16;
@@ -7115,12 +7191,16 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     close(fd);
     // Ordinary programs retain their existing link requirements. Only modules
     // carrying runtime scalar metadata need the libffi runtime.
-    int needsFFI = 0, needsThreads = 0, ownsThreadRuntime = 0;
+    int needsFFI = 0, needsThreads = 0, needsCurl = 0, needsProcess = 0, ownsProcessRuntime = 0, ownsThreadRuntime = 0;
     FILE *input = fopen(irPath, "r");
     if (input) {
         char line[1024];
         while (fgets(line, sizeof(line), input)) {
             if (strstr(line, "@ffi_type_")) needsFFI = 1;
+            if (!strncmp(line, "declare ", 8) &&
+                (strstr(line, "@\"curl_") || strstr(line, "@curl_"))) needsCurl = 1;
+            if (strstr(line, "ocean_process_")) needsProcess = 1;
+            if (strstr(line, "define hidden void @ocean_runtime_process_marker")) { ownsProcessRuntime = 1; needsProcess = 1; }
             if (strstr(line, "@ocean_threads_")) needsThreads = 1;
             if (strstr(line, "define hidden void @ocean_runtime_thread_invoke")) ownsThreadRuntime = 1;
         }
@@ -7128,16 +7208,11 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     }
     char *threadObject = needsThreads && (!object || ownsThreadRuntime) ? compileThreadRuntime() : NULL;
     if (needsThreads && (!object || ownsThreadRuntime) && !threadObject) { unlink(staged); free(staged); return 1; }
-    pid_t child = fork();
-    if (child < 0) {
-        if (threadObject) { unlink(threadObject); free(threadObject); }
-        perror("could not start clang");
-        unlink(staged);
-        free(staged);
-        return 1;
-    }
-    if (!child) {
-        char *args[32]; size_t n = 0;
+    char *processObject = needsProcess && (!object || ownsProcessRuntime) ? compileProcessRuntime() : NULL;
+    if (needsProcess && (!object || ownsProcessRuntime) && !processObject) { if (threadObject) { unlink(threadObject); free(threadObject); } unlink(staged); free(staged); return 1; }
+    size_t curlCount = 0; char **curlFlags = needsCurl && staticLink && !object ? staticCurlFlags(&curlCount) : NULL;
+    if (needsCurl && staticLink && !object && !curlFlags) { if (processObject) { unlink(processObject); free(processObject); } if (threadObject) { unlink(threadObject); free(threadObject); } unlink(staged); free(staged); return 1; }
+        char **args = checked((48 + curlCount) * sizeof(*args)); size_t n = 0;
         args[n++] = "clang"; args[n++] = "-Wno-override-module";
         if (backendWasm()) {
             args[n++] = "--target=wasm32-unknown-unknown";
@@ -7155,36 +7230,32 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         if (objectPath) args[n++] = (char *)objectPath;
         else {
             if (object) {
-                if (threadObject) {
+                if (threadObject || processObject) {
                     args[n++] = "-r"; args[n++] = "-nostdlib";
                 } else args[n++] = "-c";
             }
             args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
         }
         if (threadObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = threadObject; }
+        if (processObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = processObject; }
         args[n++] = "-o"; args[n++] = staged;
         if (!object) {
 #if defined(_WIN32)
-            if (!backendWasm()) args[n++] = "-lkernel32";
+            if (!backendWasm()) { args[n++] = "-lkernel32"; args[n++] = "-lshell32"; }
 #endif
             if (needsFFI && !backendWasm()) args[n++] = "-lffi";
+            if (needsCurl && !backendWasm()) args[n++] = "-lcurl";
 #if !defined(_WIN32)
             if (needsThreads && !backendWasm()) args[n++] = "-pthread";
 #endif
         }
+        for (size_t i = 0; i < curlCount; i++) args[n++] = curlFlags[i];
         args[n] = NULL;
-        execvp(args[0], args);
-        perror("could not execute clang (install clang and add it to PATH)");
-        _exit(127);
-    }
-    int status = 0, failed = 0;
-    while (waitpid(child, &status, 0) < 0)
-        if (errno != EINTR) {
-            perror("waiting for clang");
-            failed = 1;
-            break;
-        }
-    if (failed || !WIFEXITED(status) || WEXITSTATUS(status)) {
+    int failed = oceanRun(args);
+    free(args); freeCurlFlags(curlFlags, curlCount);
+    if (processObject) { unlink(processObject); free(processObject); }
+    if (failed == 127) fputs("could not execute clang (install clang and add it to PATH)\n", stderr);
+    if (failed) {
         fprintf(stderr, "backend error: clang failed to compile or link LLVM IR\n");
         failed = 1;
     } else if (rename(staged, outputPath)) {
@@ -7223,17 +7294,21 @@ int checkBackend(parseResult *program) {
     }
     char *output = checked(strlen(units.directory) + 16);
     sprintf(output, "%s/check.out", units.directory);
-    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, units.needsThreads, output, program->isLibrary, 0);
+    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, units.needsThreads, units.needsCurl, units.needsProcess, output, program->isLibrary, 0);
     if (failed) diagnostic(program->sourceText, (token){.filename=(char *)program->sourceFilename,.line=1,.column=1},
                            "backend", "error", "LLVM compilation or linking failed during check");
     for (size_t i = 0; i < units.count; i++) if (objects[i]) { unlink(objects[i]); free(objects[i]); }
     free(objects); unlink(output); free(output); freeLLVMPackages(&units); return failed;
 }
 
-int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, const char *output, int library, int staticLink) {
+int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, int curl, int processes, const char *output, int library, int staticLink) {
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
-    char **args=checked(sizeof(char*)*(count+28));size_t n=0;
+    (void)processes; /* The support package object owns the process ABI. */
+    char *processObject = NULL;
+    size_t curlCount = 0; char **curlFlags = curl && staticLink && !library ? staticCurlFlags(&curlCount) : NULL;
+    if (curl && staticLink && !library && !curlFlags) { if (processObject) { unlink(processObject); free(processObject); } unlink(staged); free(staged); return 1; }
+    char **args=checked(sizeof(char*)*(count+32+curlCount));size_t n=0;
     args[n++]="clang";args[n++]="-Wno-override-module";
     if (backendWasm()) {
         args[n++]="--target=wasm32-unknown-unknown";
@@ -7249,17 +7324,20 @@ int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, co
     if(staticLink&&!library)args[n++]="-static";
     if(library){args[n++]="-r";args[n++]="-nostdlib";}
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
+    if (processObject) args[n++] = processObject;
     args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
+    if(curl&&!library&&!backendWasm())args[n++]="-lcurl";
 #if defined(_WIN32)
-    if(!library&&!backendWasm())args[n++]="-lkernel32";
+    if(!library&&!backendWasm()){args[n++]="-lkernel32";args[n++]="-lshell32";}
 #endif
 #if !defined(_WIN32)
     if (threads && !library && !backendWasm()) args[n++]="-pthread";
 #endif
+    for (size_t i = 0; i < curlCount; i++) args[n++] = curlFlags[i];
     args[n]=NULL;
-    pid_t child=fork();if(!child){execvp(args[0],args);perror("could not execute clang");_exit(127);}
-    int status=0,failed=child<0;
-    if(child>0){while(waitpid(child,&status,0)<0)if(errno!=EINTR){failed=1;break;}if(!WIFEXITED(status)||WEXITSTATUS(status))failed=1;}
+    int failed = oceanRun(args);
+    freeCurlFlags(curlFlags, curlCount);
+    if (processObject) { unlink(processObject); free(processObject); }
     if(failed)fprintf(stderr,"backend error: clang failed to link package objects\n");
     else if(rename(staged,output)){perror("could not save output");failed=1;}
     unlink(staged);free(staged);free(args);return failed;

@@ -237,11 +237,20 @@ static void finishNativeModules(Backend *b, FILE *support) {
     free(line); hashmap_iterate(definitions, nativeFreeSet, NULL); hashmap_free(definitions);
     b->units->needsFFI = b->ffiUsed;
     b->units->needsThreads = b->threadsUsed;
+    for (size_t i = 0; i < b->program->nStatements; i++) {
+        stmt *s = &b->program->statements[i];
+        if (s->type != STMT_FUNC) continue;
+        struct stmt_func *f = s->value;
+        const char *name = f->externalName ? f->externalName : f->name.lexeme;
+        if (f->isExtern && !strncmp(name, "curl_", 5)) b->units->needsCurl = 1;
+        if (f->isExtern && !strncmp(name, "ocean_process_", 14)) b->units->needsProcess = 1;
+    }
     for (size_t unit = 0; unit < b->units->count; unit++) {
         if (!b->units->needed[unit]) continue;
         FILE *out = fopen(b->units->paths[unit], "w");
         if (!out) { fail(b, "could not create native module"); break; }
         emitTarget(out);
+        if (!unit && b->units->needsProcess) fputs("define hidden void @ocean_runtime_process_marker() { ret void }\n", out);
         if (!unit) {
             copy(types, out); nativeCopy(b, ordinary, out); copy(runtime, out);
         } else {

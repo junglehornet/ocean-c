@@ -1,0 +1,57 @@
+package main;
+import "testing";
+
+func TestVersionMetadata(t *testing.T) {
+    release: Release; release.version = "1.2.3"; release.commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    data := compilerInfo("Ocean compiler (ocean-c) 1.2.3\nCommit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (2026-11-13), built 2026-11-14T01:02:03Z\nCopyright Connor Egan 2026\n",release);
+    if (text(data["build_date"]) != "2026-11-14T01:02:03Z" || text(data["commit_date"]) != "2026-11-13") t.Fatal("metadata mismatch");
+}
+func TestProfileBlock(t *testing.T) {
+    block := entry("unused","# >>> Ocean installer >>>\nexport PATH='/a b':\"$PATH\"\n# <<< Ocean installer <<<\n",false);
+    first := editProfile("# user settings\n",block);
+    if (editProfile(first,block) != first || !starts(first,"# user settings")) t.Fatal("profile edit is not idempotent");
+    if (psQuote("a'b") != "'a''b'" || shQuote("a'b") != "'a'\"'\"'b'") t.Fatal("path quoting");
+}
+func TestLatestSelection(t *testing.T) {
+    beta: Release; beta.version="2.0.0-beta";beta.prerelease=true;
+    stable: Release;stable.version="1.0.0";
+    unavailable: Release;unavailable.reason="missing artifact";
+    if (latest(Release[]{beta,unavailable,stable}) != 2 || latest(Release[]{unavailable}) != -1 || latest(Release[]{beta}) != 0) t.Fatal("latest selection");
+}
+func TestRedirectsAndDependencyPlans(t *testing.T) {
+    if (redirectURL("https://example.com/a/b","/asset") != "https://example.com/asset") t.Fatal("root redirect");
+    if (redirectURL("https://example.com/a/b","asset") != "https://example.com/a/asset") t.Fatal("relative redirect");
+    if (allowedURL("http://example.com/asset") || !allowedURL("https://example.com/asset")) t.Fatal("download TLS policy");
+    if (systemDependencyCommand("apt-get")[0] != "apt-get" || systemDependencyCommand("brew")[2] != "llvm" || len(systemDependencyCommand("not-a-manager")) != 0) t.Fatal("dependency package manager plans");
+}
+func repeated(character i8, count int) string { out := i8[]{};for (i:=0;i<count;i++) out.append(character);return out->string; }
+func octalField(value int, width int) string {
+    text := "";
+    for (;;) { digit := value % 8; text = ioDigit(digit) + text; value /= 8; if (value == 0) break; }
+    for (len(text) < width-1) text = "0"+text;
+    return text+"\0";
+}
+func ioDigit(digit int) string { digits := "01234567"; return digits[digit:digit+1]; }
+func tarFixture(name string, body string, kind i8) string {
+    header: i8[512];
+    for (i:=0;i<len(name);i++) header[i]=name[i];
+    size:=octalField(len(body),12);for(i:=0;i<12;i++)header[124+i]=size[i];
+    for(i:=148;i<156;i++)header[i]=' ';
+    header[156]=kind;sum:=0;for(_,c:=range header)sum+=(c->u8)->int;
+    check:=octalField(sum,8);for(i:=0;i<8;i++)header[148+i]=check[i];
+    bytes:=i8[]{};bytes.append(header...);
+    return (bytes->string)+body+repeated(0->i8,(512-len(body)%512)%512)+repeated(0->i8,1024);
+}
+func archiveRejected(bytes string, path string) (bool rejected) {
+    defer func(){ value:=recover();if(value!=null)rejected=true; }();
+    unpack(bytes,path,"ocean-c");return;
+}
+func TestArchiveValidation(t *testing.T) {
+    platform,architecture=target();
+    work:=temporary();defer removeTree(work);path:=pathJoin(work,"compiler");
+    unpack(tarFixture("ocean-c","native bytes",'0'),path,"ocean-c");
+    if(readFile(path)!="native bytes")t.Fatal("tar payload");
+    if(!archiveRejected(tarFixture("../escape","bad",'0'),path))t.Fatal("traversal accepted");
+    if(!archiveRejected(tarFixture("ocean-c","target",'2'),path))t.Fatal("symlink accepted");
+    if(!archiveRejected("truncated",path))t.Fatal("truncation accepted");
+}

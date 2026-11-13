@@ -1,0 +1,5 @@
+#ifndef OCEAN_PROCESS_RUNTIME_SOURCE_H
+#define OCEAN_PROCESS_RUNTIME_SOURCE_H
+static const char oceanProcessRuntimeSource[] =
+"@OCEAN_PROCESS_RUNTIME_SOURCE@";
+#endif

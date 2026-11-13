@@ -1,0 +1,201 @@
+package main;
+import "io";
+import "os/exec";
+import "encoding/json";
+
+func home() string { value := environment(platform == "windows" ? "USERPROFILE" : "HOME"); require(value != "", "cannot determine home directory"); return replace(value,"\\","/"); }
+func defaults() (string, string) {
+    if (platform == "windows") return pathJoin(environment("ProgramFiles"), "Ocean"), pathJoin(environment("LOCALAPPDATA"), "Ocean");
+    return "/usr/local/lib/ocean", pathJoin(home(), ".local/lib/ocean");
+}
+func normalize(path string) string {
+    path = replace(path, "\\", "/");
+    if (path == "~") path = home(); else if (starts(path,"~/")) path = home() + path[1:];
+    if (platform == "windows") path = replace(ps("[IO.Path]::GetFullPath(" + psQuote(path) + ")"), "\\", "/");
+    require(starts(path, "/") || (platform == "windows" && len(path) > 3 && path[1] == ':'), "choose an absolute installation directory");
+    require(len(path) > 4 && path != home(), "choose a dedicated Ocean directory");
+    for (_, part := range split(path,"/")) require(part != ".." && part != ".", "dot path components are not accepted");
+    for (_, c := range path) require(c >= 32 && c != 127, "control character in directory");
+    for (ends(path,"/")) path = path[:len(path)-1];
+    if (platform == "windows") {
+        require(ps("$p=" + psQuote(path) + ";$ok=$true;while($p){if(Test-Path -LiteralPath $p){if((Get-Item -Force -LiteralPath $p).Attributes -band [IO.FileAttributes]::ReparsePoint){$ok=$false}};$p=Split-Path -Parent $p};$ok") == "True", "installation path contains a link/reparse point");
+    } else {
+        prefix := "";
+        for (_, part := range split(path,"/")) { if (part == "") continue; prefix += "/" + part; c := exec.Command("test", "-L", prefix); require(c.Run().hasError(), "installation path contains a symbolic link"); }
+        require(path != command("pwd", "-P"), "do not install over the working directory");
+    }
+    require(!exists(path) || directory(path), "installation path is not a directory"); return path;
+}
+func describe(path string) {
+    io.Println("\nExisting installation/directory: ", path);
+    manifest := pathJoin(path, "installation.json");
+    if (exists(manifest)) {
+        parsed := json.Unmarshal(readFile(manifest));
+        if (!parsed.hasError()) {
+            value := parsed.unwrap();
+            switch (value.(type)) {
+                case map[string]any:
+                    data := object(value);
+                    if (text(data["version"]) != "") {
+                        for (_, key := range string[]{"version","commit","commit_date","build_date","install_date"}) io.Println("  ",key,": ",text(data[key]) == "" ? "unknown" : text(data[key]));
+                        return;
+                    }
+            }
+        }
+    }
+    io.Println("  Unknown version (no readable installation.json metadata).");
+}
+func shell() string {
+    value := environment("SHELL");
+    if (platform == "macos") {
+        result := command("dscl", ".", "-read", "/Users/" + command("id","-un"), "UserShell");
+        at := index(result, ": "); if (at >= 0) value = result[at+2:];
+    } else {
+        lookup := exec.LookPath("getent");
+        if (!lookup.hasError()) { fields := split(command("getent","passwd",command("id","-u")),":"); if (len(fields) >= 7) value = fields[6]; }
+    }
+    parts := split(trim(value), "/"); return value == "" ? "sh" : parts[len(parts)-1];
+}
+func entry(path string, content string, whole bool) map[string]any {
+    value := make(map[string]any); value["path"] = path; value["content"] = content; value["whole"] = whole; return value;
+}
+func pathPlan(destination string, system bool) map[string]any {
+    plan := make(map[string]any); plan["system"] = system; plan["destination"] = destination;
+    binary := pathJoin(destination,"bin"); plan["bin"] = binary;
+    entries := mixed any[]{};
+    if (platform != "windows") {
+        selected := shell(); paths := string[]{}; quote := shQuote(binary);
+        line := "case \":$PATH:\" in *:" + quote + ":*) ;; *) export PATH=" + quote + ":\"$PATH\" ;; esac";
+        if (selected == "fish") line = "fish_add_path --global -- " + quote;
+        else if (selected == "csh" || selected == "tcsh") line = "setenv PATH " + quote + ":\"$PATH\"";
+        else require(selected == "sh" || selected == "bash" || selected == "zsh" || selected == "dash" || selected == "ksh", "unsupported default shell: " + selected);
+        if (system) {
+            if (platform == "macos" && selected != "fish") entries.append(entry("/etc/paths.d/ocean",binary+"\n",true));
+            else if (selected == "fish") paths.append("/etc/fish/conf.d/ocean.fish");
+            else if (selected == "zsh") paths.append(directory("/etc/zsh") ? "/etc/zsh/zprofile" : "/etc/zprofile");
+            else if (selected == "csh" || selected == "tcsh") paths.append("/etc/csh.cshrc");
+            else paths.append("/etc/profile.d/ocean.sh");
+        } else {
+            if (selected == "bash") {
+                login := pathJoin(home(), platform == "macos" ? ".bash_profile" : ".profile");
+                for (_, name := range string[]{".bash_profile",".bash_login",".profile"}) { candidate := pathJoin(home(),name); if (exists(candidate)) { login = candidate; break; } }
+                paths.append(login); paths.append(pathJoin(home(),".bashrc"));
+            } else if (selected == "zsh") { base := environment("ZDOTDIR"); if (base == "") base = home(); paths.append(pathJoin(base,".zprofile")); paths.append(pathJoin(base,".zshrc")); }
+            else if (selected == "fish") { base := environment("XDG_CONFIG_HOME"); if (base == "") base = pathJoin(home(),".config"); paths.append(pathJoin(base,"fish/conf.d/ocean.fish")); }
+            else paths.append(pathJoin(home(), selected == "csh" || selected == "tcsh" ? ".cshrc" : ".profile"));
+            plan["owner"] = command("id","-u") + ":" + command("id","-g");
+        }
+        for (_, path := range paths) entries.append(entry(path,"# >>> Ocean installer >>>\n"+line+"\n# <<< Ocean installer <<<\n",false));
+    }
+    plan["entries"] = entries; return plan;
+}
+func chooseDestination() map[string]any {
+    system, user := defaults();
+    for (_, path := range string[]{system,user}) { if (exists(path)) describe(path); }
+    installed := exec.LookPath("ocean");
+    if (!installed.hasError()) io.Println("Caution: Ocean is already on PATH at ", installed.unwrap());
+    io.Println("\n  1. System-wide: ",system,"\n  2. Current user: ",user,"\n  3. Choose a directory");
+    choice := "";
+    for (choice != "1" && choice != "2" && choice != "3") choice = ask("Installation scope [1]: ","1");
+    destination := choice == "1" ? system : user;
+    if (choice == "3") destination = ask("Full installation directory (including ocean folder): ","");
+    destination = normalize(destination);
+    global := choice == "1" || (choice == "3" && yes("Configure PATH for all users?"));
+    present := exists(destination);
+    if (present) {
+        describe(destination); io.Println("Caution: replacement removes ALL directory contents after downloads validate.");
+        require(ask("Type 'remove " + destination + "' to remove and replace this installation: ","") == "remove " + destination, "installation cancelled; existing directory preserved");
+    }
+    plan := pathPlan(destination,global); plan["replace"] = present;
+    for (_, raw := range array(plan["entries"])) io.Println("PATH configuration: ",text(object(raw)["path"]));
+    require(yes("Continue with these installation and PATH settings?"),"installation cancelled"); return plan;
+}
+func editProfile(original string, item map[string]any) string {
+    if (flag(item["whole"])) return text(item["content"]);
+    start := index(original,"# >>> Ocean installer >>>\n");
+    if (start >= 0) {
+        end := index(original[start:],"# <<< Ocean installer <<<"); require(end >= 0,"malformed Ocean PATH block");
+        end += start + len("# <<< Ocean installer <<<");
+        if (end < len(original) && original[end] == '\n') end++;
+        original = original[:start] + original[end:];
+    }
+    for (ends(original,"\n")) original = original[:len(original)-1];
+    return (original == "" ? "" : original + "\n\n") + text(item["content"]);
+}
+func registryPath(system bool) string {
+    value := ps("[Environment]::GetEnvironmentVariable('Path'," + psQuote(system ? "Machine" : "User") + ") | ConvertTo-Json -Compress");
+    return value == "" ? "" : text(decode(value));
+}
+func setRegistry(value string, system bool) { ps("[Environment]::SetEnvironmentVariable('Path',"+psQuote(value)+","+psQuote(system ? "Machine" : "User")+")"); }
+func needsElevation(plan map[string]any) bool {
+    if (text(plan["dependencies"]) == "system") {
+        if (platform != "windows" && command("id","-u") != "0") return true;
+        if (platform == "windows" && ps("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)") != "True") return true;
+    }
+    if (!writable(parent(text(plan["destination"])))) return true;
+    if (platform == "windows") return flag(plan["system"]) && ps("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)") != "True";
+    for (_, raw := range array(plan["entries"])) { if (!writable(text(object(raw)["path"]))) return true; }
+    return exists(text(plan["destination"])) && !writable(text(plan["destination"]));
+}
+func apply(plan map[string]any) {
+    installSystemDependencies(plan);
+    destination := text(plan["destination"]); payload := text(plan["payload"]);
+    require(exists(destination) == flag(plan["replace"]), "destination changed after confirmation");
+    mkdir(parent(destination));
+    // Stage beside the destination so the final rename is on the same volume.
+    scratch := destination + ".install-" + replace(replace(now(),":",""),"-","");
+    require(!exists(scratch), "installation staging path already exists"); mkdir(scratch);
+    staged := pathJoin(scratch,"new"); backup := pathJoin(scratch,"old"); copyTree(payload,staged);
+    oldRegistry := ""; registryChanged := false; backups := mixed any[]{};
+    saved := false; installed := false; committed := false;
+    defer func() { if (committed || !exists(backup)) removeTree(scratch); else io.Println("Previous installation preserved for recovery at ", backup); }();
+    defer func() {
+        if (!committed) {
+            cleanupMode = true;
+            if (installed) removeTree(destination);
+            if (saved) move(backup,destination);
+            for (_, raw := range backups) {
+                file := object(raw); path := text(file["path"]);
+                if (flag(file["existed"])) writeFile(path,text(file["original"]));
+                else if (exists(path)) {
+                    if (platform == "windows") ps("Remove-Item -Force -LiteralPath " + psQuote(path)); else command("rm","-f","--",path);
+                }
+            }
+            if (registryChanged) setRegistry(oldRegistry,flag(plan["system"]));
+        }
+    }();
+    if (platform == "windows") {
+        oldRegistry = registryPath(flag(plan["system"])); value := text(plan["bin"]);
+        extra := text(plan["extraBin"]); if (extra != "") value += ";"+extra;
+        for (_, part := range split(oldRegistry,";")) { if (part != "" && part != value) value += ";" + part; }
+        registryChanged = true; setRegistry(value,flag(plan["system"]));
+    } else {
+        for (_, raw := range array(plan["entries"])) {
+            item := object(raw); path := text(item["path"]);
+            link := exec.Command("test","-L",path); require(link.Run().hasError(),"shell configuration is a symlink: "+path);
+            had := exists(path); original := had ? readFile(path) : "";
+            file := make(map[string]any); file["path"] = path; file["existed"] = had; file["original"] = original; backups.append(file);
+            missing := string[]{}; at := parent(path);
+            for (!exists(at)) { missing.append(at); at = parent(at); }
+            mkdir(parent(path)); writeFile(path,editProfile(original,item));
+            owner := text(plan["owner"]);
+            if (owner != "") { if (!had) command("chown","--",owner,path); for (_, dir := range missing) command("chown","--",owner,dir); }
+        }
+    }
+    if (flag(plan["replace"])) { move(destination,backup); saved = true; }
+    move(staged,destination); installed = true; committed = true;
+}
+func elevate(plan map[string]any, work string, executable string) {
+    io.Println("The destination or PATH configuration needs administrator permissions.");
+    require(yes("Request elevation to apply this installation?"),"installation cancelled; elevation declined");
+    request := pathJoin(work,"apply.json"); writeFile(request,encode(plan));
+    if (platform == "windows") {
+        // Only a private plan filename is passed through PowerShell; user paths
+        // are data in JSON, not interpolated command language.
+        args := "--apply \"" + replace(request,"\"","\\\"") + "\"";
+        result := ps("$p=Start-Process -FilePath "+psQuote(executable)+" -ArgumentList "+psQuote(args)+" -Verb RunAs -Wait -PassThru; $p.ExitCode");
+        require(result == "0","administrator installation failed or was cancelled");
+    } else {
+        c := exec.Command("sudo","--",executable,"--apply",request); require(!c.Run().hasError(),"elevated installation failed");
+    }
+}

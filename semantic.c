@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "semantic.h"
 #include "scanner.h"
 #include "diagnostic.h"
@@ -905,8 +906,8 @@ static int coerceFloatLiteral(Type *expected, expr *e) {
     if (literal->type != LITERAL_TYPE_INT) return 0;
     double *number = malloc(sizeof(*number));
     if (!number) exit(1);
-    *number = literal->unsignedLiteral ? (double)*(unsigned long *)literal->value
-                                      : (double)*(long *)literal->value;
+    *number = literal->unsignedLiteral ? (double)*(uint64_t *)literal->value
+                                      : (double)*(int64_t *)literal->value;
     free(literal->value);
     literal->value = number;
     literal->type = LITERAL_TYPE_FLOAT;
@@ -926,16 +927,16 @@ static int integerLiteralFits(Type *expected, expr *e) {
     if (e->type != EXPR_TYPE_LITERAL) return 0;
     struct expr_literal *v = e->underlying;
     if (v->type != LITERAL_TYPE_INT) return 0;
-    unsigned long magnitude;
-    if (v->unsignedLiteral) magnitude = *(unsigned long *)v->value;
+    uint64_t magnitude;
+    if (v->unsignedLiteral) magnitude = *(uint64_t *)v->value;
     else {
-        long number = *(long *)v->value;
-        if (number < 0) { negate = !negate; magnitude = 0UL - (unsigned long)number; }
-        else magnitude = (unsigned long)number;
+        int64_t number = *(int64_t *)v->value;
+        if (number < 0) { negate = !negate; magnitude = UINT64_C(0) - (uint64_t)number; }
+        else magnitude = (uint64_t)number;
     }
-    if (negate && magnitude) return !isUnsigned && magnitude <= (1UL << (width - 1));
-    unsigned long maximum = isUnsigned ? (width == 64 ? ~0UL : (1UL << width) - 1)
-                                       : (1UL << (width - 1)) - 1;
+    if (negate && magnitude) return !isUnsigned && magnitude <= (UINT64_C(1) << (width - 1));
+    uint64_t maximum = isUnsigned ? (width == 64 ? ~UINT64_C(0) : (UINT64_C(1) << width) - 1)
+                                       : (UINT64_C(1) << (width - 1)) - 1;
     return magnitude <= maximum;
 }
 static Type *contextualInteger(Context *c, Type *expected, Type *actual, expr *e, token at) {
@@ -1612,7 +1613,7 @@ static int typeExpression(Context *c, expr *e, typeTokens *out) {
         if (sizedBuffer) {
             tokens[base.nTokens + 1] = typeToken(LITERAL_INT, "<buffer size>");
             tokens[base.nTokens + 1].numValue.integer =
-                *(long *)((struct expr_literal *)v->index.underlying)->value;
+                *(int64_t *)((struct expr_literal *)v->index.underlying)->value;
         }
         tokens[base.nTokens + extra - 1] = typeToken(RIGHT_BRACKET, "]");
         *out = (typeTokens){base.nTokens + extra, tokens};
@@ -2034,13 +2035,13 @@ static Type *expression(Context *c, expr *e) {
             if (v->count.type == EXPR_TYPE_LITERAL &&
                 ((struct expr_literal *)v->count.underlying)->type == LITERAL_TYPE_INT) {
                 t->bufferSize = 1;
-                t->count = *(long *)((struct expr_literal *)v->count.underlying)->value;
+                t->count = *(int64_t *)((struct expr_literal *)v->count.underlying)->value;
             }
         }
         if (t->element->interface && (t->element->interface->nMethods || t->element->interface->nConstraints) &&
             !(v->count.type == EXPR_TYPE_LITERAL &&
               ((struct expr_literal *)v->count.underlying)->type == LITERAL_TYPE_INT &&
-              *(long *)((struct expr_literal *)v->count.underlying)->value == 0))
+              *(int64_t *)((struct expr_literal *)v->count.underlying)->value == 0))
             error(c, at, "interface array allocation requires a concrete element type; use an array literal");
         if (t->element == &nothing) error(c, at, "void is not an array element storage type");
         if (!strcmp(t->element->name, "buffer") && t->element->bufferSize == 2)
@@ -2051,7 +2052,7 @@ static Type *expression(Context *c, expr *e) {
             ((struct expr_unary *)v->count.underlying)->child.type == EXPR_TYPE_LITERAL &&
             ((struct expr_literal *)((struct expr_unary *)v->count.underlying)->child.underlying)
                     ->type == LITERAL_TYPE_INT &&
-            *(long *)((struct expr_literal *)((struct expr_unary *)v->count.underlying)
+            *(int64_t *)((struct expr_literal *)((struct expr_unary *)v->count.underlying)
                           ->child.underlying)
                     ->value > 0)
             error(c, at, "array item count must not be negative");

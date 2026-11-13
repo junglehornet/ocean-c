@@ -1,0 +1,87 @@
+package main;
+import "io";
+
+func tarText(bytes string) string { end := 0; for (end < len(bytes) && bytes[end] != 0) end++; return bytes[:end]; }
+func octal(bytes string) int {
+    value := 0;
+    for (_, c := range bytes) {
+        if (c == 0 || c == ' ') continue;
+        require(c >= '0' && c <= '7' && value < 536870912, "invalid tar size/checksum");
+        value = value * 8 + ((c - '0') -> int);
+    }
+    return value;
+}
+func paxName(bytes string, expected string) {
+    for (len(bytes) > 0) {
+        space := index(bytes, " "); require(space > 0, "invalid PAX record");
+        count := io.ParseInt(bytes[:space]).unwrap(); require(count > space+1 && count <= len(bytes), "invalid PAX record length");
+        line := bytes[space+1:count];
+        if (starts(line, "path=")) require(trim(line[5:]) == expected, "unexpected PAX archive path");
+        else require(starts(line,"mtime=") || starts(line,"atime=") || starts(line,"ctime=") || starts(line,"uid=") || starts(line,"gid=") || starts(line,"uname=") || starts(line,"gname="), "unsupported PAX metadata");
+        bytes = bytes[count:];
+    }
+}
+// Release archives have exactly one regular executable at their root. Parsing
+// tar here keeps links, device nodes, and path traversal out of extraction.
+func unpack(bytes string, destination string, expected string) {
+    offset := 0; found := false; ended := false;
+    for (offset + 512 <= len(bytes)) {
+        header := bytes[offset:offset+512]; offset += 512;
+        zero := true; for (_, c := range header) { if (c != 0) zero = false; }
+        if (zero) { ended = true; break; }
+        checksum := 0;
+        for (i := 0; i < 512; i++) checksum += i >= 148 && i < 156 ? 32 : (header[i]->u8)->int;
+        require(checksum == octal(header[148:156]), "tar checksum mismatch");
+        size := octal(header[124:136]); require(size >= 0 && size <= len(bytes) - offset, "truncated tar member");
+        kind := header[156]; name := tarText(header[:100]); prefix := tarText(header[345:500]);
+        if (prefix != "") name = prefix + "/" + name;
+        if (kind == 'x') paxName(bytes[offset:offset+size], expected);
+        else {
+            require((kind == 0 || kind == '0') && name == expected && !found, "archive must contain exactly the expected regular compiler executable");
+            writeFile(destination, bytes[offset:offset+size]); found = true;
+        }
+        offset += ((size + 511) / 512) * 512;
+    }
+    require(found && ended, "truncated or empty compiler archive");
+}
+func verifyDigest(path string, digest string) {
+    if (digest == "") return;
+    require(starts(digest, "sha256:") && len(digest) == 71, "unsupported release digest");
+    sum := "";
+    if (platform == "windows") sum = ps("(Get-FileHash -Algorithm SHA256 -LiteralPath " + psQuote(path) + ").Hash.ToLowerInvariant()");
+    else if (platform == "macos") sum = command("shasum", "-a", "256", "--", path);
+    else sum = command("sha256sum", "--", path);
+    require(starts(sum, digest[7:]), "release asset SHA-256 mismatch");
+}
+func compilerInfo(output string, release Release) map[string]any {
+    lines := split(trim(output), "\n"); require(len(lines) == 3, "invalid compiler version response");
+    require(lines[0] == "Ocean compiler (ocean-c) " + release.version, "compiler version does not match selected tag");
+    expected := "Commit " + release.commit + " (";
+    require(starts(lines[1], expected), "compiler commit does not match selected tag");
+    remainder := lines[1][len(expected):]; at := index(remainder, "), built "); require(at == 10, "invalid compiler commit date");
+    date := remainder[:at]; built := remainder[at+9:];
+    require(lines[2] == "Copyright Connor Egan " + date[:4], "invalid compiler copyright year");
+    result := make(map[string]any); result["version"] = release.version; result["commit"] = release.commit;
+    result["commit_date"] = date; result["build_date"] = built; return result;
+}
+func prepare(work string, release Release) string {
+    io.Println("Downloading compiler and matching tagged standard library...");
+    archive := pathJoin(work, "compiler.tar"); body := get(release.url, 512 * 1024 * 1024); writeFile(archive, body); verifyDigest(archive, release.digest);
+    payload := pathJoin(work, "payload"); mkdir(pathJoin(payload, "bin"));
+    suffix := platform == "windows" ? ".exe" : "";
+    binary := pathJoin(payload, "bin/ocean" + suffix);
+    unpack(body, binary, "ocean-c" + suffix);
+    if (platform != "windows") command("chmod", "--", "755", binary);
+    info := compilerInfo(command(binary, "--version"), release);
+    expectedDate := command("git", "-C", pathJoin(work, "compiler.git"), "show", "-s", "--format=%cs", release.commit);
+    require(text(info["commit_date"]) == expectedDate, "compiler commit date does not match Git tag");
+    source := pathJoin(payload, "src"); command("git", "init", source);
+    command("git", "-C", source, "fetch", "--depth=1", "--no-tags", "https://github.com/junglehornet/ocean-src.git", "refs/tags/" + release.version);
+    commit := command("git", "-C", source, "rev-parse", "FETCH_HEAD^{commit}"); require(commit == release.sourceCommit, "stdlib tag changed during installation");
+    command("git", "-C", source, "checkout", "--detach", commit);
+    info["stdlib_commit"] = commit; info["stdlib_commit_date"] = command("git", "-C", source, "show", "-s", "--format=%cI", commit);
+    removeTree(pathJoin(source, ".git"));
+    info["install_date"] = now(); info["os"] = platform; info["arch"] = architecture;
+    writeFile(pathJoin(payload, "installation.json"), encode(info) + "\n");
+    return payload;
+}

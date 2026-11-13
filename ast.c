@@ -44,7 +44,7 @@ static char* stringOf(expr e) {
                 str = format_ast("null");
                 break;
             case LITERAL_TYPE_INT:
-                str = format_ast("%ld", *(long*)((struct expr_literal*)e.underlying)->value);
+                str = format_ast("%" PRId64, *(int64_t*)((struct expr_literal*)e.underlying)->value);
                 break;
             case LITERAL_TYPE_FLOAT:
                 str = format_ast("%lf", *(double*)((struct expr_literal*)e.underlying)->value);

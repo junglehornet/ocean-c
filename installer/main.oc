@@ -1,0 +1,62 @@
+package main;
+import "io";
+import "os";
+import "os/exec";
+import "threads";
+import "time";
+import "net/http";
+
+extern void ocean_process_watch();
+extern i32 ocean_process_interrupted();
+extern buffer<i8> ocean_process_argument(int index);
+extern void free(*void pointer);
+stopWatch: http.Cancellation;
+dependencyMode: string;
+func main() (int status) {
+    status = 1;
+    defer func() { message := recover(); if (message != null) os.Stderr().unwrap().Write("Ocean installer: " + io.Sprint(message) + "\n"); }();
+    platform, architecture = target();
+    args := os.Args();
+    if (len(args) == 2 && args[1] == "--platform") { io.Println(architecture,"-",platform); return 0; }
+    if (len(args) == 2 && args[1] == "--help") {
+        io.Println("Ocean native installer. Requires Git and the system's file utilities (PowerShell on Windows).");
+        io.Println("Run without arguments to choose a matching release, destination, and PATH scope.");
+        io.Println("Options: --help, --platform. No Python runtime or helper script is used."); return 0;
+    }
+    require(platform != "unsupported" && architecture != "unsupported", "unsupported installer target");
+    if (len(args) == 3 && args[1] == "--apply") {
+        request := args[2];
+        if (platform == "windows") { native := extern.ocean_process_argument(2); require((native->int) != 0,"missing apply plan"); bytes := i8[]{}; for (i := 0; native[i] != 0; i++) bytes.append(native[i]); request = bytes->string; extern.free(native->(*void)); }
+        apply(object(decode(readFile(request)))); return 0;
+    }
+    require(len(args) == 1,"unknown installer arguments; use --help");
+    extern.ocean_process_watch();
+    watcher := threads.Spawn(func() {
+        for (!stopWatch.Canceled()) {
+            if (extern.ocean_process_interrupted() != 0) { httpCancel.Cancel(); break; }
+            time.Sleep(20 * time.Millisecond);
+        }
+    });
+    defer func() { stopWatch.Cancel(); threads.Await(watcher); }();
+    require(!exec.LookPath("git").hasError(), "Git must be installed and available on PATH");
+    io.Println("Ocean installer for ",architecture,"-",platform,". Ctrl+C cancels.");
+    apiBase = environment("OCEAN_INSTALLER_API_BASE"); if (apiBase == "") apiBase = "https://api.github.com";
+    require(allowedURL(apiBase),"API base must use HTTPS");
+    plan := chooseDestination();
+    dependencyMode = dependencyChoice(plan); plan = configureDependencies(plan,dependencyMode);
+    work := temporary(); defer func() { cleanupMode = true; removeTree(work); }();
+    release := chooseVersion(catalog(work));
+    payload := prepare(work,release); plan["payload"] = payload;
+    if (dependencyMode == "bundle") localDependencies(work,payload,release,text(plan["destination"]));
+    if (dependencyMode == "system") {
+        if (platform == "macos") { installSystemDependencies(plan); plan = extendPathPlan(plan,dependencyPath(plan)); plan["dependencies"] = "prepared"; }
+        else plan = extendPathPlan(plan,dependencyPath(plan));
+    }
+    metadata := object(decode(readFile(pathJoin(payload,"installation.json")))); metadata["dependencies"] = dependencyMode;
+    writeFile(pathJoin(payload,"installation.json"),encode(metadata)+"\n");
+    executable := exec.LookPath(args[0]).unwrap();
+    if (platform == "windows") { native := extern.ocean_process_argument(0); if ((native->int) != 0) { bytes := i8[]{}; for (i := 0; native[i] != 0; i++) bytes.append(native[i]); executable = bytes->string; extern.free(native->(*void)); } }
+    if (needsElevation(plan)) elevate(plan,work,executable); else apply(plan);
+    io.Println("Ocean ",release.version," installed in ",text(plan["destination"]),". Open a new login shell/terminal, then run ocean --version.");
+    io.Println("Clang must be available on PATH to compile Ocean programs."); return 0;
+}

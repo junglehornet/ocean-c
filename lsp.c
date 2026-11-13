@@ -1,5 +1,6 @@
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "lsp.h"
 #include "package.h"
 #include "semantic.h"
@@ -174,6 +175,9 @@ static char *uriPath(const char *uri) {
         } else *out++ = *s++;
     }
     *out = 0;
+#ifdef _WIN32
+    if (path[0] == '/' && isalpha((unsigned char)path[1]) && path[2] == ':') memmove(path, path + 1, strlen(path));
+#endif
     char *resolved = realpath(path, NULL);
     if (!resolved) { /* New files can still have a real parent directory. */
         char *slash = strrchr(path, '/');
@@ -197,6 +201,9 @@ static long utf16Column(const char *text, long line, long column) {
     }
     return units;
 }
+#ifdef _WIN32
+static int windowsLspRequest(FILE *output, const char *method, Json *params, Document *doc, Document *documents);
+#endif
 static void publish(Document *doc, Document *documents, int clear) {
     char *body = NULL; size_t length = 0;
     FILE *out = open_memstream(&body, &length);
@@ -205,6 +212,9 @@ static void publish(Document *doc, Document *documents, int clear) {
     quoted(out, doc->uri); fprintf(out, ",\"version\":%ld,\"diagnostics\":[", doc->version);
     FILE *errors = clear ? NULL : tmpfile();
     if (errors) {
+#ifdef _WIN32
+        if (!windowsLspRequest(errors, "diagnostics", NULL, doc, documents)) {
+#else
         fflush(NULL);
         pid_t child = fork();
         if (!child) {
@@ -227,6 +237,7 @@ static void publish(Document *doc, Document *documents, int clear) {
         if (child > 0) {
             int status;
             while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+#endif
             rewind(errors);
             char *line = NULL; size_t capacity = 0; int comma = 0;
             char *display = relativeSourcePath(doc->path);
@@ -254,6 +265,74 @@ static void publish(Document *doc, Document *documents, int clear) {
     fputs("]}}", out); fclose(out); sendMessage(body); free(body);
 }
 #include "lsp_semantic.inc"
+#ifdef _WIN32
+/* Native Windows cannot fork the editor's in-memory overlays. Serialize them
+ * into a private request and re-exec an isolated compiler worker instead. */
+static int windowsLspRequest(FILE *output, const char *method, Json *params, Document *doc, Document *documents) {
+    char request[4096], result[4096];
+    oceanTemporary(request, sizeof(request), "ocean-lsp-request-XXXXXX");
+    oceanTemporary(result, sizeof(result), "ocean-lsp-result-XXXXXX");
+    int in = mkstemp(request), out = mkstemp(result);
+    if (in < 0 || out < 0) { if (in >= 0) close(in); if (out >= 0) close(out); unlink(request); unlink(result); return 1; }
+    close(out); FILE *file = fdopen(in, "wb");
+    if (!file) { close(in); unlink(request); unlink(result); return 1; }
+    fputs("{\"method\":", file); quoted(file, method);
+    fputs(",\"selected\":", file); quoted(file, doc->uri);
+    fputs(",\"params\":", file);
+    if (params) fwrite(params->start, 1, (size_t)(params->end - params->start), file); else fputs("null", file);
+    fputs(",\"documents\":[", file); int comma = 0;
+    for (Document *d = documents; d; d = d->next) {
+        if (comma++) fputc(',', file);
+        fputs("{\"uri\":", file); quoted(file, d->uri);
+        fputs(",\"path\":", file); quoted(file, d->path);
+        fputs(",\"text\":", file); quoted(file, d->text); fputc('}', file);
+    }
+    fputs("]}", file); int failed = fclose(file) != 0;
+    char *executable = oceanExecutable();
+    char *args[] = {executable, "--internal-lsp-worker", request, result, NULL};
+    if (!executable || (!failed && oceanRun(args))) failed = 1;
+    free(executable);
+    FILE *read = failed ? NULL : fopen(result, "rb");
+    if (!read) failed = 1;
+    else { char bytes[8192]; size_t n; while ((n = fread(bytes, 1, sizeof(bytes), read))) if (fwrite(bytes, 1, n, output) != n) failed = 1; fclose(read); }
+    fflush(output); unlink(request); unlink(result); return failed;
+}
+int oceanLspWorker(const char *request, const char *result) {
+    FILE *file = fopen(request, "rb"); if (!file) return 1;
+    fseek(file, 0, SEEK_END); long length = ftell(file); rewind(file);
+    char *text = length >= 0 ? calloc((size_t)length + 1, 1) : NULL;
+    if (!text) { fclose(file); return 1; }
+    fread(text, 1, (size_t)length, file); fclose(file);
+    const char *cursor = text; Json *json = readJson(&cursor, 0); if (!json) { free(text); return 1; }
+    Document *documents = NULL, *selected = NULL;
+    const char *uri = string(member(json, "selected"));
+    Json *array = member(json, "documents");
+    for (Json *item = array ? array->child : NULL; item; item = item->next) {
+        Document *d = calloc(1, sizeof(*d)); if (!d) return 1;
+        d->uri = (char *)string(member(item, "uri")); d->path = (char *)string(member(item, "path")); d->text = (char *)string(member(item, "text"));
+        if (!d->uri || !d->path || !d->text) return 1;
+        d->next = documents; documents = d;
+        if (uri && !strcmp(d->uri, uri)) selected = d;
+    }
+    if (!selected) return 1;
+    const char *method = string(member(json, "method"));
+    FILE *sink = freopen("NUL", "wb", stdout); (void)sink;
+    if (method && !strcmp(method, "diagnostics")) {
+        sink = freopen(result, "wb", stderr); if (!sink) return 1;
+        setenv("NO_COLOR", "1", 1); size_t count = 0; for (Document *d = documents; d; d = d->next) count++;
+        packageSource *sources = calloc(count, sizeof(*sources)); if (!sources) return 1;
+        size_t i = 0; for (Document *d = documents; d; d = d->next) sources[i++] = (packageSource){d->path, d->text};
+        char *directory = strdup(selected->path), *slash = strrchr(directory, '/'); if (!slash) return 1; *slash = 0;
+        packageBuild *build = loadEditorPackage(directory, sources, count); parseResult *program = packagePartialProgram(build);
+        if (program) analyzeSemantics(program); fflush(stderr);
+    } else {
+        sink = freopen("NUL", "wb", stderr); (void)sink;
+        FILE *out = fopen(result, "wb"); if (!out || !method) return 1;
+        semanticWorker(out, method, member(json, "params"), selected, documents); fclose(out);
+    }
+    return 0;
+}
+#endif
 static void freeDocument(Document *d) { free(d->uri); free(d->path); free(d->text); free(d); }
 
 int oceanLsp(void) {

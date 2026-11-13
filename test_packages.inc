@@ -126,7 +126,7 @@ static int testPackages(int argc, char **flags, int nflags, testLocations *list,
     interrupted = runningChild = 0;
     sigaction(SIGINT, &action, &oldInt); sigaction(SIGTERM, &action, &oldTerm); sigaction(SIGHUP, &action, &oldHup);
     sigaction(SIGPIPE, &ignore, &oldPipe);
-    char directory[] = "/tmp/.ocean-packages-XXXXXX", executable[128] = {0};
+    char directory[4096], executable[4112] = {0}; oceanTemporary(directory, sizeof(directory), ".ocean-packages-XXXXXX");
     int temporary = mkdtemp(directory) != NULL;
     if (multiLive && temporary) {
         snprintf(executable, sizeof(executable), "%s/display", directory);
@@ -166,6 +166,14 @@ static int testPackages(int argc, char **flags, int nflags, testLocations *list,
             packageRun *p = &runs[next]; int out[2], err[2], grant[2];
             if (pipe(out) || pipe(err) || pipe(grant)) { perror("ocean test: pipe"); interrupted = SIGTERM; break; }
             fflush(NULL);
+#ifdef _WIN32
+            childArgs[1] = "--internal-test-package";
+            childArgs[childCount] = list->items[next]; childArgs[childCount + 1] = NULL;
+            int empty = open("/dev/null", O_RDONLY);
+            oceanDescriptor maps[] = {{out[1], 1}, {err[1], 2}, {grant[0], 199}, {empty, 0}};
+            pid_t pid = oceanSpawn(childArgs, maps, empty >= 0 ? 4 : 3);
+            if (empty >= 0) close(empty);
+#else
             pid_t pid = fork();
             if (!pid) {
                 setpgid(0, 0);
@@ -184,6 +192,7 @@ static int testPackages(int argc, char **flags, int nflags, testLocations *list,
                 childArgs[childCount] = list->items[next];
                 _exit(testOneMain(childCount + 1, childArgs));
             }
+#endif
             close(out[1]); close(err[1]); close(grant[0]);
             if (pid < 0) { close(out[0]); close(err[0]); close(grant[1]); interrupted = SIGTERM; break; }
             setpgid(pid, pid);

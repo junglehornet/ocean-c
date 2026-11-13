@@ -201,7 +201,7 @@ void printToken(token tok) {
             printf("(LITERAL_STRING %s) ", tok.lexeme);
             break;
         case LITERAL_INT:
-            printf("(LITERAL_INT \"%s\" %ld) ", tok.lexeme, tok.numValue.integer);
+            printf("(LITERAL_INT \"%s\" %" PRId64 ") ", tok.lexeme, tok.numValue.integer);
             break;
         case LITERAL_FLOAT:
             printf("(LITERAL_FLOAT \"%s\" %lf) ", tok.lexeme, tok.numValue.floating);

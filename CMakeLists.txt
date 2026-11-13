@@ -4,6 +4,26 @@ if(NOT DEFINED CMAKE_C_COMPILER)
 endif()
 project(ocean-c C)
 
+set(OCEAN_VERSION "dev" CACHE STRING "Ocean compiler version string")
+if(DEFINED ENV{VERSION})
+    set(OCEAN_VERSION "$ENV{VERSION}" CACHE STRING "Ocean compiler version string" FORCE)
+endif()
+foreach(field IN ITEMS COMMIT COMMIT_DATE COMMIT_YEAR BUILD_DATE)
+    set(OCEAN_${field} "" CACHE STRING "Override compiler ${field} metadata (empty uses Git/build time)")
+    if(DEFINED ENV{${field}})
+        set(OCEAN_${field} "$ENV{${field}}" CACHE STRING "Override compiler ${field} metadata" FORCE)
+    endif()
+endforeach()
+add_custom_target(ocean_build_info
+    COMMAND ${CMAKE_COMMAND} "-DOCEAN_VERSION=${OCEAN_VERSION}"
+        "-DOCEAN_COMMIT=${OCEAN_COMMIT}" "-DOCEAN_COMMIT_DATE=${OCEAN_COMMIT_DATE}"
+        "-DOCEAN_COMMIT_YEAR=${OCEAN_COMMIT_YEAR}" "-DOCEAN_BUILD_DATE=${OCEAN_BUILD_DATE}"
+        "-DOCEAN_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOCEAN_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildInfo.cmake"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/ocean_build_info.h"
+    VERBATIM)
+
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -17,13 +37,21 @@ string(REPLACE "\\" "\\\\" OCEAN_THREAD_RUNTIME_SOURCE "${OCEAN_THREAD_RUNTIME_S
 string(REPLACE "\"" "\\\"" OCEAN_THREAD_RUNTIME_SOURCE "${OCEAN_THREAD_RUNTIME_SOURCE}")
 string(REPLACE "\n" "\\n\"\n\"" OCEAN_THREAD_RUNTIME_SOURCE "${OCEAN_THREAD_RUNTIME_SOURCE}")
 configure_file(runtime_threads_source.h.in runtime_threads_source.h @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime_process.c")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/runtime_process.c" OCEAN_PROCESS_RUNTIME_SOURCE)
+string(REPLACE "\\" "\\\\" OCEAN_PROCESS_RUNTIME_SOURCE "${OCEAN_PROCESS_RUNTIME_SOURCE}")
+string(REPLACE "\"" "\\\"" OCEAN_PROCESS_RUNTIME_SOURCE "${OCEAN_PROCESS_RUNTIME_SOURCE}")
+string(REPLACE "\n" "\\n\"\n\"" OCEAN_PROCESS_RUNTIME_SOURCE "${OCEAN_PROCESS_RUNTIME_SOURCE}")
+configure_file(runtime_process_source.h.in runtime_process_source.h @ONLY)
 add_executable(ocean-c)
+add_dependencies(ocean-c ocean_build_info)
 target_include_directories(ocean-c PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(ocean-c PRIVATE "${OCEAN_FFI_INCLUDE_DIR}")
 
 target_sources(ocean-c
     PRIVATE
         main.c
+        platform.c
         lsp.c
         package.c
         dynarray.c
@@ -38,14 +66,15 @@ target_sources(ocean-c
         llvm_packages.c
 )
 
+
 if(UNIX)
     target_link_libraries(ocean-c PRIVATE m)
 endif()
 
 add_custom_target(ocean ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE_DIR:ocean-c>/ocean"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE_DIR:ocean-c>/ocean${CMAKE_EXECUTABLE_SUFFIX}"
     DEPENDS ocean-c)
-install(PROGRAMS "$<TARGET_FILE:ocean-c>" DESTINATION bin RENAME ocean)
+install(PROGRAMS "$<TARGET_FILE:ocean-c>" DESTINATION bin RENAME "ocean${CMAKE_EXECUTABLE_SUFFIX}")
 set(OCEAN_STANDARD_LIBRARY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../ocean-src" CACHE PATH "Ocean standard library source tree")
 install(DIRECTORY "${OCEAN_STANDARD_LIBRARY_SOURCE}/" DESTINATION src OPTIONAL
     PATTERN ".git" EXCLUDE PATTERN ".gitignore" EXCLUDE)
@@ -81,6 +110,14 @@ if(BUILD_TESTING)
     endforeach()
 
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME version_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_test.py" "$<TARGET_FILE:ocean-c>")
+    add_test(NAME release_package_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_package_test.py")
+    add_test(NAME installer_test COMMAND $<TARGET_FILE:ocean-c> test
+        "${CMAKE_CURRENT_SOURCE_DIR}/installer" --notty)
+    set_tests_properties(installer_test PROPERTIES TIMEOUT 120
+        ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
     if(UNIX)
         add_test(NAME ocean_test_tui_test COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/ocean_test_tui_test.py" "$<TARGET_FILE:ocean-c>")
@@ -152,7 +189,7 @@ if(BUILD_TESTING)
     set_tests_properties(recoverable_io_test PROPERTIES TIMEOUT 180)
 
 
-    add_executable(asm_backend_probe c-hashmap/map.c tests/asm_backend_probe.c ast.c dynarray.c
+    add_executable(asm_backend_probe platform.c c-hashmap/map.c tests/asm_backend_probe.c ast.c dynarray.c
         token.c scanner.c parser.c build_cache.c llvm_packages.c)
     target_include_directories(asm_backend_probe PRIVATE "${OCEAN_FFI_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
     if(UNIX)
@@ -290,8 +327,39 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+# The CLI and C test/probe executables share native Windows compatibility.
+if(WIN32)
+    enable_language(RC)
+    set_source_files_properties(windows/compat.c PROPERTIES COMPILE_DEFINITIONS OCEAN_COMPAT_IMPLEMENTATION)
+    get_property(ocean_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(ocean_target IN LISTS ocean_targets)
+        get_target_property(ocean_target_type ${ocean_target} TYPE)
+        if(ocean_target_type STREQUAL "EXECUTABLE")
+            target_sources(${ocean_target} PRIVATE windows/compat.c windows/ocean.rc)
+            if(NOT ocean_target STREQUAL "ocean-c" AND NOT ocean_target STREQUAL "asm_backend_probe")
+                target_sources(${ocean_target} PRIVATE platform.c)
+            endif()
+            target_include_directories(${ocean_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/windows/include")
+            target_compile_options(${ocean_target} PRIVATE "$<$<COMPILE_LANGUAGE:C>:-include;${CMAKE_CURRENT_SOURCE_DIR}/windows/compat.h>")
+            target_link_libraries(${ocean_target} PRIVATE bcrypt)
+        endif()
+    endforeach()
+endif()
+
+if(BUILD_TESTING AND OCEAN_CLANG_EXECUTABLE)
+    add_test(NAME target_sources_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/target_sources_test.py" "$<TARGET_FILE:ocean-c>")
+    set_tests_properties(target_sources_test PROPERTIES TIMEOUT 60)
+endif()
+
 if(BUILD_TESTING AND OCEAN_CLANG_EXECUTABLE)
     add_test(NAME library_containers_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/library_containers_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(library_containers_test PROPERTIES TIMEOUT 120)
+    find_library(OCEAN_TEST_CURL_LIBRARY NAMES curl)
+    if(OCEAN_TEST_CURL_LIBRARY AND EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/net/http/tests/linking.py")
+        add_test(NAME http_linking_test COMMAND ${Python3_EXECUTABLE}
+            "${OCEAN_STANDARD_LIBRARY_SOURCE}/net/http/tests/linking.py" "$<TARGET_FILE:ocean-c>")
+        set_tests_properties(http_linking_test PROPERTIES TIMEOUT 120)
+    endif()
 endif()

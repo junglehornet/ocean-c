@@ -1,0 +1,20 @@
+package main;
+
+// Only the block matching the compiler target is emitted.
+func target() (string, string) {
+    platform := 0;
+    architecture := 0;
+    asm x86_64/linux { mov qword ptr ${platform}, 1 }
+    asm aarch64/linux { mov x0, #1; str x0, ${platform} }
+    asm riscv64/linux { li t0, 1; sd t0, ${platform} }
+    asm x86_64/macos { mov qword ptr ${platform}, 2 }
+    asm aarch64/macos { mov x0, #2; str x0, ${platform} }
+    asm x86_64/windows { mov qword ptr ${platform}, 3 }
+    asm aarch64/windows { mov x0, #3; str x0, ${platform} }
+    asm x86_64 { mov qword ptr ${architecture}, 1 }
+    asm aarch64 { mov x0, #2; str x0, ${architecture} }
+    asm riscv64 { li t0, 3; sd t0, ${architecture} }
+    platforms := string[]{"unsupported", "linux", "macos", "windows"};
+    architectures := string[]{"unsupported", "x86_64", "aarch64", "riscv64"};
+    return platforms[platform], architectures[architecture];
+}

@@ -1,11 +1,13 @@
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "backend.h"
 #include "build_cache.h"
 #include "llvm_packages.h"
 #include "semantic.h"
 #include "package.h"
 #include "lsp.h"
+#include "ocean_build_info.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -17,7 +19,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static volatile sig_atomic_t runningChild, interrupted;
+static volatile pid_t runningChild;
+static volatile sig_atomic_t interrupted;
 static void forwardSignal(int signal) {
     interrupted = signal;
     if (runningChild > 0) kill((pid_t)runningChild, signal);
@@ -43,14 +46,19 @@ static int writeIR(const char *input, const char *output) {
     unlink(staged); free(staged); return failed;
 }
 static int sameFile(const char *a, const char *b) {
+#ifdef _WIN32
+    char *x = realpath(a, NULL), *y = realpath(b, NULL);
+    int same = x && y && !_stricmp(x, y); free(x); free(y); return same;
+#else
     struct stat x, y;
     return !stat(a, &x) && !stat(b, &y) && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+#endif
 }
 static int nativeBuild(buildCache *cache, parseResult *program, const char *output, int library, int staticLink) {
     // Without reusable objects, lower only reachable executable functions and
     // avoid the package module serialization and separate compilation costs.
     if (!cache) {
-        char path[] = "/tmp/ocean-ir-XXXXXX";
+        char path[4096]; oceanTemporary(path, sizeof(path), "ocean-ir-XXXXXX");
         int fd = mkstemp(path);
         if (fd < 0) { perror("ocean: could not create IR file"); return 1; }
         FILE *ir = fdopen(fd, "w");
@@ -83,9 +91,11 @@ static int nativeBuild(buildCache *cache, parseResult *program, const char *outp
         FILE *file = fopen(metadata, "r");
         int value = file ? fgetc(file) : EOF;
         int threads = file ? fgetc(file) : EOF;
-        metadataHit = file && (value == '0' || value == '1') && (threads == '0' || threads == '1') && fgetc(file) == EOF;
+        int curl = file ? fgetc(file) : EOF;
+        int processes = file ? fgetc(file) : EOF;
+        metadataHit = file && (value == '0' || value == '1') && (threads == '0' || threads == '1') && (curl == '0' || curl == '1') && (processes == '0' || processes == '1') && fgetc(file) == EOF;
         if (file) fclose(file);
-        if (metadataHit) { units.needsFFI = value == '1'; units.needsThreads = threads == '1'; }
+        if (metadataHit) { units.needsFFI = value == '1'; units.needsThreads = threads == '1'; units.needsCurl = curl == '1'; units.needsProcess = processes == '1'; }
     }
     if (!failed && (missing || !metadataHit)) {
         if (!metadataHit) units.needed[0] = 1;
@@ -100,13 +110,13 @@ static int nativeBuild(buildCache *cache, parseResult *program, const char *outp
         if (!failed && *metadataKey) {
             FILE *file = fopen(metadata, "w");
             if (file) {
-                int ok = fputc(units.needsFFI ? '1' : '0', file) != EOF && fputc(units.needsThreads ? '1' : '0', file) != EOF;
+                int ok = fputc(units.needsFFI ? '1' : '0', file) != EOF && fputc(units.needsThreads ? '1' : '0', file) != EOF && fputc(units.needsCurl ? '1' : '0', file) != EOF && fputc(units.needsProcess ? '1' : '0', file) != EOF;
                 if (fclose(file)) ok = 0;
                 if (ok) storeBuildCache(cache, metadataKey, metadata);
             }
         }
     }
-    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, units.needsThreads, output, library, staticLink);
+    if (!failed) failed = linkLLVMObjects((const char **)objects, units.count, units.needsFFI, units.needsThreads, units.needsCurl, units.needsProcess, output, library, staticLink);
     if (metadata) { unlink(metadata); free(metadata); }
     if (objects) {
         for (size_t i = 0; i < units.count; i++)
@@ -172,6 +182,9 @@ static int packageMain(int argc, char **argv) {
     struct sigaction oldInterrupt, oldTerminate, oldHangup;
     if (run) {
         const char *base = getenv("TMPDIR");
+#ifdef _WIN32
+        if (!base) base = getenv("TEMP");
+#endif
         if (!base) base = "/tmp";
         temporaryDirectory = malloc(strlen(base) + 32);
         if (!temporaryDirectory) { freePackage(build); return 1; }
@@ -214,7 +227,7 @@ static int packageMain(int argc, char **argv) {
             fprintf(stderr, "ocean: output would overwrite an input file\n"); failed = 1;
         }
     buildCache *cache = failed ? NULL : openBuildCache(argv[0], program, packageDirectory(build));
-    char irPath[] = "/tmp/ocean-ir-XXXXXX";
+    char irPath[4096]; oceanTemporary(irPath, sizeof(irPath), "ocean-ir-XXXXXX");
     int fd = failed || !emit ? -1 : mkstemp(irPath);
     if (!failed && emit && fd < 0) { perror("ocean: could not create IR file"); failed = 1; }
     if (fd >= 0) close(fd);
@@ -242,12 +255,7 @@ static int packageMain(int argc, char **argv) {
             sigemptyset(&blocked);
             sigaddset(&blocked, SIGINT); sigaddset(&blocked, SIGTERM); sigaddset(&blocked, SIGHUP);
             sigprocmask(SIG_BLOCK, &blocked, &previous);
-            pid_t child = fork();
-            if (!child) {
-                signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL); signal(SIGHUP, SIG_DFL);
-                sigprocmask(SIG_SETMASK, &previous, NULL);
-                execv(temporaryExecutable, arguments); perror("ocean run"); _exit(127);
-            }
+            pid_t child = oceanSpawn(arguments, NULL, 0);
             if (child < 0) { sigprocmask(SIG_SETMASK, &previous, NULL); perror("ocean run: fork"); status = 1; }
             else {
                 runningChild = child;
@@ -320,6 +328,17 @@ static int moduleMain(int argc, char **argv) {
     return failed;
 }
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY); _setmode(_fileno(stdout), _O_BINARY); _setmode(_fileno(stderr), _O_BINARY);
+    _setmaxstdio(2048);
+    if (argc == 4 && !strcmp(argv[1], "--internal-lsp-worker")) return oceanLspWorker(argv[2], argv[3]);
+    if (argc > 1 && !strcmp(argv[1], "--internal-test-package")) { sharedBudget = 1; argv[1] = "test"; return testOneMain(argc, argv); }
+#endif
+    if (argc == 2 && (!strcmp(argv[1], "-v") || !strcmp(argv[1], "--version"))) {
+        printf("Ocean compiler (ocean-c) %s\nCommit %s (%s), built %s\nCopyright Connor Egan %s\n",
+               OCEAN_VERSION, OCEAN_COMMIT, OCEAN_COMMIT_DATE, OCEAN_BUILD_DATE, OCEAN_COMMIT_YEAR);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "test")) return testMain(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "check")) {
         if (argc == 3 && !strcmp(argv[2], "--lsp")) return oceanLsp();
@@ -349,7 +368,8 @@ int main(int argc, char **argv) {
                "       ocean check [location]\n"
                "       ocean check --lsp\n"
                "       ocean mod init [name]\n"
-               "       ocean clean --cache\n");
+               "       ocean clean --cache\n"
+               "       ocean -v | --version\n");
         return argc == 1 ? 1 : 0;
     }
     fprintf(stderr, "ocean: unknown command: %s\n", argv[1]);

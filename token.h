@@ -2,6 +2,7 @@
 #define ocean_c_token
 #include <stddef.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include "unicode.h"
 
 enum tokenType {
@@ -46,10 +47,10 @@ enum tokenType {
 
 typedef struct {
     char *lexeme;
-    char unsignedLiteral; // Integer magnitude exceeds LONG_MAX, but fits uint64_t.
+    char unsignedLiteral; // Integer magnitude exceeds INT64_MAX, but fits uint64_t.
     size_t stringLength; // Decoded bytes, excluding the scanner storage terminator.
     union {
-        long integer;
+        int64_t integer;
         uint64_t unsignedInteger;
         double floating;
     } numValue;

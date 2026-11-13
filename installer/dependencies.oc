@@ -1,0 +1,118 @@
+package main;
+import "io";
+import "os/exec";
+
+func dependencyChoice(plan map[string]any) string {
+    io.Println("\nDependencies: Clang, libffi, libcurl, and native link/development libraries.");
+    io.Println("  1. Skip (use existing dependencies)\n  2. Install system-wide using the OS package manager\n  3. Install a toolchain/library bundle in the selected Ocean prefix");
+    for (;;) {
+        selected := ask("Dependency option [1]: ","1");
+        if (selected == "1") return "skip";
+        if (selected == "2") return "system";
+        if (selected == "3") {
+            return "bundle";
+        }
+    }
+}
+func hasCommand(name string) bool { return !exec.LookPath(name).hasError(); }
+func dependencyManager() string {
+    if (platform == "macos") return "brew";
+    if (platform == "windows") return "msys2";
+    for (_, name := range string[]{"apt-get","dnf","pacman","zypper","apk"}) { if (hasCommand(name)) return name; }
+    panic "no supported system package manager found; select a user-local bundle";
+}
+func systemDependencyCommand(manager string) string[] {
+    if (manager == "apt-get") return string[]{"apt-get","install","-y","clang","lld","build-essential","libffi-dev","libcurl4-openssl-dev","pkg-config"};
+    if (manager == "dnf") return string[]{"dnf","install","-y","clang","lld","make","glibc-devel","libffi-devel","libcurl-devel","pkgconf-pkg-config"};
+    if (manager == "pacman") return string[]{"pacman","-S","--needed","--noconfirm","clang","lld","base-devel","libffi","curl","pkgconf"};
+    if (manager == "zypper") return string[]{"zypper","--non-interactive","install","clang","lld","make","glibc-devel","libffi-devel","libcurl-devel","pkg-config"};
+    if (manager == "apk") return string[]{"apk","add","clang","lld","build-base","libffi-dev","curl-dev","pkgconf"};
+    if (manager == "brew") return string[]{"brew","install","llvm","libffi","curl","pkgconf"};
+    return string[]{};
+}
+func runInherited(args string[]) {
+    require(len(args) > 0,"missing dependency command"); rest := string[]{};
+    for (i := 1; i < len(args); i++) rest.append(args[i]);
+    c := exec.Command(args[0],rest...); require(!c.Run().hasError(),"dependency command failed: "+args[0]);
+}
+func configureDependencies(plan map[string]any, mode string) map[string]any {
+    plan["dependencies"] = mode;
+    if (mode != "system") return plan;
+    manager := dependencyManager(); plan["manager"] = manager;
+    if (manager == "brew") require(hasCommand("brew"),"install Homebrew first, or select the user-local toolchain bundle");
+    if (manager == "msys2") {
+        base := environment("SystemDrive"); if (base == "") base = "C:";
+        plan["msys"] = pathJoin(base,"msys64");
+        require(directory(text(plan["msys"])) || hasCommand("winget.exe"),"system dependencies need MSYS2 or Windows App Installer (winget)");
+    }
+    io.Println("System dependency installation uses ",manager,". It may update system packages and needs administrator permission on Linux/Windows.");
+    require(yes("Allow dependency package installation?"),"dependency installation declined");
+    return plan;
+}
+func installSystemDependencies(plan map[string]any) {
+    if (text(plan["dependencies"]) != "system") return;
+    manager := text(plan["manager"]);
+    if (manager == "msys2") {
+        root := text(plan["msys"]);
+        if (!directory(root)) runInherited(string[]{"winget.exe","install","--id","MSYS2.MSYS2","--exact","--scope","machine","--silent","--accept-package-agreements","--accept-source-agreements"});
+        bash := pathJoin(root,"usr/bin/bash.exe"); require(exists(bash),"MSYS2 shell not found after dependency installation");
+        prefix := architecture == "aarch64" ? "mingw-w64-clang-aarch64-" : "mingw-w64-clang-x86_64-";
+        script := "pacman -Sy --needed --noconfirm " + prefix + "clang " + prefix + "lld " + prefix + "libffi " + prefix + "curl " + prefix + "pkgconf";
+        runInherited(string[]{bash,"-lc",script});
+    } else {
+        if (manager == "apt-get") runInherited(string[]{"apt-get","update"});
+        runInherited(systemDependencyCommand(manager));
+    }
+}
+func dependencyPath(plan map[string]any) string {
+    if (text(plan["dependencies"]) != "system") return "";
+    if (platform == "macos") return pathJoin(command("brew","--prefix","llvm"),"bin");
+    if (platform == "windows") return pathJoin(text(plan["msys"]),architecture == "aarch64" ? "clangarm64/bin" : "clang64/bin");
+    return "";
+}
+func extendPathPlan(plan map[string]any, extra string) map[string]any {
+    if (extra == "") return plan;
+    if (platform == "windows") { plan["extraBin"] = extra; return plan; }
+    items := mixed any[]{};
+    for (_, raw := range array(plan["entries"])) {
+        item := object(raw);
+        if (flag(item["whole"])) item["content"] = text(item["content"]) + extra + "\n";
+        else {
+            marker := "# <<< Ocean installer <<<";
+            line := "case \":$PATH:\" in *:"+shQuote(extra)+":*) ;; *) export PATH="+shQuote(extra)+":\"$PATH\" ;; esac\n";
+            if (ends(text(item["path"]),".cshrc") || ends(text(item["path"]),".tcshrc")) line = "setenv PATH " + shQuote(extra) + ":\"$PATH\"\n";
+            if (ends(text(item["path"]),".fish")) line = "fish_add_path --global -- "+shQuote(extra)+"\n";
+            item["content"] = replace(text(item["content"]),marker,line+marker);
+        }
+        items.append(item);
+    }
+    plan["entries"] = items; return plan;
+}
+func localDependencies(work string, payload string, release Release, destination string) {
+    require(release.dependenciesURL != "","this release has no user-local dependency bundle for the target");
+    io.Println("Downloading matching user-local Clang and library bundle...");
+    file := pathJoin(work,"dependencies.tar.xz"); writeFile(file,get(release.dependenciesURL,512*1024*1024)); verifyDigest(file,release.dependenciesDigest);
+    listing := command("tar","-tf",file);
+    for (_, path := range split(listing,"\n")) {
+        require(!starts(path,"/") && index(path,"\\") < 0 && index(path,":") < 0,"unsafe dependency bundle path");
+        for (_, part := range split(path,"/")) require(part != "..","dependency path traversal");
+        normalized := "";
+        for (_, part := range split(path,"/")) { if (part == "" || part == ".") continue; normalized += (normalized == "" ? "" : "/") + part; }
+        if (normalized == "") continue;
+        root := split(normalized,"/")[0];
+        require(root == "bin" || root == "lib" || root == "include" || root == "sysroot" || root == "share","unexpected dependency bundle root");
+        require(normalized != "bin/ocean" && normalized != "bin/ocean.exe" && normalized != "bin/ocean-c" && normalized != "bin/ocean-c.exe","dependency bundle attempts to replace Ocean files");
+    }
+    command("tar","-xJf",file,"-C",payload);
+    clang := pathJoin(payload,platform == "windows" ? "bin/clang.exe" : "bin/clang"); require(exists(clang),"dependency bundle has no Clang executable");
+    if (platform == "macos") {
+        sdk := exec.Command("xcrun","--show-sdk-path"); result := sdk.Output();
+        if (result.hasError()) {
+            if (yes("Apple's Command Line Tools SDK is missing. Launch Apple's system installer?")) runInherited(string[]{"xcode-select","--install"});
+            panic "complete the Apple SDK installation, then rerun Ocean setup; existing Ocean was preserved";
+        }
+        config := "-isysroot\n\"" + replace(trim(result.unwrap()),"\"","\\\"") + "\"\n-I<CFGDIR>/../include\n-L<CFGDIR>/../lib\n-Wl,-rpath,<CFGDIR>/../lib\n";
+        writeFile(pathJoin(payload,"bin/clang.cfg"),config);
+    }
+    require(index(command(clang,"--version"),"clang version") >= 0,"downloaded Clang failed its version check");
+}

@@ -1,0 +1,105 @@
+package main;
+import "net/http";
+import "time";
+import "io";
+
+struct Release { version string; commit string; sourceCommit string; url string; digest string; dependenciesURL string; dependenciesDigest string; prerelease bool; reason string; }
+apiBase: string;
+httpCancel: http.Cancellation;
+func allowedURL(url string) bool { return starts(url, "https://") || starts(url, "http://127.0.0.1:"); }
+func redirectURL(base string, location string) string {
+    if (starts(location, "https://") || starts(location, "http://")) return location;
+    scheme := index(base, "://"); require(scheme > 0, "invalid redirect base");
+    if (starts(location, "//")) return base[:scheme+1] + location;
+    hostEnd := index(base[scheme+3:], "/"); origin := hostEnd < 0 ? base : base[:scheme+3+hostEnd];
+    if (starts(location, "/")) return origin + location;
+    at := len(base) - 1; for (at > scheme+2 && base[at] != '/') at--;
+    return base[:at+1] + location;
+}
+func get(url string, limit int) string {
+    client: http.Client; client.Timeout = (limit > 32*1024*1024 ? 600 : 120) * time.Second; client.MaxResponseBytes = limit;
+    for (redirects := 0; redirects < 10; redirects++) {
+        require(allowedURL(url), "download requires HTTPS");
+        request := http.NewRequestWithCancel(&httpCancel, "GET", url, "").unwrap();
+        request.Header.Set("User-Agent", "ocean-installer");
+        if (starts(url, apiBase + "/")) {
+            request.Header.Set("Accept", "application/vnd.github+json");
+            token := environment("GITHUB_TOKEN");
+            if (token != "" && starts(apiBase, "https://")) request.Header.Set("Authorization", "Bearer " + token);
+        }
+        response := client.Do(request).unwrap();
+        if (response.StatusCode >= 300 && response.StatusCode <= 399) {
+            location := response.Header.Get("Location"); require(location != "", "redirect has no Location");
+            url = redirectURL(url, location); continue;
+        }
+        require(response.StatusCode >= 200 && response.StatusCode < 300, "HTTP " + io.Sprint(response.StatusCode) + " fetching " + url);
+        return response.Body;
+    }
+    panic "too many download redirects";
+}
+func api(path string) any { return decode(get(apiBase + path, 32 * 1024 * 1024)); }
+func catalog(work string) Release[] {
+    repo := pathJoin(work, "compiler.git"); command("git", "init", "--bare", repo);
+    command("git", "-C", repo, "fetch", "--filter=blob:none", "--tags", "--no-recurse-submodules", "https://github.com/junglehornet/ocean-c.git", "+refs/heads/main:refs/remotes/origin/main");
+    tags := split(command("git", "-C", repo, "tag", "--merged", "refs/remotes/origin/main", "--sort=-version:refname"), "\n");
+    source := make(map[string]string);
+    remote := command("git", "ls-remote", "--tags", "https://github.com/junglehornet/ocean-src.git");
+    for (_, line := range split(remote, "\n")) {
+        parts := split(line, "\t"); if (len(parts) != 2 || !starts(parts[1], "refs/tags/")) continue;
+        name := parts[1][10:]; if (ends(name, "^{}")) source[name[:len(name)-3]] = parts[0];
+        else { _, found := source[name]; if (!found) source[name] = parts[0]; }
+    }
+    published := make(map[string]any);
+    for (page := 1; ; page++) {
+        items := array(api("/repos/junglehornet/ocean-c/releases?per_page=100&page=" + io.Sprint(page)));
+        for (_, value := range items) { release := object(value); if (!flag(release["draft"])) published[text(release["tag_name"])] = value; }
+        if (len(items) < 100) break;
+    }
+    result := Release[]{};
+    for (_, tag := range tags) {
+        if (tag == "") continue;
+        item: Release; item.version = tag; item.sourceCommit = source[tag];
+        release, found := published[tag];
+        if (found) {
+            data := object(release); item.prerelease = flag(data["prerelease"]);
+            expected := "ocean-c_" + tag + "_" + architecture + "-" + platform + ".tar";
+            assets, hasAssets := data["assets"];
+            if (hasAssets) {
+                for (_, raw := range array(assets)) {
+                    asset := object(raw);
+                    if (text(asset["name"]) == expected) { item.url = text(asset["browser_download_url"]); item.digest = text(asset["digest"]); }
+                    if (text(asset["name"]) == "ocean-deps_"+tag+"_"+architecture+"-"+platform+".tar.xz") { item.dependenciesURL = text(asset["browser_download_url"]); item.dependenciesDigest = text(asset["digest"]); }
+                }
+            }
+        }
+        if (item.sourceCommit == "") item.reason = "no matching ocean-src tag";
+        else if (item.url == "") item.reason = "no binary release for this target";
+        else if (dependencyMode == "bundle" && item.dependenciesURL == "") item.reason = "no dependency bundle for this target";
+        item.commit = command("git", "-C", repo, "rev-parse", "--verify", "refs/tags/" + tag + "^{commit}");
+        result.append(item);
+    }
+    return result;
+}
+func latest(releases Release[]) int {
+    fallback := -1;
+    for (i := 0; i < len(releases); i++) {
+        if (releases[i].reason != "") continue;
+        if (fallback < 0) fallback = i;
+        if (!releases[i].prerelease) return i;
+    }
+    return fallback;
+}
+func chooseVersion(releases Release[]) Release {
+    io.Println("\nCompiler tags reachable from main:");
+    for (i, item := range releases) io.Println("  ", i + 1, ". ", item.version, item.reason == "" ? "" : " (unavailable: " + item.reason + ")");
+    newest := latest(releases); require(newest >= 0, "no matching compiler/stdlib release is available for this target");
+    io.Println("  latest: ", releases[newest].version);
+    for (;;) {
+        value := ask("Version [latest], tag, or list number: ", "latest");
+        if (value == "latest") return releases[newest];
+        for (_, item := range releases) { if (item.version == value && item.reason == "") return item; }
+        number := io.ParseInt(value);
+        if (!number.hasError()) { n := number.unwrap() - 1; if (n >= 0 && n < len(releases) && releases[n].reason == "") return releases[n]; }
+        io.Println("Choose an available version, or Ctrl+C to cancel.");
+    }
+}

@@ -1,0 +1,182 @@
+name: Tagged release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: ${{ matrix.arch }}-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, os: linux, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: aarch64 }
+          - { runner: macos-15-intel, os: macos, arch: x86_64 }
+          - { runner: macos-15, os: macos, arch: aarch64 }
+          - { runner: windows-2025, os: windows, arch: x86_64, msystem: CLANG64, prefix: mingw-w64-clang-x86_64 }
+          - { runner: windows-11-arm, os: windows, arch: aarch64, msystem: CLANGARM64, prefix: mingw-w64-clang-aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Check out matching standard library tag
+        uses: actions/checkout@v4
+        with:
+          repository: junglehornet/ocean-src
+          ref: ${{ github.ref_name }}
+          path: release-stdlib
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: matrix.os != 'windows'
+        with:
+          python-version: '3.12'
+      - name: Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 lld-19 llvm-19 libffi-dev libcurl4-openssl-dev libssl-dev libpsl-dev libidn2-dev libnghttp2-dev libssh2-1-dev librtmp-dev libkrb5-dev libldap2-dev libbrotli-dev libzstd-dev libunistring-dev zlib1g-dev pkg-config patchelf build-essential xz-utils make ninja-build
+          python3 -m pip install 'cmake>=4.2,<5'
+          mkdir -p "$RUNNER_TEMP/ocean-tools"
+          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/ocean-tools/clang"
+          for tool in ld.lld llvm-ar llvm-ranlib; do ln -s "/usr/bin/$tool-19" "$RUNNER_TEMP/ocean-tools/$tool"; done
+          echo "$RUNNER_TEMP/ocean-tools" >> "$GITHUB_PATH"
+      - name: macOS dependencies
+        if: matrix.os == 'macos'
+        run: |
+          brew install llvm libffi curl pkgconf ninja
+          python3 -m pip install 'cmake>=4.2,<5'
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libffi)" >> "$GITHUB_ENV"
+      - name: Windows native LLVM toolchain
+        if: matrix.os == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            make git
+            ${{ matrix.prefix }}-clang
+            ${{ matrix.prefix }}-llvm
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-ninja
+            ${{ matrix.prefix }}-libffi
+            ${{ matrix.prefix }}-curl
+            ${{ matrix.prefix }}-pkgconf
+            ${{ matrix.prefix }}-python
+      - name: Build, verify metadata, test, and package Unix binaries
+        if: matrix.os != 'windows'
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_OS: ${{ matrix.os }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+          CMAKE_GENERATOR: Ninja
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          python3 scripts/release.py --version "$RELEASE_VERSION" --os "$RELEASE_OS" --arch "$RELEASE_ARCH" --stdlib release-stdlib
+      - name: Build, verify metadata, test, and package native Windows binaries
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+          CMAKE_GENERATOR: Ninja
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          python scripts/release.py --version "$RELEASE_VERSION" --os windows --arch "$RELEASE_ARCH" --stdlib release-stdlib --cmake-arg=-DCMAKE_EXE_LINKER_FLAGS=-static --cmake-arg=-DCMAKE_RC_COMPILER=llvm-rc --cmake-arg="-DOCEAN_FFI_INCLUDE_DIR=$(cygpath -m "$MINGW_PREFIX/include")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  riscv64:
+    name: riscv64-linux (QEMU)
+    timeout-minutes: 90
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: junglehornet/ocean-src
+          ref: ${{ github.ref_name }}
+          path: release-stdlib
+          persist-credentials: false
+      - uses: uraimo/run-on-arch-action@v3
+        name: Native RISC-V build under emulation
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        with:
+          arch: none
+          distro: none
+          base_image: --platform=linux/riscv64 riscv64/ubuntu:26.04
+          env: |
+            RELEASE_VERSION: ${{ github.ref_name }}
+          install: |
+            apt-get update
+            apt-get install -y clang lld llvm cmake libffi-dev libcurl4-openssl-dev libssl-dev libpsl-dev libidn2-dev libnghttp2-dev libssh2-1-dev librtmp-dev libkrb5-dev libldap2-dev libbrotli-dev libzstd-dev libunistring-dev zlib1g-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
+          run: |
+            export CMAKE_GENERATOR=Ninja CMAKE_BUILD_PARALLEL_LEVEL=2
+            git config --global --add safe.directory "$PWD"
+            python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --stdlib release-stdlib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-riscv64-linux
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish complete release
+    needs: [native, riscv64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify the complete artifact set
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          version = os.environ['RELEASE_VERSION']
+          targets = [('x86_64', 'linux'), ('aarch64', 'linux'), ('riscv64', 'linux'), ('x86_64', 'macos'), ('aarch64', 'macos'), ('x86_64', 'windows'), ('aarch64', 'windows')]
+          for arch, system in targets:
+              assert (Path('dist') / f'ocean-deps_{version}_{arch}-{system}.tar.xz').is_file()
+              for name in ('ocean-c', 'ocean-installer'):
+                  for extension in (('tar', 'zip') if system == 'windows' else ('tar',)):
+                      artifact = Path('dist') / f'{name}_{version}_{arch}-{system}.{extension}'
+                      assert artifact.is_file(), f'Missing release artifact: {artifact}'
+          PY
+      - name: Create release and upload archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" --generate-notes --draft
+          fi
+          gh release upload "$RELEASE_VERSION" dist/* --clobber
+          gh release edit "$RELEASE_VERSION" --draft=false

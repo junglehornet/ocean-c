@@ -99,6 +99,9 @@ static void testCheckDisplay(testReporter *r) {
     }
 }
 static void testStartDisplay(testReporter *r, const char *executable, int events[2], int output[2]) {
+#ifdef _WIN32
+    (void)r; (void)executable; (void)events; (void)output;
+#else
     if (multiMode && r != &multiUI) r = &multiUI;
     if (!executable || r->displayPID > 0 || r->displayInterrupted) return;
     int input[2];
@@ -121,6 +124,7 @@ static void testStartDisplay(testReporter *r, const char *executable, int events
     r->displayFD = input[1]; r->displayPID = child;
     fcntl(r->displayFD, F_SETFD, FD_CLOEXEC);
     fcntl(r->displayFD, F_SETFL, O_NONBLOCK);
+#endif
 }
 static void testStopDisplay(testReporter *r, double elapsed, int status) {
     if (multiMode && r != &multiUI) return;
@@ -366,6 +370,12 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
     testStartDisplay(r, displayExecutable, events, output);
     testReporter *ui = multiMode ? &multiUI : r;
     double start = testClock();
+#ifdef _WIN32
+    char workers[32]; snprintf(workers, sizeof(workers), "%d", r->workers);
+    char *args[] = {(char *)executable, "--ocean-test-workers", workers, NULL};
+    oceanDescriptor maps[] = {{events[1], 198}, {output[1], 1}, {output[1], 2}, {grants[0], 199}};
+    pid_t child = oceanSpawn(args, maps, sharedBudget ? 3 : 4);
+#else
     pid_t child = fork();
     if (!child) {
         close(events[0]); close(output[0]);
@@ -387,6 +397,7 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
         char workers[32]; snprintf(workers, sizeof(workers), "%d", r->workers);
         execl(executable, executable, "--ocean-test-workers", workers, (char *)NULL); _exit(127);
     }
+#endif
     close(events[1]); close(output[1]);
     if (!sharedBudget) { close(grants[0]); r->grantFD = grants[1]; fcntl(r->grantFD, F_SETFL, O_NONBLOCK); }
     if (child < 0) { close(events[0]); close(output[0]); testStopDisplay(r, 0, 1); perror("ocean test: fork"); return 1; }
@@ -448,6 +459,9 @@ static int testExecute(testReporter *r, const char *executable, const char *disp
 static int testOneMain(int argc, char **argv) {
     const char *location = ".", *reportPath = NULL, *jsonPath = NULL;
     int haveLocation = 0, noTTY = 0;
+#ifdef _WIN32
+    noTTY = 1; // The native runner uses captured reports; termios is POSIX-only.
+#endif
     testReporter reporter = {.includeSkipped = 1, .timeout = 600, .displayFD = -1, .workers = 16, .grantFD = -1}; reporter.tail = &reporter.results;
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
@@ -501,7 +515,7 @@ static int testOneMain(int argc, char **argv) {
     if (reportPath && jsonPath && (!strcmp(reportPath, jsonPath) || sameFile(reportPath, jsonPath))) {
         fputs("ocean test: report and JSON output must be different files\n", stderr); return 1;
     }
-    char directory[] = "/tmp/.ocean-test-XXXXXX";
+    char directory[4096]; oceanTemporary(directory, sizeof(directory), ".ocean-test-XXXXXX");
     if (!mkdtemp(directory)) { perror("ocean test: temporary directory"); return 1; }
     char executable[sizeof(directory) + 16]; snprintf(executable, sizeof(executable), "%s/program", directory);
     packageBuild *build = loadTestPackage(location, directory);
@@ -625,6 +639,9 @@ static int testMain(int argc, char **argv) {
     flags[0] = argv[0]; flags[1] = argv[1];
     testLocations list = {0};
     int json = 0, notty = 0;
+#ifdef _WIN32
+    notty = 1;
+#endif
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "--help") || !strcmp(arg, "-h")) {

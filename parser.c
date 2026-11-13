@@ -279,9 +279,9 @@ static expr atomicImpl(parserState *state) {
             struct expr_literal lit_int = {0};
             lit_int.type = LITERAL_TYPE_INT;
             lit_int.unsignedLiteral = tok.unsignedLiteral;
-            lit_int.value = malloc(sizeof(long));
+            lit_int.value = malloc(sizeof(int64_t));
             CHECK_MALLOC(lit_int.value);
-            *(long*) lit_int.value = tok.numValue.integer;
+            *(int64_t*) lit_int.value = tok.numValue.integer;
             expr lit_int_expr = {0};
             lit_int_expr.type = EXPR_TYPE_LITERAL;
             lit_int_expr.underlying = malloc(sizeof(struct expr_literal));
@@ -434,7 +434,7 @@ static expr primary(parserState *state) {
                     }
                     *state = inferred;
                     // Normalize the inferred dimension to an ordinary sized literal.
-                    long *count = calloc(1, sizeof(*count));
+                    int64_t *count = calloc(1, sizeof(*count));
                     CHECK_MALLOC(count);
                     struct expr_literal dimension = {.type = LITERAL_TYPE_INT, .value = count};
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_LITERAL, dimension, index);
@@ -443,7 +443,7 @@ static expr primary(parserState *state) {
                     CONSTRUCT_EXPR_RES(EXPR_TYPE_INDEX, indexed, prefix);
                     parent = parseComposite(state, prefix);
                     CHECK_SYNC;
-                    *count = (long)((struct expr_composite *)parent.underlying)->nEntries;
+                    *count = (int64_t)((struct expr_composite *)parent.underlying)->nEntries;
                     break;
                 }
                 struct expr_instantiation instance = {.parent = parent, .location = tok};
@@ -642,8 +642,8 @@ static expr secondaryImpl(parserState *state) {
             if (child2.type == EXPR_TYPE_LITERAL) {
                 struct expr_literal *literal = child2.underlying;
                 if (literal->type == LITERAL_TYPE_INT && literal->unsignedLiteral &&
-                    *(uint64_t *)literal->value == (uint64_t)LONG_MAX + 1) {
-                    literal->unsignedLiteral = 0; *(long *)literal->value = LONG_MIN;
+                    *(uint64_t *)literal->value == (uint64_t)INT64_MAX + 1) {
+                    literal->unsignedLiteral = 0; *(int64_t *)literal->value = INT64_MIN;
                     return child2;
                 }
             }

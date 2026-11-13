@@ -78,7 +78,11 @@ static void rangeJSON(FILE *out, const char *text, token t) {
 }
 static char *fileURI(const char *filename) {
     char *absolute;
-    if (filename[0] == '/')
+    if (filename[0] == '/'
+#ifdef _WIN32
+        || (isalpha((unsigned char)filename[0]) && filename[1] == ':')
+#endif
+    )
         absolute = strdup(filename);
     else {
         char *cwd = getcwd(NULL, 0);
@@ -99,11 +103,18 @@ static char *fileURI(const char *filename) {
     }
     free(name);
     free(directory);
-    char *uri = malloc(8 + 3 * strlen(absolute)), *p = uri;
+    char *uri = malloc(9 + 3 * strlen(absolute)), *p = uri;
     memcpy(p, "file://", 7);
     p += 7;
+#ifdef _WIN32
+    if (absolute[0] != '/') *p++ = '/';
+#endif
     for (unsigned char *s = (unsigned char *)absolute; *s; s++) {
-        if (isalnum(*s) || strchr("/-._~", *s))
+        if (isalnum(*s) || strchr("/-._~", *s)
+#ifdef _WIN32
+            || (*s == ':' && s == (unsigned char *)absolute + 1)
+#endif
+        )
             *p++ = *s;
         else {
             sprintf(p, "%%%02X", *s);
@@ -584,6 +595,10 @@ static void semanticRequest(Json *id, const char *method, Json *params, Document
         reply(id, NULL, -32603, "Could not create semantic worker");
         return;
     }
+#ifdef _WIN32
+    int failed = windowsLspRequest(result, method, params, doc, documents);
+    if (failed)
+#else
     fflush(NULL);
     pid_t child = fork();
     if (!child) {
@@ -598,6 +613,7 @@ static void semanticRequest(Json *id, const char *method, Json *params, Document
         while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
         }
     if (child < 0 || !WIFEXITED(status) || WEXITSTATUS(status))
+#endif
         reply(id, NULL, -32603, "Could not analyze document");
     else {
         long n = ftell(result);

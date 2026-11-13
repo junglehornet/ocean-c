@@ -32,6 +32,42 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix "$HOME/.local"
 ```
 
+Build with `make VERSION=1.2.3` (default: `dev`), or configure CMake with
+`cmake -S . -B build -DOCEAN_VERSION=1.2.3` before building. The Make wrapper
+uses `build/` by default; override it with `BUILD_DIR=...`. `ocean -v` and
+`ocean --version` print the version, full Git commit hash, commit date, UTC build
+date, and copyright year from the commit date. Metadata refreshes on each build;
+source archives without Git metadata report `unknown` for commit fields.
+`SOURCE_DATE_EPOCH` can fix the build timestamp for reproducible builds.
+The top-level `-v` does not change `ocean test -v` (verbose test reporting).
+Module/package resolution, program builds, and standard-library integration are
+unchanged.
+
+The compiler repository also contains an interactive release installer in
+`installer/`. Build it with `ocean build installer -o installer/ocean-installer` and
+use the resulting native executable directly. It requires Git and system file
+utilities, and offers system package installation or a relocatable Clang/libffi/
+libcurl bundle within the selected Ocean prefix (including user-local paths).
+See `installer/README.md` for platform requirements.
+
+Tagged compiler releases build all seven native targets: Linux x86_64,
+AArch64, and RISC-V64; macOS x86_64 and AArch64; Windows x86_64 and AArch64.
+Release builds pass the literal tag and commit/date metadata through Make.
+Metadata can also be supplied as `COMMIT`, `COMMIT_DATE`, `COMMIT_YEAR`, and
+`BUILD_DATE` Make variables (or corresponding `OCEAN_...` CMake settings).
+Compiler and installer tar assets use `<name>_<version>_<arch>-<os>.tar`;
+Windows additionally gets zip assets. Archives contain one executable only.
+The installer is entirely native Ocean. Matching ocean-deps tar.xz assets
+provide optional toolchain and library bundles.
+
+Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
+CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a
+Windows GNU/MinGW Clang toolchain on PATH. Integer literals use fixed 64-bit
+storage on every native host, including Windows where C `long` is 32-bit.
+Windows LSP requests run in isolated re-executed workers with editor overlays;
+Windows unit tests use captured reports, not the Unix live terminal frontend.
+Package/module resolution and installed `bin/`/`src/` layout are unchanged.
+
 Installation places the executable in `bin/` and standard-library sources in
 `src/`. CMake's `OCEAN_STANDARD_LIBRARY_SOURCE` selects the library source tree
 (default: sibling `../ocean-src`). `OCEAN_SRC` overrides the runtime source lookup;
@@ -182,6 +218,12 @@ path, regardless of its package declaration (including `package main;`). For
 example, `import "example.com/calculator";` binds `calculator`. Explicit
 `as alias`, dot imports, and blank imports override the default. Import bindings
 are file-scoped.
+Target-specific source files are selected before parsing and import resolution:
+*_native.oc / *_native_test.oc are native-only; *_wasm.oc / *_wasm_test.oc are
+selected only with OCOS=js OCARCH=wasm. Other .oc files are shared. This selection
+also applies to editor overlays and test discovery; it does not select individual
+native OS/architecture combinations. Use inline assembly selectors for those.
+
 Capitalized names are exported (including types, globals, and receiver methods);
 lowercase names remain package-private. Extern declarations are file-scoped and
 are not exported. Import cycles and conflicting declarations fail.
@@ -1052,6 +1094,11 @@ initialized lazily and retained until process shutdown. These APIs require the
 matching `threads` and `sync` standard-library sources.
 
 
+`time.Monotonic() int` returns monotonic nanoseconds, with an unspecified origin;
+use only differences within one process. Windows uses millisecond GetTickCount64
+precision; Linux/macOS use CLOCK_MONOTONIC. Wasm imports the host clock described
+below. This clock supports HTTP's overall deadlines.
+
 ## HTTP, JSON, and child processes
 
 Use the matching standard-library tree with the compiler fixes for mutable
@@ -1093,36 +1140,77 @@ text (including spellings for NaN/infinity); JSON rejects non-finite text.
 
 ### net/http
 
-A small blocking HTTP/1.1 client for 64-bit Linux; plain `http://` only.
-`http.Get(url string)` and `http.Post(url, contentType, body string)` return
-`Result<http.Response>`. `http.NewRequest(method, url, body string)` returns
-`Result<http.Request>`; empty method means GET. A zero-value `http.Client` has
-`Do(request Request)`, `Get(url string)`, and `Post(url, contentType, body string)`
-methods, all returning `Result<Response>`.
+HTTP/1.1 and verified HTTPS use libcurl 7.68+ (TLS + asynchronous DNS) across
+Linux x86-64/AArch64/RISC-V64, macOS x86-64/AArch64, and Windows x86-64/AArch64.
+The matching compiler links -lcurl automatically, including object-cache hits.
+The development/import library, shared library/DLL dependencies, and trust store
+must be installed. Manual links also need -lcurl and Ocean's ordinary ABI/thread
+runtime dependencies. Static transitive dependency discovery is not implemented.
 
-Request fields: Method, URL, Header, Body. Response fields: Status, StatusCode,
-Header, Body. Bodies are owned strings; no Close call is needed. Non-2xx status
-codes are normal responses. Header supports Set/Add/Get/Values/Del, with case
-insensitive names. Get returns the first value or ""; Values returns an owned
-string array. Header's zero value works.
+Get(url) and Post(url, contentType, body) return Result<Response>. NewRequest
+accepts HTTP/HTTPS; empty method means GET. Client.Do/Get/Post return the same
+Result type. Bodies are owned strings; no Body.Close is needed. Non-2xx status
+codes are normal responses. Header.Set/Add/Get/Values/Del are case insensitive.
+Request fields: Method, URL, Header, Body, Cancel, Deadline, ResponseLimit.
+Response fields: Status, StatusCode, Header, Body.
 
-Client.MaxResponseBytes defaults to a 16 MiB wire-response limit when nonpositive;
-positive values override it. Headers have a 64 KiB limit. Supports DNS/IPv4,
-explicit ports, custom methods, request bodies, content-length, close-delimited
-and chunked responses/trailers, HEAD, no-body statuses, and up to 16 informational
-responses. Framing headers (Host, Connection, Content-Length, Transfer-Encoding)
-are client-controlled. URL paths must already be escaped; fragments are removed.
-HTTPS, IPv6 URL literals, redirects, proxies, compression, cookies, connection
-reuse, servers, cancellation, and timeouts are not implemented. Calls may block.
+Client fields: MaxResponseBytes, Timeout, TLSClientConfig, Transport. Timeout is
+nonnegative nanoseconds (time.Second/Millisecond); zero means no deadline. It
+spans preparation, DNS, TCP/TLS connect, upload, and reading. The native transport
+polls at up to 10 ms intervals, subject to scheduling, clock resolution, and
+libcurl operations. Timeout errors say "http: timeout exceeded". A positive
+Request.Deadline is absolute time.Monotonic() nanoseconds; the earliest request
+or client deadline wins. Do populates Deadline and ResponseLimit for transports.
+
+Cancellation's zero value works. Cancel() is permanent/idempotent and Canceled()
+reports its state. Attach a borrowed *Cancellation with NewRequestWithCancel,
+request.WithCancel, or Request.Cancel. Native tokens synchronize across threads;
+keep them at stable addresses, never copy them after use, and keep them alive
+until all requests/canceling threads finish. Errors say "http: request canceled".
+This is distinct from threads.Kill.
+
+TLS verifies the peer chain and hostname, requires TLS 1.2+, and uses libcurl's
+default trust store. TLSClientConfig.RootCAFile selects a private PEM CA bundle.
+There is no insecure verification bypass. Custom transports own TLS settings.
+MaxResponseBytes defaults to 16 MiB when nonpositive, counting received HTTP
+headers/chunk framing. Headers/trailers have 64 KiB limits. Length/chunked/HEAD/
+no-body responses finish at their frame boundary; close-delimited bodies need
+EOF. Validate framing, duplicate transfer encoding, lengths, and truncation.
+Framing request headers are reserved. Paths must be escaped; fragments are
+removed. Proxies (including environment settings), redirects, IPv6 URL literals,
+cookies, compression, pooling, and servers are not implemented.
 
 ```ocean
 import "net/http";
-request := http.NewRequest("POST", "http://localhost:8080/items", "hello").unwrap();
-request.Header.Set("Content-Type", "text/plain");
+import "time";
 client: http.Client;
+client.Timeout = 5 * time.Second;
+cancel: http.Cancellation;
+request := http.NewRequestWithCancel(&cancel, "GET", "https://example.com", "").unwrap();
 response := client.Do(request).unwrap();
-body := response.Body;
 ```
+
+For Wasm, *_wasm.oc implementations avoid native libcurl and sync imports.
+Client.Transport accepts a RoundTripper with RoundTrip(Request) Result<Response>.
+A host adapter must handle network I/O, TLS/CORS/browser header policy, and honor
+Deadline, cancellation, and ResponseLimit. Do checks before/after delegation and
+bounds the returned body; it cannot preempt a noncooperating transport. Ocean's
+API is synchronous and Fetch is asynchronous: no built-in synchronous Fetch
+adapter is supplied. Default Wasm requests return "http: WebAssembly requires a
+host-supplied RoundTripper". Wasm cancellation is a single-threaded flag;
+in-flight cancellation needs host execution/suspension/worker integration.
+The host must supply Ocean's normal runtime plus env.ocean_time_monotonic_ns()
+returning i64/JavaScript BigInt monotonic nanoseconds. Client.Do generally imports
+this clock even when Timeout is zero because its deadline machinery references it.
+
+All library behavior tests are native Ocean *_native_test.oc files. Run ocean
+ test net/http time. net/http/tests/integration.py only supplies local TLS/server
+fixtures, environment addresses, and invokes ocean test; network tests otherwise
+skip. Ocean tests verify TLS, timeout/cancellation (including uploads), and
+concurrency. linking.py tests
+cold/hot/uncached linkage. wasm.py compiles and runs a Node host-transport smoke
+test with no native imports; its allocator shim is test-only. assembly.py checks
+all seven clock variants. Native runtime portability needs the CI target matrix.
 
 ### os/exec
 

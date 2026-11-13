@@ -593,7 +593,7 @@ static void scan_literal_number(struct scannerState *state) {
     token result={.type=floating?LITERAL_FLOAT:LITERAL_INT,.line=state->thisLine,.column=state->thisColumn,.filename=state->filename};
     size_t n=at-start;result.lexeme=malloc(n+1);assert(result.lexeme);memcpy(result.lexeme,s+start,n);result.lexeme[n]=0;
     if(floating)result.numValue.floating=(double)value;
-    else {result.unsignedLiteral=integer>LONG_MAX;result.numValue.unsignedInteger=integer;}
+    else {result.unsignedLiteral=integer>INT64_MAX;result.numValue.unsignedInteger=integer;}
     while(state->offset+1<at)next_char(state);
     push_tokenlist(state->list,result);return;
 invalid:

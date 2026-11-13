@@ -1,5 +1,6 @@
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "build_cache.h"
 #include <dirent.h>
 #include <errno.h>
@@ -83,13 +84,22 @@ static int hashFile(Digest *d, const char *path) {
 }
 static char *join(const char *a, const char *b) {
     char *p = malloc(strlen(a) + strlen(b) + 2);
-    if (p) sprintf(p, "%s/%s", a, b); return p;
+    if (p) {
+        sprintf(p, "%s/%s", a, b);
+#ifdef _WIN32
+        for (char *c = p; *c; c++) if (*c == '\\') *c = '/';
+#endif
+    }
+    return p;
 }
 static int directories(const char *path) {
     char *copy = strdup(path); if (!copy) return 0;
     int ok = 1;
     for (char *p = copy + 1; ; p++) {
         if (*p && *p != '/') continue;
+#ifdef _WIN32
+        if (p == copy + 2 && copy[1] == ':' && *p) continue;
+#endif
         char saved = *p; *p = 0;
         struct stat info;
         if (mkdir(copy, 0700) && (errno != EEXIST || stat(copy, &info) || !S_ISDIR(info.st_mode))) ok = 0;
@@ -108,6 +118,14 @@ static char *cacheDirectory(void) {
 }
 static char *executable(const char *name) {
     if (strchr(name, '/')) return access(name, X_OK) ? NULL : realpath(name, NULL);
+#ifdef _WIN32
+    char found[4096];
+    if (!_searchenv_s(name, "PATH", found, sizeof(found)) && *found) return realpath(found, NULL);
+    char *exe = malloc(strlen(name) + 5); if (!exe) return NULL;
+    sprintf(exe, "%s.exe", name);
+    int ok = !_searchenv_s(exe, "PATH", found, sizeof(found)) && *found;
+    free(exe); return ok ? realpath(found, NULL) : NULL;
+#else
     const char *path = getenv("PATH"); if (!path) path = "/usr/bin:/bin";
     const char *start = path;
     do {
@@ -123,6 +141,7 @@ static char *executable(const char *name) {
         start = end + 1;
     } while (1);
     return NULL;
+#endif
 }
 struct buildCache { char *directory; char irKey[65], compilerHash[65]; };
 buildCache *openBuildCache(const char *compiler, parseResult *program, const char *packageDirectory) {
@@ -163,7 +182,9 @@ buildCache *openBuildCache(const char *compiler, parseResult *program, const cha
 }
 void closeBuildCache(buildCache *cache) { if (cache) { free(cache->directory); free(cache); } }
 const char *buildCacheIRKey(buildCache *cache) { return cache ? cache->irKey : NULL; }
+#ifndef _WIN32
 extern char **environ;
+#endif
 static int compareStrings(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 static void dependencySources(Digest *d, parseResult *program, size_t packageId, unsigned char *seen) {
     for (size_t i = 0; i < program->nPackages; i++) {
@@ -203,6 +224,8 @@ int buildCachePackageKey(buildCache *cache, parseResult *program, size_t package
 #ifdef __APPLE__
     number(&d, info.st_mtimespec.tv_sec); number(&d, info.st_mtimespec.tv_nsec);
     number(&d, info.st_ctimespec.tv_sec); number(&d, info.st_ctimespec.tv_nsec);
+#elif defined(_WIN32)
+    number(&d, info.st_mtime); number(&d, info.st_ctime);
 #else
     number(&d, info.st_mtim.tv_sec); number(&d, info.st_mtim.tv_nsec);
     number(&d, info.st_ctim.tv_sec); number(&d, info.st_ctim.tv_nsec);
@@ -306,6 +329,7 @@ void storeBuildCache(buildCache *cache, const char *key, const char *source) {
     free(manifest);
 }
 /* Walk directory descriptors, never symlink targets, even during a race. */
+#ifndef _WIN32
 static int removeAt(int parent, const char *name) {
     int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (fd < 0) {
@@ -325,9 +349,15 @@ static int removeAt(int parent, const char *name) {
     if (unlinkat(parent, name, AT_REMOVEDIR) && errno != ENOENT) failed = 1;
     return failed;
 }
+#endif
 int cleanBuildCache(void) {
     char *directory = cacheDirectory(); if (!directory) return 0;
-    int failed = removeAt(AT_FDCWD, directory); free(directory);
+#ifdef _WIN32
+    int failed = oceanRemoveDirectory(directory);
+#else
+    int failed = removeAt(AT_FDCWD, directory);
+#endif
+    free(directory);
     if (failed) fprintf(stderr, "ocean: could not clean build cache\n");
     return failed;
 }

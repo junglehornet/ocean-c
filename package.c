@@ -1,5 +1,6 @@
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "package.h"
 #include "array_type.h"
 #include "diagnostic.h"
@@ -128,6 +129,9 @@ static char *canonical(packageBuild *b, const char *path) {
 static char *parent(packageBuild *b, const char *path) {
     char *result = pkgString(b, path), *slash = strrchr(result, '/');
     if (slash == result) result[1] = 0;
+#ifdef _WIN32
+    else if (slash == result + 2 && result[1] == ':') slash[1] = 0;
+#endif
     else if (slash) *slash = 0;
     return result;
 }
@@ -224,8 +228,9 @@ static Module *findModule(packageBuild *b, const char *location) {
             if (block) error(b, manifest, "unterminated directive block");
             return module;
         }
-        if (!strcmp(root, "/")) return NULL;
-        root = parent(b, root);
+        char *next = parent(b, root);
+        if (!strcmp(root, next)) return NULL;
+        root = next;
     }
 }
 static int mkdirs(const char *path) {
@@ -233,6 +238,9 @@ static int mkdirs(const char *path) {
     if (!copy) return 1;
     for (char *p = copy + 1; ; p++) {
         if (*p != '/' && *p) continue;
+#ifdef _WIN32
+        if (p == copy + 2 && copy[1] == ':' && *p) continue;
+#endif
         char c = *p; *p = 0;
         if (mkdir(copy, 0700) && errno != EEXIST) { free(copy); return 1; }
         if (!c) break;
@@ -240,14 +248,7 @@ static int mkdirs(const char *path) {
     }
     free(copy); return 0;
 }
-static int process(char *const args[]) {
-    pid_t child = fork();
-    if (child < 0) return 1;
-    if (!child) { execvp(args[0], args); perror(args[0]); _exit(127); }
-    int status;
-    while (waitpid(child, &status, 0) < 0) if (errno != EINTR) return 1;
-    return !WIFEXITED(status) || WEXITSTATUS(status);
-}
+static int process(char *const args[]) { return oceanRun(args); }
 static void removeTemporary(const char *path) {
     DIR *dir = opendir(path);
     if (dir) {
@@ -300,24 +301,9 @@ static Package *loadDirectory(packageBuild *, const char *);
 static char *standardSource(packageBuild *b) {
     const char *override = getenv("OCEAN_SRC");
     if (override) return pkgString(b, override);
-#ifdef __APPLE__
-    uint32_t size = 0;
-    _NSGetExecutablePath(NULL, &size);
-    char *path = alloc(b, size);
-    if (_NSGetExecutablePath(path, &size)) return NULL;
-    char *executable = canonical(b, path);
-#else
-    char *executable = NULL;
-    for (size_t size = 256; ; size *= 2) {
-        char *path = alloc(b, size + 1);
-        ssize_t length = readlink("/proc/self/exe", path, size);
-        if (length < 0) break;
-        if ((size_t)length == size) continue;
-        path[length] = 0;
-        executable = path;
-        break;
-    }
-#endif
+    char *path = oceanExecutable();
+    char *executable = path ? pkgString(b, path) : NULL;
+    free(path);
     return executable ? format(b, "%s/../src", parent(b, executable)) : NULL;
 }
 static Package *resolveImport(packageBuild *b, Package *from, const char *path) {
@@ -461,6 +447,17 @@ static int testFilename(const char *name) {
     size_t n = strlen(name);
     return n >= 8 && !strcmp(name + n - 8, "_test.oc");
 }
+// Target source variants are selected before parsing/import resolution. This
+// also applies to unsaved editor overlays and target-specific test sources.
+static int targetSource(const char *name) {
+    size_t n = strlen(name);
+    if (n < 3) return 1;
+    n -= testFilename(name) ? 8 : 3;
+    int wasm = getenv("OCARCH") && !strcmp(getenv("OCARCH"), "wasm");
+    if (n >= 7 && !strncmp(name + n - 7, "_native", 7)) return !wasm;
+    if (n >= 5 && !strncmp(name + n - 5, "_wasm", 5)) return wasm;
+    return 1;
+}
 static int compareTestFiles(const void *left, const void *right) {
     int a = testFilename(*(char *const *)left), b = testFilename(*(char *const *)right);
     return a != b ? a - b : compareNames(left, right);
@@ -489,6 +486,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
     while (dir && (entry = readdir(dir))) {
         size_t length = strlen(entry->d_name);
         if (length < 4 || strcmp(entry->d_name + length - 3, ".oc")) continue;
+        if (!targetSource(entry->d_name)) continue;
         if (testFilename(entry->d_name) ? !target : external) continue;
         char *path = format(b, "%s/%s", location, entry->d_name);
         struct stat info;
@@ -503,6 +501,7 @@ static Package *loadDirectory(packageBuild *b, const char *location) {
         size_t length = strlen(path);
         if (!slash || (size_t)(slash - path) != strlen(location) ||
             strncmp(path, location, strlen(location)) || length < 3 || strcmp(path + length - 3, ".oc")) continue;
+        if (!targetSource(path)) continue;
         if (testFilename(path) ? !target : external) continue;
         size_t j = 0;
         while (j < count && strcmp(names[j], path)) j++;
@@ -1146,12 +1145,12 @@ static int hasTestSources(const char *location, const packageSource *sources, si
     DIR *dir = path ? opendir(path) : NULL;
     struct dirent *entry;
     while (dir && (entry = readdir(dir)))
-        if (testFilename(entry->d_name)) { hasTests = 1; break; }
+        if (testFilename(entry->d_name) && targetSource(entry->d_name)) { hasTests = 1; break; }
     if (dir) closedir(dir);
     for (size_t i = 0; path && !hasTests && i < count; i++) {
         const char *slash = strrchr(sources[i].path, '/');
         if (slash && (size_t)(slash - sources[i].path) == strlen(path) &&
-            !strncmp(sources[i].path, path, strlen(path)) && testFilename(slash + 1)) hasTests = 1;
+            !strncmp(sources[i].path, path, strlen(path)) && testFilename(slash + 1) && targetSource(slash + 1)) hasTests = 1;
     }
     free(path);
     return hasTests;
@@ -1227,7 +1226,7 @@ static void candidateDirectory(packageBuild *b, const char *directoryPath, const
             candidateDirectory(b, path, child, depth + 1, budget, visit, context);
         } else if (!name && S_ISREG(info.st_mode)) {
             size_t n = strlen(entry->d_name);
-            if (n > 3 && !strcmp(entry->d_name + n - 3, ".oc") && !testFilename(entry->d_name))
+            if (n > 3 && !strcmp(entry->d_name + n - 3, ".oc") && !testFilename(entry->d_name) && targetSource(entry->d_name))
                 name = candidateName(b, path);
         }
     }

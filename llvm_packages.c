@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "platform.h"
 #include "llvm_packages.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,7 +7,7 @@
 #include <unistd.h>
 
 int createLLVMPackages(parseResult *program, llvmPackages *units) {
-    char directory[] = "/tmp/ocean-packages-XXXXXX";
+    char directory[4096]; oceanTemporary(directory, sizeof(directory), "ocean-packages-XXXXXX");
     if (!mkdtemp(directory)) return 1;
     units->directory = strdup(directory);
     units->count = program->nPackages + 1;

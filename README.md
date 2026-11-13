@@ -12,6 +12,36 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+Build with `make VERSION=1.2.3` (default: `dev`), or configure CMake with
+`cmake -S . -B build -DOCEAN_VERSION=1.2.3` before building. The Make wrapper
+uses `build/` by default; override it with `BUILD_DIR=...`. `ocean -v` and
+`ocean --version` print the version, full Git commit hash, commit date, UTC build
+date, and copyright year from the commit date. Metadata refreshes on each build;
+source archives without Git metadata report `unknown` for commit fields.
+`SOURCE_DATE_EPOCH` can fix the build timestamp for reproducible builds.
+The top-level `-v` does not change `ocean test -v` (verbose test reporting).
+Module/package resolution, program builds, and standard-library integration are
+unchanged.
+
+The interactive release installer lives in [`installer/`](installer/README.md).
+Build its Ocean entry point with `build/ocean build installer -o installer/ocean-install`
+(using the matching `OCEAN_SRC`). The executable contains the native Ocean
+installer and requires Git; it installs matching tagged compiler
+releases and standard-library sources and configures PATH for the selected scope.
+
+Tagged releases are built by `.github/workflows/release.yml` for Linux
+x86_64/AArch64/RISC-V64, macOS x86_64/AArch64, and Windows x86_64/AArch64.
+The tag and exact commit metadata pass through Make into the compiler. See
+[`scripts/RELEASING.md`](scripts/RELEASING.md) for artifact naming, matching
+stdlib tags, release checks, and the installer’s pending native rewrite.
+
+On Windows, build with MSYS2 CLANG64 (x86_64) or CLANGARM64 (AArch64), including
+Clang, CMake, Ninja, Make, and the matching libffi headers. The compiler uses
+native Windows processes and file APIs; it does not require a POSIX runtime.
+Clang on PATH must target Windows GNU/MinGW for linking Ocean programs. Windows
+unit tests use captured reports; the live terminal test frontend is Unix-only.
+Ocean `int` literals retain their 64-bit range on Windows.
+
 Build or run a package directory (requires `clang` on `PATH`):
 
 ```sh
@@ -1998,3 +2028,26 @@ Multi-package test runs print one combined Summary table with a row per package,
 aggregate passed/failed/skipped/total counts, and total command wall time.
 Package rows retain their individual elapsed times; failure details remain
 grouped by package. Saved text reports use the same combined summary.
+
+## HTTP linking and native/Wasm source variants
+
+Programs importing the standard-library `net/http` native transport require
+libcurl 7.68+ with TLS and asynchronous DNS, its development/import library,
+and a configured trust store. The compiler links `-lcurl` only for programs
+using libcurl declarations and preserves this requirement on full object-cache
+hits. Unrelated programs and the Wasm HTTP transport do not link libcurl.
+Manual IR links need the same library and ordinary Ocean ABI/thread runtime
+requirements. Static libcurl transitive dependencies are not discovered
+by the compiler.
+
+Package loading selects `*_native.oc` and `*_native_test.oc` only for native
+builds, and `*_wasm.oc` and `*_wasm_test.oc` only with `OCOS=js OCARCH=wasm`.
+Other `.oc` files remain shared. Files are filtered before parsing/import
+resolution, including editor overlays and test discovery. These suffixes do
+not select individual native OS/architecture pairs.
+
+The Wasm HTTP API accepts a host-supplied RoundTripper. It does not supply a
+synchronous browser Fetch implementation. Deadlines use the host import
+`env.ocean_time_monotonic_ns() -> i64`; JavaScript hosts return BigInt monotonic
+nanoseconds. See the matching `net/http/README.md` in ocean-src for the native
+platform matrix, TLS/cancellation API, and host-adapter contract.

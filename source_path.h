@@ -8,7 +8,11 @@
  * Runtime diagnostics embed this path relative to the compiler's cwd. */
 static inline char *relativeSourcePath(const char *path) {
     if (!path) path = "<source>";
-    if (*path != '/') {
+    if (*path != '/'
+#ifdef _WIN32
+        && !(path[0] && path[1] == ':')
+#endif
+    ) {
         while (path[0] == '.' && path[1] == '/') path += 2;
         size_t size = strlen(path) + 1;
         char *result = malloc(size);

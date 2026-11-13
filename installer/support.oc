@@ -1,0 +1,127 @@
+package main;
+import "io";
+import "os";
+import "os/exec";
+import "encoding/json";
+
+extern buffer<i8> getenv(buffer<i8> name);
+platform: string;
+architecture: string;
+cleanupMode: bool;
+extern i32 getchar();
+extern i32 ocean_process_interrupted();
+extern void ocean_process_clear_interrupt();
+func require(ok bool, message string) { if (!ok) panic message; }
+func starts(text string, prefix string) bool { return len(text) >= len(prefix) && text[:len(prefix)] == prefix; }
+func ends(text string, suffix string) bool { return len(text) >= len(suffix) && text[len(text)-len(suffix):] == suffix; }
+func index(text string, needle string) int {
+    for (i := 0; i + len(needle) <= len(text); i++) { if (text[i:i+len(needle)] == needle) return i; }
+    return -1;
+}
+func replace(text string, old string, value string) string {
+    result := "";
+    for (len(text) > 0) {
+        at := index(text, old);
+        if (at < 0) return result + text;
+        result += text[:at] + value; text = text[at + len(old):];
+    }
+    return result;
+}
+func trim(text string) string {
+    start := 0; end := len(text);
+    for (start < end && text[start] <= 32) start++;
+    for (end > start && text[end - 1] <= 32) end--;
+    return text[start:end];
+}
+func split(text string, separator string) string[] {
+    result := string[]{};
+    for (;;) { at := index(text, separator); if (at < 0) break; result.append(text[:at]); text = text[at+len(separator):]; }
+    result.append(text); return result;
+}
+func pathJoin(base string, name string) string { return ends(base, "/") ? base + name : base + "/" + name; }
+func parent(path string) string {
+    for (i := len(path) - 1; i > 0; i--) { if (path[i] == '/') return path[:i]; }
+    return "/";
+}
+func psQuote(text string) string { return "'" + replace(text, "'", "''") + "'"; }
+func shQuote(text string) string { return "'" + replace(text, "'", "'\"'\"'") + "'"; }
+func command(name string, args ...string) string {
+    if (cleanupMode) extern.ocean_process_clear_interrupt();
+    require(cleanupMode || extern.ocean_process_interrupted() == 0, "installation cancelled");
+    c := exec.Command(name, args...); output := c.Output();
+    require(!output.hasError(), "command failed: " + name + ": " + (output.hasError() ? output.error() : ""));
+    return trim(output.unwrap());
+}
+func ps(script string) string {
+    return command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + script);
+}
+func environment(name string) string {
+    if (platform == "windows") return ps("[Environment]::GetEnvironmentVariable(" + psQuote(name) + ")");
+    bytes := (name + "\0") -> i8[]; raw := extern.getenv(bytes.data); result := i8[]{};
+    if ((raw -> int) != 0) { for (i := 0; raw[i] != 0; i++) result.append(raw[i]); }
+    return result -> string;
+}
+func ask(message string, fallback string) string {
+    io.Print(message).unwrap(); bytes := i8[]{};
+    for (;;) {
+        require(extern.ocean_process_interrupted() == 0, "installation cancelled");
+        character := extern.getchar();
+        if (character < 0) { require(len(bytes) > 0, "installation cancelled (end of input)"); break; }
+        if (character == 10) break;
+        bytes.append(character->i8);
+    }
+    value := trim(bytes->string); return value == "" ? fallback : value;
+}
+func yes(message string) bool { answer := ask(message + " [y/N] ", "n"); return answer == "y" || answer == "yes"; }
+func exists(path string) bool {
+    if (platform == "windows") return ps("Test-Path -LiteralPath " + psQuote(path)) == "True";
+    c := exec.Command("test", "-e", path); return !c.Run().hasError();
+}
+func directory(path string) bool {
+    if (platform == "windows") return ps("Test-Path -PathType Container -LiteralPath " + psQuote(path)) == "True";
+    c := exec.Command("test", "-d", path); return !c.Run().hasError();
+}
+func writable(path string) bool {
+    if (!exists(path)) return writable(parent(path));
+    if (platform == "windows") {
+        return ps("try { $p=" + psQuote(path) + "; if(Test-Path -PathType Leaf -LiteralPath $p){$f=[IO.File]::Open($p,'Open','Write','ReadWrite');$f.Dispose()}else{$n=Join-Path $p ([Guid]::NewGuid().ToString());$f=[IO.File]::Create($n);$f.Dispose();[IO.File]::Delete($n)}; 'yes' } catch { 'no' }") == "yes";
+    }
+    c := exec.Command("test", "-w", path); return !c.Run().hasError();
+}
+func mkdir(path string) {
+    if (platform == "windows") { ps("[IO.Directory]::CreateDirectory(" + psQuote(path) + ") | Out-Null"); return; }
+    command("mkdir", "-p", "--", path);
+}
+func removeTree(path string) {
+    require(len(path) > 4 && path != "/" && path != environment("HOME"), "refusing unsafe removal");
+    if (!exists(path)) return;
+    if (platform == "windows") { ps("Remove-Item -Recurse -Force -LiteralPath " + psQuote(path)); return; }
+    command("rm", "-rf", "--", path);
+}
+func move(source string, destination string) {
+    if (platform == "windows") { ps("Move-Item -LiteralPath " + psQuote(source) + " -Destination " + psQuote(destination)); return; }
+    command("mv", "--", source, destination);
+}
+func copyTree(source string, destination string) {
+    if (platform == "windows") { ps("Copy-Item -Recurse -LiteralPath " + psQuote(source) + " -Destination " + psQuote(destination)); return; }
+    command("cp", "-R", "--", source, destination);
+}
+func readFile(path string) string {
+    f := os.Open(path, os.FileMode.Binary).unwrap(); defer f.Close();
+    bytes := i8[]{}; bytes.append(f.Readend().unwrap()...); return bytes -> string;
+}
+func writeFile(path string, text string) { f := os.Open(path, os.FileMode.BinaryWrite).unwrap(); defer f.Close(); f.Write(text).unwrap(); }
+func temporary() string {
+    if (platform == "windows") return replace(ps("$p=Join-Path ([IO.Path]::GetTempPath()) ('ocean-install-'+[Guid]::NewGuid().ToString());[IO.Directory]::CreateDirectory($p)|Out-Null;$p"), "\\", "/");
+    base := environment("TMPDIR"); if (base == "") base = "/tmp";
+    return command("mktemp", "-d", pathJoin(base, "ocean-install-XXXXXXXX"));
+}
+func now() string {
+    return platform == "windows" ? ps("[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')") : command("date", "-u", "+%Y-%m-%dT%H:%M:%SZ");
+}
+func object(value any) map[string]any { return value.(map[string]any); }
+func text(value any) string { switch (value.(type)) { case string: return value.(string); default: return ""; } }
+func flag(value any) bool { switch (value.(type)) { case bool: return value.(bool); default: return false; } }
+func array(value any) mixed any[] { return value.(mixed any[]); }
+func encode(value any) string { return json.Marshal(value).unwrap(); }
+func decode(value string) any { return json.Unmarshal(value).unwrap(); }
