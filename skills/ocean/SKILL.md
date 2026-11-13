@@ -1051,6 +1051,115 @@ panics, and another thread may unlock a mutex. Native synchronization state is
 initialized lazily and retained until process shutdown. These APIs require the
 matching `threads` and `sync` standard-library sources.
 
+
+## HTTP, JSON, and child processes
+
+Use the matching standard-library tree with the compiler fixes for mutable
+interface arrays, owned boxed array elements, enum payload tuples, and fields
+whose names match their types (for example `Header Header`). Mutable `any[]`
+remains homogeneous; use `mixed any[]` for JSON arrays. Interface arrays support
+append/prepend/add/remove/pop and normal value-copy ownership. Recursive owning
+array/map layouts remain unsupported and report a diagnostic rather than
+crashing; use explicit pointers for recursive ownership.
+
+### encoding/json
+
+`json.Marshal(value any) Result<string>` encodes null, bool, string, all integer
+widths, finite floats, structs, `map[string]any`, `mixed any[]`, and dynamic
+`int[]`, `string[]`, `float[]`, and `bool[]`. Map keys are sorted. Struct encoding
+includes private fields under their exact names; tags and custom marshalers are
+not implemented. Unsupported types return errors.
+
+`json.Unmarshal(text string) Result<any>` returns null, bool, string,
+`json.Number`, `mixed any[]`, or `map[string]any`; it does not fill a pointer.
+Duplicate keys retain the last value. `Number { Text string }` preserves numeric
+spelling and exposes `Int64() Result<int>` and `Float64() Result<float>`.
+`json.Valid(text string) bool` checks an entire document. UTF-8, escapes,
+surrogate pairs, number grammar, trailing data, and nesting (128 levels) are
+validated. NaN/infinity and malformed Number values cannot be marshaled.
+Fixed arrays, pointers, concrete maps such as map[string]int, struct decoding,
+streaming, and indentation are not implemented.
+
+```ocean
+import "encoding/json";
+value := json.Unmarshal("{\"count\":42}").unwrap();
+object := value.(map[string]any);
+count := object["count"].(json.Number).Int64().unwrap();
+text := json.Marshal(value).unwrap();
+```
+
+`io.FormatFloat(value float) string` returns locale-independent round-trip float
+text (including spellings for NaN/infinity); JSON rejects non-finite text.
+
+### net/http
+
+A small blocking HTTP/1.1 client for 64-bit Linux; plain `http://` only.
+`http.Get(url string)` and `http.Post(url, contentType, body string)` return
+`Result<http.Response>`. `http.NewRequest(method, url, body string)` returns
+`Result<http.Request>`; empty method means GET. A zero-value `http.Client` has
+`Do(request Request)`, `Get(url string)`, and `Post(url, contentType, body string)`
+methods, all returning `Result<Response>`.
+
+Request fields: Method, URL, Header, Body. Response fields: Status, StatusCode,
+Header, Body. Bodies are owned strings; no Close call is needed. Non-2xx status
+codes are normal responses. Header supports Set/Add/Get/Values/Del, with case
+insensitive names. Get returns the first value or ""; Values returns an owned
+string array. Header's zero value works.
+
+Client.MaxResponseBytes defaults to a 16 MiB wire-response limit when nonpositive;
+positive values override it. Headers have a 64 KiB limit. Supports DNS/IPv4,
+explicit ports, custom methods, request bodies, content-length, close-delimited
+and chunked responses/trailers, HEAD, no-body statuses, and up to 16 informational
+responses. Framing headers (Host, Connection, Content-Length, Transfer-Encoding)
+are client-controlled. URL paths must already be escaped; fragments are removed.
+HTTPS, IPv6 URL literals, redirects, proxies, compression, cookies, connection
+reuse, servers, cancellation, and timeouts are not implemented. Calls may block.
+
+```ocean
+import "net/http";
+request := http.NewRequest("POST", "http://localhost:8080/items", "hello").unwrap();
+request.Header.Set("Content-Type", "text/plain");
+client: http.Client;
+response := client.Do(request).unwrap();
+body := response.Body;
+```
+
+### os/exec
+
+The initial backend is Linux x86-64, using POSIX spawn and direct argument
+passing. `exec.Command(name string, args ...string) Cmd` constructs a command;
+no shell is inserted. `LookPath(name string) Result<string>` checks explicit
+paths or searches PATH, rejecting implicit relative PATH results.
+
+Cmd fields: Path, Args (excluding argv[0]), Dir, Env, ExitCode. Empty Dir/Env
+inherit the parent directory/environment. A nonempty Env replaces the child
+environment with KEY=value entries; empty Env cannot request an empty environment.
+Run() Result<int> inherits standard streams and returns zero on success.
+Output() Result<string> captures stdout and inherits stderr.
+CombinedOutput() Result<string> captures both streams in write order.
+Each Cmd can execute once. Nonzero/signal exits, NUL-containing inputs, spawn,
+wait, and capture errors return errors. ExitCode is -1 before completion or on
+a signal, otherwise the child exit code. Output errors do not carry partial
+output. Temporary-file capture avoids pipe-buffer deadlocks; files/actions are
+released and interrupted waits retried. Capture is unbounded. No Start/Wait,
+pipes, configurable standard streams, timeout, cancellation, or Windows/macOS
+backend is implemented.
+
+```ocean
+import "os/exec";
+command := exec.Command("printf", "%s", "hello world");
+output := command.Output().unwrap();
+```
+
+Run `ocean test encoding/json net/http os/exec io` or `ocean test ./...` from the
+standard-library root. HTTP integration tests need local loopback socket access;
+no external network is used. Process tests use local Unix tools.
+
+At native C boundaries, use `zero(*void)` (or an appropriate zero-address pointer)
+for a C NULL argument. Ocean's explicit `null` is a distinct sentinel and must
+not be passed as C NULL. Compare native pointer results numerically with zero,
+for example `(handle -> int) == 0`, rather than with explicit `null`.
+
 ## Unit tests
 
 Run `ocean test [location]` to compile and execute a package's tests. A location

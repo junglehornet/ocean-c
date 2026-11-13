@@ -865,7 +865,7 @@ static Local *rewriteStmt(Rewrite *r, Local *scope, stmt *s, int top) {
         else scope = bindLocal(r, scope, v->name);
         Local *inner = scope;
         for (size_t i = 0; i < v->nTypeParams; i++) inner = bindLocal(r, inner, v->typeParamNames[i]);
-        for (size_t i = 0; i < v->nFields; i++) inner = bindLocal(r, inner, v->fieldNames[i]);
+        for (size_t i = 0; i < v->nVarParams; i++) inner = bindLocal(r, inner, v->fieldNames[i]);
         for (size_t i = 0; i < v->nTypeParams; i++) rewriteType(r, inner, &v->typeParamConstraints[i]);
         for (size_t i = 0; i < v->nFields; i++) rewriteType(r, inner, &v->fieldTypes[i]);
         break;

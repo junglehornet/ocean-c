@@ -45,6 +45,7 @@ typedef struct {
     int ownedBox; // A map bucket owns its box outside lexical temporary regions.
     int closureCell; // Shared capture storage, owned by the closure runtime.
     int throughPointer;
+    int homogeneousDynamic;
     const char *homogeneousArray; // Indexed writes retain the array element identity.
     Kind elementRequirement;
     Kind backingKind; // A .data argument retains its source through a deferred call.
@@ -616,7 +617,7 @@ static Kind stringKind(Backend *b) {
 // Variadic packs may contain different types; ordinary any[] arrays may not.
 static Kind mixedArrayKind(Backend *b) {
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->ir && v->shape == 4 && v->count == 1 && !v->requirement && v->element == SCALAR_ANY) return v->kind;
+        if (!v->definition && !v->dynamicArray && v->ir && v->shape == 4 && v->count == 1 && !v->requirement && v->element == SCALAR_ANY) return v->kind;
     BufferKind *base = bufferKind(b, arrayValueKind(b, SCALAR_ANY));
     BufferKind *v = checked(sizeof(*v));
     *v = *base;
@@ -630,11 +631,26 @@ static Kind mixedArrayKind(Backend *b) {
 static Kind constrainedArrayKind(Backend *b, Kind requirement, int mixed) {
     if (requirement == SCALAR_ANY) return mixed ? mixedArrayKind(b) : arrayValueKind(b, SCALAR_ANY);
     for (BufferKind *v = b->buffers; v; v = v->next)
-        if (!v->definition && v->ir && v->shape == 4 && v->count == (size_t)mixed && v->requirement == requirement) return v->kind;
+        if (!v->definition && !v->dynamicArray && v->ir && v->shape == 4 && v->count == (size_t)mixed && v->requirement == requirement) return v->kind;
     BufferKind *base = bufferKind(b, arrayValueKind(b, SCALAR_ANY));
     BufferKind *v = checked(sizeof(*v)); *v = *base;
     v->kind = (Kind)(BUFFER + b->nBuffers++); v->count = mixed; v->requirement = requirement;
     v->ir = strdup(base->ir); v->layout = strdup(base->layout);
+    v->zeroOperand = NULL; v->emptyEmitted = 0;
+    v->next = b->buffers; b->buffers = v;
+    return v->kind;
+}
+// Mutable interface arrays share constraints with variadic views, but own a
+// dynamic header and expose the ordinary mutation methods.
+static Kind dynamicConstrainedArrayKind(Backend *b, Kind requirement, int mixed) {
+    for (BufferKind *v = b->buffers; v; v = v->next)
+        if (!v->definition && v->dynamicArray && !v->map && !v->immutableString &&
+            v->element == SCALAR_ANY && v->requirement == (requirement == SCALAR_ANY ? VOID : requirement) && v->count == (size_t)mixed)
+            return v->kind;
+    Kind base = constrainedArrayKind(b, requirement, mixed);
+    BufferKind *v = checked(sizeof(*v)); *v = *bufferKind(b, base);
+    v->kind = (Kind)(BUFFER + b->nBuffers++); v->dynamicArray = 1;
+    v->ir = strdup(v->ir); v->layout = strdup("{ i64, i64, ptr }");
     v->zeroOperand = NULL; v->emptyEmitted = 0;
     v->next = b->buffers; b->buffers = v;
     return v->kind;
@@ -706,6 +722,7 @@ static Kind pointerKind(Backend *b, Kind element) {
     return v->kind;
 }
 static int validateLayout(Backend *, BufferKind *);
+static int validateOwnership(Backend *, Kind, Kind *, unsigned);
 static Kind recordFieldKind(Backend *b, typeTokens span) {
     typeTokens element, dimension;
     if (sizedArrayTypeParts(span, &element, &dimension)) {
@@ -760,7 +777,11 @@ static Kind recordKind(Backend *b, struct stmt_struct *record, Kind *arguments, 
     b->recordDepth--;
     b->typeBindings = previous;
     free(bindings);
-    if (!b->recordDepth && !validateLayout(b, v)) return BAD;
+    if (!b->recordDepth) {
+        Kind path[64];
+        if (!validateLayout(b, v)) return BAD;
+        if (!validateOwnership(b, v->kind, path, 0)) return v->kind;
+    }
     return v->kind;
 }
 // Constraint patterns are separate from storage layouts. A family pattern retains
@@ -1056,7 +1077,7 @@ static Kind type(Backend *b, typeTokens t) {
     if (arrayElementType(t, &arrayElement)) {
         Kind element = type(b, arrayElement);
         if (t.tokens[0].type == MIXED || element == SCALAR_ANY)
-            return constrainedArrayKind(b, constraintKind(b, arrayElement), t.tokens[0].type == MIXED);
+            return dynamicConstrainedArrayKind(b, constraintKind(b, arrayElement), t.tokens[0].type == MIXED);
         return dynamicArrayKind(b, element);
     }
     typeTokens unsizedElement;
@@ -1671,17 +1692,17 @@ static void store(Backend *b, Value address, Value v) {
         v = coerce(b, v, address.kind);
     if (address.kind == SCALAR_ANY) v = coerce(b, v, SCALAR_ANY);
     if (address.elementRequirement) checkElementRequirement(b, v, address.elementRequirement);
+    if (address.homogeneousArray) {
+        b->homogeneousUsed = 1;
+        fprintf(b->body, "  call void @__ocean.%s.check_write(ptr %s, { ptr, i64 } %s)\n",
+                address.homogeneousDynamic ? "array.dynamic" : "array", address.homogeneousArray, v.operand);
+    }
     if (address.ownedBox) {
         int previous = b->copyTransport; b->copyTransport = 1;
         Value replacement = copyValue(b, v, 0);
         b->copyTransport = 3; copyValue(b, load(b, address), 0);
         b->copyTransport = previous;
         rawStore(b, address, replacement); return;
-    }
-    if (address.homogeneousArray) {
-        b->homogeneousUsed = 1;
-        fprintf(b->body, "  call void @__ocean.array.check_write(ptr %s, { ptr, i64 } %s)\n",
-                address.homogeneousArray, v.operand);
     }
     if (targetArray && targetArray->dynamicArray && v.kind == address.kind) {
         Value replacement = copyValue(b, v, 0);
@@ -1814,7 +1835,7 @@ static Value boxScalar(Backend *b, Value v, int promote) {
     if (v.kind == NULL_VALUE) v = value(b, RAW_POINTER, "@__ocean.null");
     BufferKind *t = bufferKind(b, v.kind);
     Value metadata = anyMetadata(b, identity == NULL_VALUE ? RAW_POINTER : identity);
-    if (t && (t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
+    if (t && (t->shape == 2 || t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
         Value address = slot(b, v.kind), result = temp(b, SCALAR_ANY);
         rawStore(b, address, v);
         fprintf(b->body, "  %s = call { ptr, i64 } @__ocean.any.box.%u(ptr %s)\n",
@@ -1854,7 +1875,7 @@ static Value unboxMatched(Backend *b, Value box, Kind kind) {
     Value storage = slot(b, INT);
     rawStore(b, storage, bits);
     BufferKind *t = bufferKind(b, kind);
-    if (t && (t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
+    if (t && (t->shape == 2 || t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
         Value result = temp(b, kind);
         fprintf(b->body, "  %s = call %s @__ocean.any.unbox.%u(i64 %s)\n",
                 result.operand, irType(b, kind), (unsigned)kind, bits.operand);
@@ -1917,10 +1938,13 @@ static Value coerce(Backend *b, Value v, Kind expected) {
         target->element == source->element && (target->dynamicArray != source->dynamicArray || target->immutableString != source->immutableString))
         return collectionCopy(b, v, expected);
     if (target && source && target->shape == 4 && source->shape == 4 && target->element == SCALAR_ANY) {
-        if (source->element != SCALAR_ANY) v = boxArray(b, v);
-        if (!target->count) {
+        if (source->element != SCALAR_ANY) {
+            v = boxArray(b, v);
+            if (target->dynamicArray) v = collectionCopy(b, v, expected);
+        }
+        if (!target->count && !target->fixedArray) {
             b->homogeneousUsed = 1;
-            fprintf(b->body, "  call void @__ocean.array.check(ptr %s)\n", v.operand);
+            fprintf(b->body, "  call void @__ocean.%s.check(ptr %s)\n", bufferKind(b, v.kind)->dynamicArray ? "array.dynamic" : "array", v.operand);
         }
         v.kind = expected;
         checkArrayRequirement(b, v, target->requirement);
@@ -2442,6 +2466,7 @@ static void releaseScopeValues(Backend *b) {
             }
 }
 static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
+    if (b->errors) return;
     if (depth >= 32) { fail(b, "nested dynamic array ownership is too deep"); return; }
     BufferKind *t = bufferKind(b, item.kind);
     if (!t) return;
@@ -2499,7 +2524,11 @@ static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
         Value i = load(b, cursor), more = temp(b, BOOL);
         fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
         branch(b, more, body, done); label(b, body);
-        dropNestedDynamicArrays(b, load(b, elementAddress(b, dynamicArray, i)), 0);
+        Value item = load(b, elementAddress(b, dynamicArray, i));
+        if (representationKind(b, type->element) == SCALAR_ANY) {
+            int previous = b->copyTransport; b->copyTransport = 3;
+            copyValue(b, item, 0); b->copyTransport = previous;
+        } else dropNestedDynamicArrays(b, item, 0);
         Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
         rawStore(b, cursor, next); jump(b, condition); label(b, done);
     }
@@ -2532,6 +2561,7 @@ static Value arrayHeaderSize(Backend *b, Kind kind) {
 static Value elementAddress(Backend *b, Value array, Value index) {
     BufferKind *t = bufferKind(b, array.kind);
     Value data = arrayData(b, array), result = temp(b, t->element);
+    result.ownedBox = t->dynamicArray && t->element == SCALAR_ANY;
     result.owner = array.owner;
     result.throughPointer = array.throughPointer;
     fprintf(b->body, "  %s = getelementptr %s, ptr %s, i64 %s\n", result.operand,
@@ -2539,6 +2569,7 @@ static Value elementAddress(Backend *b, Value array, Value index) {
     return result;
 }
 static Value copyValue(Backend *b, Value source, unsigned depth) {
+    if (b->errors) return source;
     if (!ownsArrays(b, source.kind))
         return source;
     if (depth >= 32) {
@@ -3056,16 +3087,17 @@ static Value boxArray(Backend *b, Value source) {
 
 static Value unboxArrayView(Backend *b, Value box, Kind kind) {
     b->arrayViewUsed = b->anyUsed = 1;
-    Value heap = temp(b, kind);
+    Value heap = temp(b, arrayValueKind(b, SCALAR_ANY));
     fprintf(b->body, "  %s = call ptr @__ocean.any.array({ ptr, i64 } %s)\n", heap.operand, box.operand);
     int previous = b->copyTransport;
     b->copyTransport = 2;
     Value result = copyValue(b, heap, 0);
     b->copyTransport = previous;
+    result = coerce(b, result, kind);
     BufferKind *target = bufferKind(b, kind);
     if (!target->count && !target->fixedArray) {
         b->homogeneousUsed = 1;
-        fprintf(b->body, "  call void @__ocean.array.check(ptr %s)\n", result.operand);
+        fprintf(b->body, "  call void @__ocean.%s.check(ptr %s)\n", bufferKind(b, result.kind)->dynamicArray ? "array.dynamic" : "array", result.operand);
     }
     checkArrayRequirement(b, result, target->requirement);
     return result;
@@ -3255,7 +3287,7 @@ static void copyArrayLiteral(Backend *b, Value array, struct expr_composite *lit
     checkArrayRequirement(b, array, t->requirement);
     if (t->element == SCALAR_ANY && !t->count) {
         b->homogeneousUsed = 1;
-        fprintf(b->body, "  call void @__ocean.array.check(ptr %s)\n", array.operand);
+        fprintf(b->body, "  call void @__ocean.%s.check(ptr %s)\n", bufferKind(b, array.kind)->dynamicArray ? "array.dynamic" : "array", array.operand);
     }
 }
 static Value assignArrayData(Backend *b, Value array, expr *source, token location) {
@@ -3299,7 +3331,7 @@ static Value assignArrayData(Backend *b, Value array, expr *source, token locati
     }
     if (t->element == SCALAR_ANY && !t->count) {
         b->homogeneousUsed = 1;
-        fprintf(b->body, "  call void @__ocean.array.check(ptr %s)\n", array.operand);
+        fprintf(b->body, "  call void @__ocean.%s.check(ptr %s)\n", bufferKind(b, array.kind)->dynamicArray ? "array.dynamic" : "array", array.operand);
     }
     checkArrayRequirement(b, array, t->requirement);
     return arrayData(b, array);
@@ -3413,6 +3445,7 @@ static Value address(Backend *b, expr *e) {
         }
         index = convert(b, index, INT);
         Value result = temp(b, t->element);
+        result.ownedBox = t->dynamicArray && t->element == SCALAR_ANY;
         result.owner = base.owner;
         result.throughPointer = base.throughPointer;
         // Raw buffers stay unchecked; arrays use their current byte-size header.
@@ -3426,7 +3459,7 @@ static Value address(Backend *b, expr *e) {
             }
             if (t->shape == 4) {
                 checkArrayIndex(b, pointer, index, v->location);
-                if (t->element == SCALAR_ANY && !t->count) result.homogeneousArray = pointer.operand;
+                if (t->element == SCALAR_ANY && !t->count) { result.homogeneousArray = pointer.operand; result.homogeneousDynamic = t->dynamicArray; }
                 result.elementRequirement = t->requirement;
                 pointer = arrayData(b, pointer);
             }
@@ -3538,6 +3571,11 @@ static Value mutateDynamicArray(Backend *b, struct expr_dot *dot, struct expr_ca
         next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
         rawStore(b, cursor, next); jump(b, condition); label(b, end);
     }
+    checkArrayRequirement(b, result, t->requirement);
+    if (t->element == SCALAR_ANY && !t->count) {
+        b->homogeneousUsed = 1;
+        fprintf(b->body, "  call void @__ocean.array.dynamic.check(ptr %s)\n", result.operand);
+    }
     free(items);
     if (snapshot) dropDynamicArrayPayload(b, source);
     escapeDynamicArrays(b, result);
@@ -3597,7 +3635,7 @@ static Value addArrayValues(Backend *b, Value left, Value right, Kind resultKind
     checkArrayRequirement(b, result, resultType->requirement);
     if (resultType->element == SCALAR_ANY && !resultType->count) {
         b->homogeneousUsed = 1;
-        fprintf(b->body, "  call void @__ocean.array.check(ptr %s)\n", result.operand);
+        fprintf(b->body, "  call void @__ocean.%s.check(ptr %s)\n", bufferKind(b, result.kind)->dynamicArray ? "array.dynamic" : "array", result.operand);
     }
     return result;
 }
@@ -5779,6 +5817,24 @@ static void emitBoundsRuntime(Backend *b) {
             "%%line, i64 %%column, ptr %%snippet)\n  unreachable\n}\n",
             message.operand, literalMessage.operand);
 }
+// Owning recursion needs runtime copy/drop helpers. Reject it before inlining
+// ownership operations, whose per-call depth used to reset at collection stores.
+static int validateOwnership(Backend *b, Kind kind, Kind *path, unsigned depth) {
+    BufferKind *t = bufferKind(b, kind);
+    if (!t || t->shape == 6 || t->shape == 3 || t->shape == 17) return 1;
+    for (unsigned i = 0; i < depth; i++) if (path[i] == kind) {
+        fail(b, "recursive array-value layouts are unsupported; use explicit pointers for recursive ownership");
+        return 0;
+    }
+    if (depth >= 64) { fail(b, "array-value ownership nesting is too deep"); return 0; }
+    path[depth++] = kind;
+    if (t->definition) return validateOwnership(b, t->underlying, path, depth);
+    if (t->shape == 4 || !t->shape) return validateOwnership(b, t->element, path, depth);
+    if (t->shape == 2 || t->shape == 5)
+        for (size_t i = 0; i < t->count; i++)
+            if (!validateOwnership(b, t->members[i], path, depth)) return 0;
+    return 1;
+}
 static int validateLayout(Backend *b, BufferKind *t) {
     if (t && t->definition) {
         BufferKind *underlying = bufferKind(b, t->underlying);
@@ -6138,7 +6194,7 @@ static void emitInterfaceDispatch(Backend *b, FILE *out) {
 static void emitAnyType(Backend *b, Kind kind) {
     BufferKind *t = bufferKind(b, kind);
     Value metadata = anyMetadata(b, kind);
-    int aggregate = t && (t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, kind) == SCALAR_ANY));
+    int aggregate = t && (t->shape == 2 || t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, kind) == SCALAR_ANY));
     if (!aggregate) {
         b->ffiUsed = 1;
         fprintf(b->out, "%s = private constant { ptr, ptr, ptr } { ptr %s, ptr null, ptr null }\n",
@@ -6446,6 +6502,8 @@ static void emitArrayView(Backend *b) {
             fprintf(b->body, "  %s = call %s @__ocean.any.unbox.%u(i64 %s)\n", source.operand, t->ir, (unsigned)kind, bits.operand);
         else fprintf(b->body, "  %s = inttoptr i64 %s to ptr\n", source.operand, bits.operand);
         Value view = t->element == SCALAR_ANY && t->shape == 4 ? source : boxArray(b, source);
+        if (t->dynamicArray && t->element == SCALAR_ANY)
+            view = collectionCopy(b, source, arrayValueKind(b, SCALAR_ANY));
         int previous = b->copyTransport;
         b->copyTransport = 1;
         Value heap = copyValue(b, view, 0);
@@ -6489,6 +6547,33 @@ static void emitHomogeneousRuntime(Backend *b) {
         "body:\n  %slot = getelementptr { ptr, i64 }, ptr %data, i64 %i\n"
         "  %value = load { ptr, i64 }, ptr %slot\n"
         "  call void @__ocean.array.check_write(ptr %array, { ptr, i64 } %value)\n"
+        "  %next = add i64 %i, 1\n  br label %loop\n"
+        "done:\n  ret void\n}\n", b->out);
+    fputs(
+        "define internal void @__ocean.array.dynamic.check_write(ptr %array, { ptr, i64 } %value) {\n"
+        "entry:\n  %bytes = load i64, ptr %array\n"
+        "  %empty = icmp eq i64 %bytes, 0\n"
+        "  br i1 %empty, label %done, label %check\n"
+        "check:\n  %field = getelementptr { i64, i64, ptr }, ptr %array, i32 0, i32 2\n"
+        "  %first = load ptr, ptr %field\n"
+        "  %expected = load ptr, ptr %first\n"
+        "  %actual = extractvalue { ptr, i64 } %value, 0\n"
+        "  %same = icmp eq ptr %expected, %actual\n"
+        "  br i1 %same, label %done, label %bad\n"
+        "bad:\n  call void @llvm.trap()\n  unreachable\n"
+        "done:\n  ret void\n}\n"
+        "define internal void @__ocean.array.dynamic.check(ptr %array) {\n"
+        "entry:\n  %bytes = load i64, ptr %array\n"
+        "  %count = add i64 %bytes, 0\n"
+        "  %field = getelementptr { i64, i64, ptr }, ptr %array, i32 0, i32 2\n"
+        "  %data = load ptr, ptr %field\n"
+        "  br label %loop\n"
+        "loop:\n  %i = phi i64 [ 1, %entry ], [ %next, %body ]\n"
+        "  %more = icmp slt i64 %i, %count\n"
+        "  br i1 %more, label %body, label %done\n"
+        "body:\n  %slot = getelementptr { ptr, i64 }, ptr %data, i64 %i\n"
+        "  %value = load { ptr, i64 }, ptr %slot\n"
+        "  call void @__ocean.array.dynamic.check_write(ptr %array, { ptr, i64 } %value)\n"
         "  %next = add i64 %i, 1\n  br label %loop\n"
         "done:\n  ret void\n}\n", b->out);
 }
@@ -6715,6 +6800,7 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
         if (s->type == STMT_STRUCT && !((struct stmt_struct *)s->value)->nTypeParams)
             recordKind(&b, s->value, NULL, 0);
     }
+    if (b.errors) { fclose(functions); goto cleanup; }
     b.globalOutput = output;
     emitGlobals(&b, output);
     if (!program->isLibrary) {
@@ -6902,6 +6988,7 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     if (fflush(output) || ferror(output))
         fail(&b, "could not write LLVM IR");
     if (units && !b.errors) finishNativeModules(&b, output);
+cleanup:
     if (units) {
         for (size_t i = 1; i < units->count; i++) fclose(b.packageBodies[i]);
         free(b.packageBodies);

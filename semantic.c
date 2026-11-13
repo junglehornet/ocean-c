@@ -2919,15 +2919,17 @@ static void statement(Context *c, stmt *s) {
             declare(c, v->typeParamNames[i], bound, 1);
         }
         c->declaringMembers++; c->memberOwner=v->name;
+        Type **fieldTypes = allocate(c, sizeof(*fieldTypes) * (v->nFields + 1));
+        for (size_t i = 0; i < v->nFields; i++) fieldTypes[i] = typeOf(c, v->fieldTypes[i]);
         for (size_t i = 0; i < v->nFields; i++) {
-            Type *fieldType = typeOf(c, v->fieldTypes[i]);
+            Type *fieldType = fieldTypes[i];
             if (fieldType == &nothing) error(c, v->fieldNames[i], "void is not a field storage type");
             Symbol *field = declare(c, v->fieldNames[i], fieldType, 0);
             if (field)
                 field->immutable = i < v->nVarParams;
         }
         for (size_t i = 0; i < v->nFields; i++)
-            checkBufferDimension(c, typeOf(c, v->fieldTypes[i]), v->fieldNames[i]);
+            checkBufferDimension(c, fieldTypes[i], v->fieldNames[i]);
         c->declaringMembers--; c->memberOwner=(token){0};
         c->scope = scope.parent;
         break;

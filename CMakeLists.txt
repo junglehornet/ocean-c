@@ -289,3 +289,9 @@ if(BUILD_TESTING)
         set_tests_properties(wasm_backend_test PROPERTIES TIMEOUT 120)
     endif()
 endif()
+
+if(BUILD_TESTING AND OCEAN_CLANG_EXECUTABLE)
+    add_test(NAME library_containers_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/library_containers_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(library_containers_test PROPERTIES TIMEOUT 120)
+endif()
