@@ -196,7 +196,8 @@ static Value stringComparison(Backend *b, enum binaryExprType op, Value left, Va
     unsigned compare = ++b->label, done = ++b->label;
     branch(b, present, compare, done); label(b, compare);
     Value dataLeft = arrayData(b, left), dataRight = arrayData(b, right), difference = temp(b, I32);
-    fprintf(b->body, "  %s = call i32 @\"\\01memcmp\"(ptr %s, ptr %s, i64 %s)\n", difference.operand, dataLeft.operand, dataRight.operand, count.operand);
+    fprintf(b->body, "  %s = call i32 %s(ptr %s, ptr %s, i64 %s)\n",
+        difference.operand, libcSymbol(b, "memcmp"), dataLeft.operand, dataRight.operand, count.operand);
     rawStore(b, compared, difference); jump(b, done); label(b, done);
     Value comparison = load(b, compared), prefixSame = temp(b, BOOL), prefixResult = temp(b, BOOL), lengthResult = temp(b, BOOL), result = temp(b, BOOL);
     const char *prefix = op == EXPR_EQUALITY ? "eq" : op == EXPR_NOT_EQUALS ? "ne" : op == EXPR_LESS_THAN ? "slt" : op == EXPR_GREATER_THAN ? "sgt" : op == EXPR_LESS_EQUALS ? "sle" : "sge";

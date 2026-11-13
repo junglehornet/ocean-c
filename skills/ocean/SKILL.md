@@ -115,6 +115,10 @@ package and a shared support module for globals, startup, concrete specializatio
 and runtime helpers. Native-module symbol serialization uses an in-memory
 buffer on all hosts, including Windows; it does not create a temporary file for
 each LLVM line.
+Compiler runtime libc imports preserve each target's symbol spelling: Mach-O
+imports have a leading underscore, while ELF, Win64 COFF, and Wasm do not.
+The embedded process runtime enables Darwin extensions for spawn working-directory support.
+
 Each source package compiles all its ordinary functions, so the same cached object
 can serve callers using different functions. Executable linking removes unreachable
 functions and data using function/data sections (`--gc-sections`, or `-dead_strip`

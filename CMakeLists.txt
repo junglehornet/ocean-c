@@ -195,6 +195,10 @@ if(BUILD_TESTING)
     if(UNIX)
         target_link_libraries(asm_backend_probe PRIVATE m)
     endif()
+    add_test(NAME libc_symbol_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/libc_symbol_test.py"
+        "$<TARGET_FILE:asm_backend_probe>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(libc_symbol_test PROPERTIES TIMEOUT 60)
     add_test(NAME standard_library_asm_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/standard_library_asm_test.py"
         "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE:asm_backend_probe>" "${OCEAN_CLANG_EXECUTABLE}")

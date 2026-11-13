@@ -1,4 +1,5 @@
 /* Compiler-owned C ABI for os/exec. No shell is inserted on either platform. */
+#define _DARWIN_C_SOURCE
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <stdint.h>

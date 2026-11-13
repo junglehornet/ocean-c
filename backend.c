@@ -378,6 +378,18 @@ static Value value(Backend *b, Kind k, const char *fmt, ...) {
     va_end(args);
     return (Value){.kind = k, .operand = ownOperand(b, text)};
 }
+// LLVM's \01 escape suppresses target mangling while keeping runtime imports
+// distinct from user FFI declarations. Mach-O therefore needs an explicit '_'.
+static const char *libcSymbolForTarget(Backend *b, const char *name, int darwin) {
+    return value(b, RAW_POINTER, "@\"\\01%s%s\"", darwin ? "_" : "", name).operand;
+}
+static const char *libcSymbol(Backend *b, const char *name) {
+#ifdef __APPLE__
+    return libcSymbolForTarget(b, name, !backendWasm());
+#else
+    return libcSymbolForTarget(b, name, 0);
+#endif
+}
 static void nativeName(Backend *, const char *, const char *);
 static const char *nativeKindIdentity(Backend *, Kind);
 static void nativeDeferredIdentity(Backend *, unsigned);
@@ -2111,10 +2123,12 @@ static Value allocateCollection(Backend *b, Kind kind, Value count) {
     Value result = temp(b, kind), data = temp(b, RAW_POINTER);
     b->returnTransportUsed = 1;
     Value base = temp(b, RAW_POINTER);
-    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 32)\n", base.operand);
+    fprintf(b->body, "  %s = call ptr %s(i64 32)\n",
+        base.operand, libcSymbol(b, "malloc"));
     rawStore(b, base, value(b, RAW_POINTER, "inttoptr (i64 1 to ptr)"));
     fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 8\n", result.operand, base.operand);
-    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", data.operand, bytes.operand);
+    fprintf(b->body, "  %s = call ptr %s(i64 %s)\n",
+        data.operand, libcSymbol(b, "malloc"), bytes.operand);
     rawStore(b, value(b, INT, "%s", result.operand), count);
     Value cap = temp(b, INT), field = temp(b, RAW_POINTER);
     fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 1\n", cap.operand, result.operand);
@@ -2555,10 +2569,12 @@ static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
         rawStore(b, cursor, next); jump(b, condition); label(b, done);
     }
     Value data = arrayData(b, dynamicArray);
-    fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", data.operand);
+    fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), data.operand);
     Value base = temp(b, RAW_POINTER);
     fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", base.operand, dynamicArray.operand);
-    fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", base.operand);
+    fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), base.operand);
     jump(b, end); label(b, end);
 }
 static Value arrayBytes(Backend *b, Value array) {
@@ -2636,7 +2652,8 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
         if (b->copyTransport == 3) result = source;
         else if (b->copyTransport == 1) {
             b->returnTransportUsed = 1;
-            fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", base.operand, allocationSize.operand);
+            fprintf(b->body, "  %s = call ptr %s(i64 %s)\n",
+        base.operand, libcSymbol(b, "malloc"), allocationSize.operand);
             Value present = temp(b, BOOL);
             fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, base.operand);
             unsigned good = ++b->label, bad = ++b->label;
@@ -2686,7 +2703,8 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
             detachDynamicArrayTemporary(b, source);
             Value base = temp(b, RAW_POINTER);
             fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", base.operand, source.operand);
-            fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", base.operand);
+            fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), base.operand);
         }
         if (b->copyTransport != 3) trackDynamicArrays(b, result);
         return result;
@@ -4083,7 +4101,8 @@ static Value expressionImpl(Backend *b, expr *e) {
         fprintf(b->body, "  %s = icmp ne i64 %s, 0\n", nonempty.operand, size.operand);
         fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 1\n", bytes.operand, nonempty.operand, size.operand);
         b->newUsed = 1;
-        fprintf(b->body, "  %s = call ptr @\"\\01calloc\"(i64 1, i64 %s)\n", result.operand, bytes.operand);
+        fprintf(b->body, "  %s = call ptr %s(i64 1, i64 %s)\n",
+        result.operand, libcSymbol(b, "calloc"), bytes.operand);
         Value present = temp(b, BOOL);
         fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, result.operand);
         unsigned good = ++b->label, bad = ++b->label;
@@ -4481,7 +4500,8 @@ static Value expressionImpl(Backend *b, expr *e) {
                 if (addressable(&v->params[0])) rawStore(b, address(b, &v->params[0]), emptyValue(b, item.kind));
             } else {
                 if (t && t->shape == 6) dropNestedDynamicArrays(b, load(b, value(b, t->element, "%s", item.operand)), 0);
-                fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", item.operand);
+                fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), item.operand);
             }
             return value(b, VOID, "");
         }
@@ -5804,12 +5824,11 @@ static void emitBoundsRuntime(Backend *b) {
         "  call void @__ocean.panic_report(ptr %%m, i64 %%n, ptr %%f, i64 %%l, i64 %%c, ptr %%s)\n  unreachable\n}\n");
     Value panicPrefix = moduleString(b, "Panic: ");
     Value panicLocation = moduleString(b, "\n  --> %s:%lld:%lld\n");
-    fprintf(b->out,
-            "declare i64 @\"\\01write\"(i32, ptr, i64)\n"
+    fprintf(b->out, "declare i64 %s(i32, ptr, i64)\n"
             "define internal void @__ocean.panic_report(ptr %%message, i64 %%size, ptr %%file, i64 %%line, "
             "i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
-            "  call i64 @\"\\01write\"(i32 2, ptr %s, i64 7)\n"
-            "  call i64 @\"\\01write\"(i32 2, ptr %%message, i64 %%size)\n"
+            "  call i64 %s(i32 2, ptr %s, i64 7)\n"
+            "  call i64 %s(i32 2, ptr %%message, i64 %%size)\n"
             "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %s, ptr %%file, i64 %%line, i64 %%column)\n"
             "  call void @__ocean.runtime_diagnostic(ptr %%file, i64 %%line, i64 %%column, ptr %%snippet)\n"
             "  unreachable\n}\n"
@@ -5818,7 +5837,8 @@ static void emitBoundsRuntime(Backend *b) {
             "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %%format, i64 %%index, i64 %%length, "
             "ptr %%file, i64 %%line, i64 %%column)\n"
             "  call void @__ocean.runtime_diagnostic(ptr %%file, i64 %%line, i64 %%column, ptr %%snippet)\n"
-            "  unreachable\n}\n", panicPrefix.operand, printName, panicLocation.operand, printName);
+            "  unreachable\n}\n",
+        libcSymbol(b, "write"), libcSymbol(b, "write"), panicPrefix.operand, libcSymbol(b, "write"), printName, panicLocation.operand, printName);
     fprintf(b->out,
             "define internal void @__ocean.return_panic(ptr %%message, i64 %%size, ptr %%file, "
             "i64 %%line, i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
@@ -5977,7 +5997,8 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         fprintf(b->slots, "  %s = alloca [%zu x i8], align %zu\n", buffer.operand, sizeof(jmp_buf), (size_t)_Alignof(jmp_buf));
         fprintf(b->body, "  %s = getelementptr %%__ocean.defer_frame, ptr %s, i32 0, i32 3\n", environment.operand, b->deferFrame.operand);
         fprintf(b->body, "  store ptr %s, ptr %s\n", buffer.operand, environment.operand);
-        fprintf(b->body, "  %s = call i32 @\"\\01%s\"(ptr %s%s)\n", resumed.operand, deferSetjmpName(), buffer.operand, deferSetjmpArguments());
+        fprintf(b->body, "  %s = call i32 %s(ptr %s%s)\n",
+        resumed.operand, libcSymbol(b, deferSetjmpName()), buffer.operand, deferSetjmpArguments());
         fprintf(b->body, "  %s = icmp ne i32 %s, 0\n", recovering.operand, resumed.operand);
         recoverLabel = ++b->label;
         unsigned startLabel = ++b->label;
@@ -6278,7 +6299,8 @@ static void emitAnyType(Backend *b, Kind kind) {
             if (t->shape == 4) pointer = copied;
             else {
                 pointer = temp(b, RAW_POINTER);
-                fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", pointer.operand, size.operand);
+                fprintf(b->body, "  %s = call ptr %s(i64 %s)\n",
+        pointer.operand, libcSymbol(b, "malloc"), size.operand);
                 Value present = temp(b, BOOL);
                 fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, pointer.operand);
                 unsigned good = ++b->label, bad = ++b->label;
@@ -6329,7 +6351,8 @@ static void emitAnyType(Backend *b, Kind kind) {
             Value source = t->shape == 4 ? value(b, kind, "%s", pointer.operand)
                                        : load(b, value(b, kind, "%s", pointer.operand));
             copyValue(b, source, 0);
-            if (t->shape != 4) fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", pointer.operand);
+            if (t->shape != 4) fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), pointer.operand);
             jump(b, done); label(b, done); fprintf(b->body, "  ret void\n");
         }
         copy(b->slots, b->out); copy(b->body, b->out); fprintf(b->out, "}\n");
@@ -6673,8 +6696,9 @@ static void emitAnyRuntime(Backend *b) {
         "  %drop = load ptr, ptr %slot\n"
         "  %owned = icmp ne ptr %drop, null\n"
         "  br i1 %owned, label %allocate, label %done\n"
-        "allocate:\n"
-        "  %node = call ptr @\"\\01malloc\"(i64 ptrtoint (ptr getelementptr ({ ptr, { ptr, i64 } }, ptr null, i64 1) to i64))\n"
+        "allocate:\n", b->out);
+    fprintf(b->out, "  %%node = call ptr %s(i64 ptrtoint (ptr getelementptr ({ ptr, { ptr, i64 } }, ptr null, i64 1) to i64))\n", libcSymbol(b, "malloc"));
+    fputs(
         "  %ok = icmp ne ptr %node, null\n"
         "  br i1 %ok, label %link, label %bad\nbad:\n  call void @llvm.trap()\n  unreachable\n"
         "link:\n"
@@ -6692,8 +6716,9 @@ static void emitAnyRuntime(Backend *b) {
         "  %next = load ptr, ptr %node\n"
         "  %value = getelementptr { ptr, { ptr, i64 } }, ptr %node, i32 0, i32 1\n"
         "  %box = load { ptr, i64 }, ptr %value\n"
-        "  call void @__ocean.any.drop({ ptr, i64 } %box)\n"
-        "  call void @\"\\01free\"(ptr %node)\n"
+        "  call void @__ocean.any.drop({ ptr, i64 } %box)\n", b->out);
+    fprintf(b->out, "  call void %s(ptr %%node)\n", libcSymbol(b, "free"));
+    fputs(
         "  br label %check\ndone:\n  store ptr %stop, ptr %region\n  ret void\n}\n", b->out);
 }
 
@@ -7019,16 +7044,19 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     if (copy(functions, output)) fail(&b, "could not write module functions");
     fclose(functions);
     if (b.stringComparisonUsed)
-        fprintf(output, "declare i32 @\"\\01memcmp\"(ptr, ptr, i64)\n");
+        fprintf(output, "declare i32 %s(ptr, ptr, i64)\n",
+        libcSymbol(&b, "memcmp"));
     if (b.dataCopyUsed)
         fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n"
                         "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)\n");
-    if (b.newUsed) fprintf(output, "declare ptr @\"\\01calloc\"(i64, i64)\n");
+    if (b.newUsed) fprintf(output, "declare ptr %s(i64, i64)\n",
+        libcSymbol(&b, "calloc"));
     {
         // Deferred captures and boxed values use libc allocation. Distinct IR
         // names avoid conflicts with user declarations of the same symbols.
-        fprintf(output, "declare ptr @\"\\01malloc\"(i64)\n"
-                        "declare void @\"\\01free\"(ptr)\n");
+        fprintf(output, "declare ptr %s(i64)\n"
+                        "declare void %s(ptr)\n",
+        libcSymbol(&b, "malloc"), libcSymbol(&b, "free"));
     }
     emitFFIRuntime(&b);
     if (b.nullChecksUsed || b.ffiUsed) fprintf(output, "declare void @llvm.trap() cold noreturn nounwind\n");

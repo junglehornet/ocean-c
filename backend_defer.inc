@@ -90,7 +90,8 @@ static void scheduleDefer(Backend *b, struct stmt_func *f, MethodInstance *metho
     for (size_t i = 0; i < count; i++) fprintf(description, ", %s", irType(b, captures[i].kind));
     fputs(" }", description); fclose(description);
     Value capture = temp(b, RAW_POINTER);
-    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64))\n", capture.operand, layout);
+    fprintf(b->body, "  %s = call ptr %s(i64 ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64))\n",
+        capture.operand, libcSymbol(b, "malloc"), layout);
     Value *copies = checked(sizeof(Value) * (count + 1));
     for (size_t remaining = count; remaining > 0; remaining--) {
         size_t i = remaining - 1;
@@ -261,9 +262,9 @@ static const char *deferLongjmpName(void) {
 
 // The native driver and recovery buffers use the compiler host's libc ABI.
 static void emitDeferRuntime(Backend *b) {
-    fprintf(b->out, "declare i32 @\"\\01%s\"(ptr%s) returns_twice\n"
-            "declare void @\"\\01%s\"(ptr, i32) noreturn\n",
-            deferSetjmpName(), *deferSetjmpArguments() ? ", ptr" : "", deferLongjmpName());
+    fprintf(b->out, "declare i32 %s(ptr%s) returns_twice\n"
+            "declare void %s(ptr, i32) noreturn\n",
+        libcSymbol(b, deferSetjmpName()), *deferSetjmpArguments() ? ", ptr" : "", libcSymbol(b, deferLongjmpName()));
     fputs(
         "@__ocean.defer_head = internal thread_local global ptr null\n"
         "@__ocean.recovery_head = internal thread_local global ptr null\n"
@@ -392,7 +393,8 @@ static void emitDeferRuntime(Backend *b) {
         "resume:\n"
         "  %environment = getelementptr %__ocean.defer_frame, ptr %frame, i32 0, i32 3\n"
         "  %buffer = load ptr, ptr %environment\n", b->out);
-    fprintf(b->out, "  call void @\"\\01%s\"(ptr %%buffer, i32 1)\n", deferLongjmpName());
+    fprintf(b->out, "  call void %s(ptr %%buffer, i32 1)\n",
+        libcSymbol(b, deferLongjmpName()));
     fputs(
         "  unreachable\n"
         "next:\n"
@@ -412,8 +414,9 @@ static void emitDeferRuntime(Backend *b) {
         "define internal void @__ocean.dispose_capture(ptr %capture) {\n"
         "  %drop.slot = getelementptr { ptr, ptr, ptr }, ptr %capture, i32 0, i32 2\n"
         "  %drop = load ptr, ptr %drop.slot\n"
-        "  call void %drop(ptr %capture)\n"
-        "  call void @\"\\01free\"(ptr %capture)\n"
+        "  call void %drop(ptr %capture)\n", b->out);
+    fprintf(b->out, "  call void %s(ptr %%capture)\n", libcSymbol(b, "free"));
+    fputs(
         "  ret void\n"
         "}\n"
         "define internal void @__ocean.discard_defers(ptr %frame) {\n"
@@ -459,6 +462,5 @@ static void emitDeferRuntime(Backend *b) {
         "  br label %loop\n"
         "done:\n"
         "  ret void\n"
-        "}\n"
-        , b->out);
+        "}\n", b->out);
 }

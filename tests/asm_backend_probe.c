@@ -3,6 +3,17 @@
 #include "../scanner.h"
 
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--libc-symbols")) {
+        Backend b = {0};
+        const char *names[] = {"malloc", "calloc", "free", "memcmp", "atexit", "write", "setjmp", "longjmp"};
+        int darwin = !strcmp(argv[2], "darwin");
+        for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
+            const char *symbol = libcSymbolForTarget(&b, names[i], darwin);
+            fprintf(stdout, "declare void %s()\ndefine void @probe%zu() { call void %s()\nret void }\n",
+                    symbol, i, symbol);
+        }
+        return 0;
+    }
     if (argc != 2) return 2;
     FILE *file = fopen(argv[1], "rb");
     if (!file || fseek(file, 0, SEEK_END)) return 2;
