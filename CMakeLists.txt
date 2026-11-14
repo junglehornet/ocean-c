@@ -269,6 +269,11 @@ if(BUILD_TESTING)
         set_tests_properties(release_smoke_test PROPERTIES TIMEOUT 180
             ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
     endif()
+    if(UNIX)
+        add_test(NAME process_spawn_api_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_spawn_api_test.py" "${OCEAN_CLANG_EXECUTABLE}")
+        set_tests_properties(process_spawn_api_test PROPERTIES TIMEOUT 60)
+    endif()
     add_test(NAME runtime_threads_test COMMAND runtime_threads_test)
     set_tests_properties(runtime_threads_test PROPERTIES TIMEOUT 30)
     if(EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/threads/tests/test_threads.py")

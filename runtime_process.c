@@ -20,6 +20,7 @@
 #include <dirent.h>
 #ifdef __APPLE__
 #include <crt_externs.h>
+#include <Availability.h>
 #else
 extern char **environ;
 #endif
@@ -196,6 +197,22 @@ char *ocean_process_lookpath(const char *name) {
         free(candidate); if (explicit || !end) return NULL; at = end + 1;
     }
 }
+// New SDKs deprecate the _np spelling, but older macOS releases still need it.
+static int add_directory(posix_spawn_file_actions_t *actions, const char *directory) {
+#ifdef __APPLE__
+#if defined(__MAC_26_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_26_0
+    if (__builtin_available(macOS 26.0, *))
+        return posix_spawn_file_actions_addchdir(actions, directory);
+#endif
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    int result = posix_spawn_file_actions_addchdir_np(actions, directory);
+#pragma clang diagnostic pop
+    return result;
+#else
+    return posix_spawn_file_actions_addchdir_np(actions, directory);
+#endif
+}
 int32_t ocean_process_run(OceanProcess *p) {
     p->exit_code = -1; p->output = NULL; p->output_size = 0; p->error = NULL;
     posix_spawn_file_actions_t actions;
@@ -206,7 +223,7 @@ int32_t ocean_process_run(OceanProcess *p) {
         failed = posix_spawn_file_actions_adddup2(&actions, fileno(file), 1);
         if (!failed && p->combined) failed = posix_spawn_file_actions_adddup2(&actions, fileno(file), 2);
     }
-    if (!failed && p->directory && *p->directory) failed = posix_spawn_file_actions_addchdir_np(&actions, p->directory);
+    if (!failed && p->directory && *p->directory) failed = add_directory(&actions, p->directory);
 #ifdef __APPLE__
     char **env = p->environment ? (char **)p->environment : *_NSGetEnviron();
 #else

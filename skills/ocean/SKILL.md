@@ -123,7 +123,8 @@ Darwin relocatable runtime and library links preserve private external symbols
 so cached package objects can resolve shared constants and helpers.
 Native Darwin recovery pairs `_setjmp` with `_longjmp`; WebAssembly and
 Windows keep their target-specific recovery ABI.
-The embedded process runtime enables Darwin extensions for spawn working-directory support.
+The embedded process runtime uses the standard spawn working-directory API on
+macOS 26, with a guarded Darwin extension fallback for older SDKs and systems.
 
 Each source package compiles all its ordinary functions, so the same cached object
 can serve callers using different functions. Executable linking removes unreachable
