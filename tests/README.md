@@ -789,6 +789,13 @@ native `ms_abi` test shims on Linux. Foreign objects are assembled, not executed
 macOS/Windows and foreign-architecture behavior still needs native CI coverage.
 The `io.oc` fixture mirrors the standard-library implementation without externs.
 
+When `llvm-objdump` is available, `installer_platform_test.py` cross-assembles
+the actual installer ARM64 detection blocks for Linux, macOS, and Windows at
+O0/O2 and checks the resulting machine code for the stores. This catches
+Darwin's treatment of semicolons as comments, which silently discards later
+instructions on a line despite successful assembly. The test also executes the
+complete installer `target()` function on the host with caching enabled and off.
+
 ## Scanners and native files
 
 `io_scanner_test.py` installs the IO, OS, and reflection fixtures into a temporary

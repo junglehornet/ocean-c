@@ -203,6 +203,14 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/standard_library_asm_test.py"
         "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE:asm_backend_probe>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(standard_library_asm_test PROPERTIES TIMEOUT 120)
+    find_program(OCEAN_LLVM_OBJDUMP_EXECUTABLE llvm-objdump)
+    if(OCEAN_LLVM_OBJDUMP_EXECUTABLE)
+        add_test(NAME installer_platform_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/installer_platform_test.py"
+            "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE:asm_backend_probe>"
+            "${OCEAN_CLANG_EXECUTABLE}" "${OCEAN_LLVM_OBJDUMP_EXECUTABLE}")
+        set_tests_properties(installer_platform_test PROPERTIES TIMEOUT 60)
+    endif()
 
     add_test(NAME fallthrough_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fallthrough_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
