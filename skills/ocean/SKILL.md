@@ -785,6 +785,10 @@ AArch64 and RISC-V use their standard LLVM assembler syntax. Bodies are raw
 assembly, including newlines, directives, and literal `$` characters, with balanced
 braces outside quoted strings and comments. Use `#` line comments on x86-64 and
 RISC-V, and `//` on AArch64; `/* ... */` comments are also recognized.
+Put assembly instructions on separate lines for portability. Darwin AArch64
+treats `;` as a comment marker: later instructions on the same line are ignored.
+The installer uses separate ARM64 instruction lines so target detection works
+on macOS as well as Linux and Windows.
 
 Use `${name}` outside assembly strings/comments to read or write a mutable
 scalar variable or pointer. Each placeholder is a memory operand, not its value
