@@ -74,12 +74,20 @@ Linux dependency bundles locate libffi/libcurl through Clang's library lookup
 and multiarch directories as well as pkg-config, and reject missing shared
 libraries before packaging. RISC-V's emulated build installs the curl executable
 and CA certificates for its checksum-verified source downloads.
+Linux sysroots also retain the ELF interpreter's absolute runtime path for
+glibc linker scripts. macOS release jobs install Homebrew `llvm` and `lld`
+separately, bundle `ld.lld` and `ld64.lld`, and relocate dylib imports and install
+IDs before signing the tools/libraries.
+The Ubuntu 26.04 RISC-V build also installs `libjitterentropy3-dev`, required by
+that distribution's static OpenSSL libraries.
 
 Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
 CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a
 Windows GNU/MinGW Clang toolchain on PATH. Decimal floating-point literals are
 converted directly to binary64 rather than accumulated in host `long double`, including on Windows ARM64.
 Integer literals use fixed 64-bit storage on every native host, including Windows where C `long` is 32-bit.
+Synthesized enum comparison and match tags use `long long` storage as well,
+preventing reads past a 32-bit `long` allocation on Windows.
 Windows LSP requests run in isolated re-executed workers with editor overlays;
 Windows unit tests use captured reports, not the Unix live terminal frontend.
 Package/module resolution and installed `bin/`/`src/` layout are unchanged.

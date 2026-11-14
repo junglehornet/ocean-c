@@ -114,6 +114,8 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_test.py" "$<TARGET_FILE:ocean-c>")
     add_test(NAME release_package_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_package_test.py")
+    add_test(NAME dependency_bundle_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_bundle_test.py")
     add_test(NAME installer_test COMMAND $<TARGET_FILE:ocean-c> test
         "${CMAKE_CURRENT_SOURCE_DIR}/installer" --notty)
     set_tests_properties(installer_test PROPERTIES TIMEOUT 120
@@ -179,6 +181,8 @@ if(BUILD_TESTING)
     set_tests_properties(pending_inventory pending_runner_test PROPERTIES TIMEOUT 30)
 
     find_program(OCEAN_CLANG_EXECUTABLE clang REQUIRED)
+    add_test(NAME enum_literal_storage_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/enum_literal_storage_test.py" "${OCEAN_CLANG_EXECUTABLE}")
     add_test(NAME result_parse_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/result_parse_test.py"
         "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")

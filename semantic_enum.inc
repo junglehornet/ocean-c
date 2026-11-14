@@ -157,9 +157,9 @@ static expr enumIdentifier(token name) {
     struct expr_identifier *id = calloc(1, sizeof(*id)); id->lexeme = name;
     return (expr){.type = EXPR_TYPE_IDENTIFIER, .underlying = id, .location = name};
 }
-static expr enumInteger(long number, token at) {
+static expr enumInteger(long long number, token at) {
     struct expr_literal *lit = calloc(1, sizeof(*lit)); lit->type = LITERAL_TYPE_INT;
-    lit->value = malloc(sizeof(long)); *(long *)lit->value = number;
+    lit->value = malloc(sizeof(long long)); *(long long *)lit->value = number;
     return (expr){.type = EXPR_TYPE_LITERAL, .underlying = lit, .location = at};
 }
 static void lowerMatch(Context *c, struct stmt_switch *v, Type *subject, token at) {

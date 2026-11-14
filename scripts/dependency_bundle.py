@@ -41,6 +41,53 @@ def linux_shared_libraries(package, stem, clang, machine):
                        f'Clang lookup: {located}, multiarch: {machine})')
 
 
+def copy_linux_interpreter(clang, sysroot):
+    # glibc's libc.so linker script names the loader by its absolute runtime
+    # path, which can differ from its physical multiarch library directory.
+    interpreter = Path(output('patchelf', '--print-interpreter', str(clang)))
+    if not interpreter.is_absolute() or not interpreter.is_file():
+        raise RuntimeError(f'Cannot locate the native ELF interpreter: {interpreter}')
+    copy(interpreter, sysroot / interpreter.relative_to('/'))
+
+
+def relocate_macos(root, clang, brewroot):
+    # lib/ also contains Clang's resource directory, which is not a Mach-O file.
+    queue = [file for directory in (root/'bin', root/'lib')
+             for file in directory.iterdir() if file.is_file()]
+    seen = set()
+    while queue:
+        file = queue.pop()
+        if file in seen:
+            continue
+        seen.add(file)
+        install_ids = [line.strip() for line in output('otool', '-D', str(file)).splitlines()[1:]] if file.suffix == '.dylib' else []
+        for line in output('otool', '-L', str(file)).splitlines()[1:]:
+            linked = line.strip().split(' (', 1)[0]
+            if linked in install_ids or linked.startswith(('/usr/lib/', '/System/')):
+                continue
+            source = Path(linked)
+            if linked.startswith('@'):
+                basename = source.name
+                candidates = [clang.parent.parent/'lib'/basename,
+                              *list((brewroot/'opt').glob('*/lib/'+basename))]
+                source = next((path for path in candidates if path.exists()), None)
+                if source is None:
+                    raise RuntimeError(f'Cannot relocate {linked}')
+            target = root/'lib'/source.name
+            if not target.exists():
+                copy(source, target)
+                queue.append(target)
+            subprocess.run(['install_name_tool', '-change', linked, '@rpath/'+target.name, str(file)], check=True)
+        # -change edits imports, not LC_ID_DYLIB. Set the library's own ID too,
+        # so a probe linked with -lffi does not retain its Homebrew install path.
+        if install_ids:
+            subprocess.run(['install_name_tool', '-id', '@rpath/'+file.name, str(file)], check=True)
+        rpath = '@executable_path/../lib' if file.parent.name == 'bin' else '@loader_path'
+        if rpath not in output('otool', '-l', str(file)):
+            subprocess.run(['install_name_tool', '-add_rpath', rpath, str(file)], check=True)
+        subprocess.run(['codesign', '--force', '--sign', '-', str(file)], check=True)
+
+
 def build_bundle(destination, version, arch, system):
     with tempfile.TemporaryDirectory(prefix='ocean-dependencies-') as temporary:
         root=Path(temporary)/'bundle';(root/'bin').mkdir(parents=True);(root/'lib').mkdir()
@@ -79,6 +126,7 @@ def build_bundle(destination, version, arch, system):
             if runtime.exists():
                 for file in runtime.iterdir():
                     if file.is_file() and core.match(file.name): copy(file,root/'sysroot/lib'/machine/file.name)
+            copy_linux_interpreter(clang, root/'sysroot')
             # Shared dependencies, including developer link names, are local to lib/.
             native_libraries=set()
             for name in ('libffi','libcurl'):
@@ -104,34 +152,18 @@ def build_bundle(destination, version, arch, system):
                 subprocess.run(['patchelf','--set-rpath','$ORIGIN/../lib' if binary.parent.name=='bin' else '$ORIGIN',str(binary)],check=True)
             (root/'bin/clang.cfg').write_text('--sysroot=<CFGDIR>/../sysroot\n--gcc-toolchain=<CFGDIR>/../sysroot/usr\n-fuse-ld=lld\n-I<CFGDIR>/../include\n-L<CFGDIR>/../lib\n-Wl,-rpath,<CFGDIR>/../lib\n')
         else:
-            for name in ('clang','ld.lld','llvm-ar','llvm-ranlib'): copy(shutil.which(name) or clang.parent/name,root/'bin'/name)
+            for name in ('clang','ld.lld','ld64.lld','llvm-ar','llvm-ranlib'):
+                located = shutil.which(name) or clang.parent/name
+                if not Path(located).is_file():
+                    raise RuntimeError(f'Missing dependency tool: {name}; install Homebrew llvm and lld')
+                copy(located,root/'bin'/name)
             # macOS provides libcurl and its native trust store with the OS SDK.
             for package, pattern in [('libffi','libffi*.dylib')]:
                 prefix=Path(output('brew','--prefix',package))
                 for file in (prefix/'lib').glob(pattern): copy(file,root/'lib'/file.name)
                 copy(prefix/'include',root/'include')
             brewroot=Path(output('brew','--prefix'))
-            queue=list((root/'bin').iterdir())+list((root/'lib').iterdir());seen=set()
-            while queue:
-                file=queue.pop()
-                if file in seen:continue
-                seen.add(file)
-                for line in output('otool','-L',str(file)).splitlines()[1:]:
-                    linked=line.strip().split(' (',1)[0]
-                    if linked.startswith(('/usr/lib/','/System/')):continue
-                    source=Path(linked)
-                    if linked.startswith('@'):
-                        basename=Path(linked).name
-                        candidates=[clang.parent.parent/'lib'/basename,*list((brewroot/'opt').glob('*/lib/'+basename))]
-                        source=next((p for p in candidates if p.exists()),None)
-                        if source is None: raise RuntimeError(f'Cannot relocate {linked}')
-                    target=root/'lib'/source.name
-                    if not target.exists(): copy(source,target);queue.append(target)
-                    subprocess.run(['install_name_tool','-change',linked,'@rpath/'+target.name,str(file)],check=True)
-                rpath='@executable_path/../lib' if file.parent.name=='bin' else '@loader_path'
-                if rpath not in output('otool','-l',str(file)):
-                    subprocess.run(['install_name_tool','-add_rpath',rpath,str(file)],check=True)
-                subprocess.run(['codesign','--force','--sign','-',str(file)],check=True)
+            relocate_macos(root, clang, brewroot)
             (root/'bin/clang.cfg').write_text('-I<CFGDIR>/../include\n-L<CFGDIR>/../lib\n-Wl,-rpath,<CFGDIR>/../lib\n')
         licenses=root/'share/ocean-dependencies';licenses.mkdir(parents=True)
         (licenses/'README.txt').write_text('Native tools/libraries retain their upstream licenses. See included package copyright notices. Clang/LLVM: Apache-2.0 WITH LLVM-exception; libffi: MIT; libcurl: curl license.\n')
