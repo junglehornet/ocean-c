@@ -54,6 +54,13 @@ when pkg-config reports a generic libdir such as `/usr/lib`. It includes both
 developer link names and versioned shared-library files, and fails explicitly
 if libffi or libcurl cannot be located. The RISC-V container installs curl and
 CA certificates before downloading the pinned installer dependency source.
+The ELF interpreter is copied into the sysroot at its absolute runtime path,
+including paths such as `/lib64/ld-linux-x86-64.so.2` that glibc linker scripts
+reference outside the multiarch directory. macOS jobs install Homebrew's separate
+`lld` formula and bundle both `ld.lld` and `ld64.lld`. Mach-O relocation processes
+files only, rewrites dylib imports and install IDs, and signs the modified files.
+Ubuntu 26.04's RISC-V container explicitly installs `libjitterentropy3-dev` to
+satisfy the `libjitterentropy.a` dependency advertised by static OpenSSL.
 
 `scripts/release.py` passes `VERSION`, `COMMIT`, `COMMIT_DATE`, `COMMIT_YEAR`, and
 `BUILD_DATE` to the GNUmakefile. It verifies that HEAD is the tagged commit and

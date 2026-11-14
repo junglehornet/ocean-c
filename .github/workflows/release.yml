@@ -65,9 +65,10 @@ jobs:
       - name: macOS dependencies
         if: matrix.os == 'macos'
         run: |
-          brew install llvm libffi curl pkgconf ninja
+          brew install llvm lld libffi curl pkgconf ninja
           python3 -m pip install 'cmake>=4.2,<5'
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=$(brew --prefix libffi)" >> "$GITHUB_ENV"
       - name: Windows native LLVM toolchain
         if: matrix.os == 'windows'
@@ -144,7 +145,7 @@ jobs:
             RELEASE_VERSION: ${{ github.ref_name }}
           install: |
             apt-get update
-            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
+            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev libjitterentropy3-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
           run: |
             mkdir -p /tmp/ocean-tools
             for tool in clang ld.lld llvm-ar llvm-ranlib; do ln -sf "/usr/bin/$tool-21" "/tmp/ocean-tools/$tool"; done

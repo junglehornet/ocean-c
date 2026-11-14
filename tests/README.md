@@ -779,6 +779,17 @@ specializations, aliases, imported generic enums, generic functions, and concret
 
 ## Standard-library assembly
 
+`enum_literal_storage_test.py` compiles the actual synthesized enum-literal
+helper with standalone `long` modeled as a Windows 32-bit integer. It checks
+eight-byte allocations and values, including values beyond 32 bits, to catch
+LLP64 heap overreads on any host.
+
+`dependency_bundle_test.py` checks glibc loader paths with a real sysrooted LLD
+link and cross-links ARM64/x86-64 Mach-O dylibs to verify relocated install IDs,
+imports, and rpaths. LLVM equivalents perform Mach-O inspection/edits on Linux;
+code signing is recorded but requires native macOS verification. Tool-dependent
+cases are skipped if the required tools are unavailable.
+
 `inline_asm_test.py` checks selectors, raw assembly text, scalar `${name}`
 read/write operands, name qualification and diagnostics, and native execution at
 O0/O2. `standard_library_asm_test.py` uses `asm_backend_probe` to pass real parsed
