@@ -49,6 +49,20 @@ with tempfile.TemporaryDirectory(prefix='ocean stdlib asm ') as directory:
                           '-c', '-x', 'ir', str(ir), '-o', str(root / 'foreign.o')])
             assert result.returncode == 0, (selector, opt, result.stderr)
 
+    # RISC-V's dense asm clobbers must remain safe when a caller has a large
+    # frame, live values, and stack save/restore. LLVM's register scavenger can
+    # otherwise fail to spill a register (or generate bad code on older LLVM).
+    for body in (blocks['riscv64/linux'], 'nop',
+                 'ld a0, ${data}\nld a1, ${count}\nld a2, ${timeout}\nsd a0, ${result}'):
+        source.write_text('package probe; func sample() { asm riscv64/linux {\n' + body + '\n} }')
+        result = run([probe, '--large-frame', str(source)])
+        assert result.returncode == 0, result.stdout + result.stderr
+        ir.write_text(result.stdout)
+        for opt in ('-O0', '-O2'):
+            result = run([clang, '--target=riscv64-linux-gnu', '-Wno-override-module',
+                          opt, '-c', '-x', 'ir', str(ir), '-o', str(root / 'riscv-frame.o')])
+            assert result.returncode == 0, (body, opt, result.stderr)
+
     # Compare exact binary64-to-decimal conversion with the native C formatter.
     libc = ctypes.CDLL(None)
     bits = [0, 1, 0x8000000000000000, 0x7ff0000000000000, 0xfff0000000000000,

@@ -844,6 +844,10 @@ ABI, restore the stack pointer exactly, preserve operand-address registers, and
 provide any required call space. Access operands before changing the stack and
 after restoring it. Do not return, branch out of the block, or unwind through
 it. Numeric local labels avoid collisions when blocks are repeated.
+RISC-V blocks run in small non-inlined helpers with named scalar slots passed
+by address. This avoids register-spill failures and crashes in callers with large
+frames or stack save/restore. The helpers stay with their owning native package
+so cached and uncached builds preserve the same read/write operand behavior.
 
 Instructions must be supported by the selected Clang target; there is no
 CPU-feature selection. Native `check`/build reports assembler errors through
