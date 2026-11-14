@@ -75,6 +75,40 @@ def package(binary, output, project, version, arch, system):
     return paths
 
 
+def write_checksums(output, arch, system, paths):
+    lines = []
+    for path in paths:
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        lines.append(f"{digest}  {path.name}\n")
+    checksum = output / f"SHA256SUMS_{arch}-{system}.txt"
+    checksum.write_text("".join(lines), encoding="utf-8")
+
+
+def finalize_dependency_compression(args):
+    """Compress an already verified dependency tar on the native runner CPU."""
+    source = args.output / f"ocean-deps_{args.version}_{args.arch}-{args.os}.tar"
+    archive = source.with_suffix(".tar.xz")
+    temporary = archive.with_suffix(".xz.tmp")
+    paths = []
+    for project in ("ocean-c", "ocean-installer"):
+        for extension in (("tar", "zip") if args.os == "windows" else ("tar",)):
+            path = args.output / f"{project}_{args.version}_{args.arch}-{args.os}.{extension}"
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            paths.append(path)
+    try:
+        print(f"Compressing verified dependency bundle: {source}", flush=True)
+        with temporary.open("wb") as stream:
+            subprocess.run(["xz", "--threads=2", "--stdout", str(source)],
+                           stdout=stream, check=True)
+        temporary.replace(archive)
+        write_checksums(args.output, args.arch, args.os, [*paths, archive])
+        source.unlink()
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def build(args):
     actual_os = {"Linux": "linux", "Darwin": "macos", "Windows": "windows"}[platform.system()]
     actual_arch = {"AMD64": "x86_64", "arm64": "aarch64", "ARM64": "aarch64"}.get(platform.machine(), platform.machine())
@@ -113,11 +147,12 @@ def build(args):
                    env=environment, check=True)
     paths = package(compiler, args.output, "ocean-c", args.version, args.arch, args.os)
     paths += package(installer, args.output, "ocean-installer", args.version, args.arch, args.os)
-    paths.append(build_bundle(args.output, args.version, args.arch, args.os))
+    paths.append(build_bundle(args.output, args.version, args.arch, args.os,
+                              compress=not args.defer_dependency_compression))
     manifest = args.output / f"build_{args.version}_{args.arch}-{args.os}.json"
     manifest.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
-    checksum = args.output / f"SHA256SUMS_{args.arch}-{args.os}.txt"
-    checksum.write_text("".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in paths), encoding="utf-8")
+    if not args.defer_dependency_compression:
+        write_checksums(args.output, args.arch, args.os, paths)
 
 
 if __name__ == "__main__":
@@ -129,4 +164,13 @@ if __name__ == "__main__":
     parser.add_argument("--build-dir", type=Path, default=Path("build-release"))
     parser.add_argument("--output", type=Path, default=Path("dist"))
     parser.add_argument("--cmake-arg", action="append", default=[])
-    build(parser.parse_args())
+    compression = parser.add_mutually_exclusive_group()
+    compression.add_argument("--defer-dependency-compression", action="store_true",
+                             help="write a verified dependency tar for host-side compression")
+    compression.add_argument("--finalize-dependency-compression", action="store_true",
+                             help="compress the verified dependency tar and write final checksums")
+    args = parser.parse_args()
+    if args.finalize_dependency_compression:
+        finalize_dependency_compression(args)
+    else:
+        build(args)

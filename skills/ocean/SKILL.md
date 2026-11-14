@@ -69,7 +69,10 @@ test accepts a positive integer `OCEAN_RELEASE_TEST_TIMEOUT_SCALE` (default 1);
 the QEMU job uses 10 for compilation, execution, and LSP wait limits. Its prepared
 dependency image and static curl are cached with weekly refreshes; compiler
 objects use ccache. Keys separate RISC-V/Ubuntu/LLVM versions and dependency
-configuration. Compilation and release checks still execute under QEMU. Linux release
+configuration. Compilation and release checks still execute under QEMU. RISC-V uses
+`--defer-dependency-compression` to stage a verified dependency tar, then
+`--finalize-dependency-compression` on the x86-64 host to create the `.tar.xz`
+and final SHA256SUMS. Relocated tool/probe checks remain inside QEMU. Linux release
 installers use a private static libcurl with OpenSSL and threaded DNS, built by
 `.github/scripts/build-static-curl.sh`; `RELEASE_STATIC_PKG_CONFIG_PATH` selects
 its metadata only for the installer link. Ordinary builds and dependency bundles

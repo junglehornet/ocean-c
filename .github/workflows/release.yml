@@ -185,8 +185,14 @@ jobs:
               bash .github/scripts/build-static-curl.sh /tmp/ocean-riscv-cache/static-curl
             fi
             export RELEASE_STATIC_PKG_CONFIG_PATH=/tmp/ocean-riscv-cache/static-curl/lib/pkgconfig
-            python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --stdlib release-stdlib --cmake-arg=-DCMAKE_C_COMPILER_LAUNCHER=ccache
+            python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --stdlib release-stdlib --cmake-arg=-DCMAKE_C_COMPILER_LAUNCHER=ccache --defer-dependency-compression
             ccache --show-stats
+      - name: Compress verified RISC-V dependencies on the host
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" dist
+          python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --finalize-dependency-compression
       - uses: actions/upload-artifact@v4
         with:
           name: release-riscv64-linux

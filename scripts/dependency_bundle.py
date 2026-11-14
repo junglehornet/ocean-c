@@ -88,7 +88,7 @@ def relocate_macos(root, clang, brewroot):
         subprocess.run(['codesign', '--force', '--sign', '-', str(file)], check=True)
 
 
-def build_bundle(destination, version, arch, system):
+def build_bundle(destination, version, arch, system, *, compress=True):
     with tempfile.TemporaryDirectory(prefix='ocean-dependencies-') as temporary:
         root=Path(temporary)/'bundle';(root/'bin').mkdir(parents=True);(root/'lib').mkdir()
         clang=Path(shutil.which('clang')).resolve()
@@ -187,17 +187,23 @@ def build_bundle(destination, version, arch, system):
         (licenses/'build.json').write_text(json.dumps(dict(version=version,arch=arch,os=system),indent=2)+'\n')
         # Clang must run from the relocated bundle before it can be published.
         executable=root/'bin'/('clang.exe' if system=='windows' else 'clang')
-        subprocess.run([str(executable),'--version'],check=True)
+        timeout = 60 * int(os.environ.get('OCEAN_RELEASE_TEST_TIMEOUT_SCALE', '1'))
+        print('Verifying relocated dependency tools', flush=True)
+        subprocess.run([str(executable),'--version'],check=True,timeout=timeout)
         probe=Path(temporary)/'probe.c';probe.write_text('#include <stdio.h>\n#include <ffi.h>\n#include <curl/curl.h>\nint main(void){if(!curl_version() || !sizeof(ffi_cif))return 1;puts("bundle-ok");return 0;}\n')
         application=Path(temporary)/('probe.exe' if system=='windows' else 'probe')
         config=root/'bin/clang.cfg';base=config.read_text()
         if system=='macos':config.write_text('-isysroot\n"'+output('xcrun','--show-sdk-path')+'"\n'+base)
-        subprocess.run([str(executable),str(probe),'-lffi','-lcurl','-o',str(application)],check=True)
+        print('Compiling dependency bundle probe', flush=True)
+        subprocess.run([str(executable),str(probe),'-lffi','-lcurl','-o',str(application)],check=True,timeout=timeout)
         env=dict(os.environ,PATH=str(root/'bin')+os.pathsep+os.environ['PATH'])
-        assert subprocess.check_output([str(application)],text=True,env=env).strip()=='bundle-ok'
+        print('Running dependency bundle probe', flush=True)
+        assert subprocess.check_output([str(application)],text=True,env=env,timeout=timeout).strip()=='bundle-ok'
         config.write_text(base)
         destination=Path(destination);destination.mkdir(parents=True,exist_ok=True)
-        archive=destination/f'ocean-deps_{version}_{arch}-{system}.tar.xz'
-        with tarfile.open(archive,'w:xz') as tar:
+        extension = '.tar.xz' if compress else '.tar'
+        archive=destination/f'ocean-deps_{version}_{arch}-{system}{extension}'
+        print(f'Archiving dependency bundle: {archive}', flush=True)
+        with tarfile.open(archive,'w:xz' if compress else 'w') as tar:
             for file in sorted(root.iterdir()):tar.add(file,arcname=file.name)
         return archive

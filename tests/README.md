@@ -931,3 +931,11 @@ script and workflow, and compiler objects on the workflow and source revision
 with fallback to earlier revisions in the same dependency configuration.
 Compiler contents are checked by ccache and hit/miss statistics are logged.
 All RISC-V release checks and compilation still run under QEMU.
+
+RISC-V dependency bundles are verified and written as uncompressed tar files
+inside QEMU, then compressed with native host xz (two threads). The release
+script's `--defer-dependency-compression` and
+`--finalize-dependency-compression` split these stages; only finalization writes
+the checksum manifest. Package tests check archive contents, final checksums,
+and preservation of the input tar if compression fails. Bundle probe commands
+use the release smoke timeout multiplier and print their stages.

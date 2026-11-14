@@ -1,9 +1,13 @@
 """Release asset naming, contents, checksums, and tag metadata without CI access."""
+import argparse
+import hashlib
 import importlib.util
+import lzma
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -45,6 +49,48 @@ class ReleaseTests(unittest.TestCase):
             with mock.patch.object(dependency_bundle, "output", side_effect=[str(root / "missing"), "libmissing.so"]):
                 with self.assertRaisesRegex(RuntimeError, "Cannot locate shared fixture libraries"):
                     dependency_bundle.linux_shared_libraries("fixture", "libmissing", "clang", "fixture-linux-gnu")
+
+    @unittest.skipUnless(shutil.which("xz"), "xz required")
+    def test_host_finalization_preserves_bundle_and_checksums_final_assets(self):
+        with tempfile.TemporaryDirectory(prefix="ocean host packaging ") as directory:
+            root = Path(directory)
+            binary = root / "executable"
+            binary.write_bytes(b"release executable")
+            for project in ("ocean-c", "ocean-installer"):
+                release.package(binary, root, project, "nightly", "riscv64", "linux")
+            source = root / "ocean-deps_nightly_riscv64-linux.tar"
+            with tarfile.open(source, "w") as archive:
+                archive.add(binary, arcname="bin/clang")
+            original = source.read_bytes()
+            subprocess.run([sys.executable, release.__file__, "--version", "nightly",
+                            "--arch", "riscv64", "--os", "linux", "--output", str(root),
+                            "--finalize-dependency-compression"], check=True)
+            self.assertFalse(source.exists())
+            archive = source.with_suffix(".tar.xz")
+            self.assertEqual(lzma.decompress(archive.read_bytes()), original)
+            with tarfile.open(archive) as stream:
+                self.assertEqual(stream.extractfile("bin/clang").read(), binary.read_bytes())
+            lines = (root / "SHA256SUMS_riscv64-linux.txt").read_text().splitlines()
+            self.assertEqual(len(lines), 3)
+            for line in lines:
+                digest, name = line.split("  ")
+                self.assertEqual(digest, hashlib.sha256((root / name).read_bytes()).hexdigest())
+                self.assertFalse(name.endswith("-linux.tar") and name.startswith("ocean-deps"))
+
+    def test_failed_host_compression_keeps_input_and_removes_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "ocean-deps_nightly_riscv64-linux.tar"
+            source.write_bytes(b"verified dependency tar")
+            for project in ("ocean-c", "ocean-installer"):
+                (root / f"{project}_nightly_riscv64-linux.tar").write_bytes(b"compiler")
+            args = argparse.Namespace(output=root, version="nightly", arch="riscv64", os="linux")
+            with mock.patch.object(release.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "xz")):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    release.finalize_dependency_compression(args)
+            self.assertTrue(source.is_file())
+            self.assertFalse(source.with_suffix(".tar.xz.tmp").exists())
+            self.assertFalse((root / "SHA256SUMS_riscv64-linux.txt").exists())
 
     def test_each_supported_target_has_a_flat_archive(self):
         self.assertEqual(len(release.TARGETS), 7)
