@@ -501,6 +501,8 @@ create a named mutable byte array for persistent C access.
 unconstrained `T`; no comparability constraint is required. Operands still follow
 the language's type-compatibility and pointer/null rules.
 
+Aggregate equality helpers pass borrowed snapshots by pointer, avoiding native
+aggregate argument packing differences across targets.
 Struct equality recursively compares stored fields, ignoring padding. Arrays
 compare lengths and then elements recursively, including nested arrays and
 structs. Capacity and allocation address do not affect array equality. Fixed,

@@ -29,6 +29,14 @@ with tempfile.TemporaryDirectory(prefix="ocean equality ") as directory:
             checks += 1
 
     case('struct S { flag bool; n int; } func main() int { a:=S{true,7}; b:=S{true,7}; if(a!=b) return 1; b.n=8; if(a==b || !(a!=b)) return 2; return 0; }')
+    # Narrow fixed arrays cross the ARM64 register/stack argument boundary when
+    # lowered by value. Test both equal bytes and mutations, including high bits.
+    for width in (1, 4, 6, 7, 8, 9, 16, 17):
+        values = ','.join(str((i * 67 + 128) % 256) for i in range(width))
+        case(f'func main() int {{ a:=u8[{width}]{{{values}}}; '
+             f'if(a!=u8[{width}]{{{values}}}) return 1; b:=a; '
+             f'if(a!=b) return 2; b[{width-1}]=42; '
+             f'if(a==b) return 3; return 0; }}')
     case('struct Empty {} func main() int { if(Empty{}!=Empty{}) return 1; return 0; }')
     case('struct Inner { s string; } struct Outer { value Inner; xs int[]; } func main() int { a:=Outer{Inner{"hi"},{1,2}}; b:=Outer{Inner{"hi"},{1,2}}; if(a!=b) return 1; b.value.s="bye"; if(a==b) return 2; return 0; }')
     case('func main() int { a:=int[3]{1,2,3}; b:=int[3]{1,2,3}; if(a!=b) return 1; b[2]=4; if(a==b) return 2; if(a==int[2]{1,2}) return 3; return 0; }')

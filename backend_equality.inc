@@ -10,10 +10,14 @@ static EqualityKind *equalityKind(Backend *b, Kind left, Kind right) {
 }
 static Value aggregateEquality(Backend *b, Value left, Value right) {
     equalityKind(b, left.kind, right.kind);
+    // Keep aggregate contents out of the platform argument ABI. In particular,
+    // byte arrays can otherwise straddle ARM64 registers and packed stack args.
+    // Borrow snapshots: equality must not clone or release owned array contents.
+    Value leftStorage = slot(b, left.kind), rightStorage = slot(b, right.kind);
+    rawStore(b, leftStorage, left); rawStore(b, rightStorage, right);
     Value result = temp(b, BOOL);
-    fprintf(b->body, "  %s = call i1 @__ocean.equal.%u.%u(%s %s, %s %s)\n", result.operand,
-            (unsigned)left.kind, (unsigned)right.kind, irType(b, left.kind), left.operand,
-            irType(b, right.kind), right.operand);
+    fprintf(b->body, "  %s = call i1 @__ocean.equal.%u.%u(ptr %s, ptr %s)\n", result.operand,
+            (unsigned)left.kind, (unsigned)right.kind, leftStorage.operand, rightStorage.operand);
     return result;
 }
 static Value boxedEquality(Backend *b, enum binaryExprType op, Value left, Value right) {
@@ -32,7 +36,8 @@ static int equalityCollection(BufferKind *kind) {
     return kind && (kind->shape == 4 || !kind->shape);
 }
 static void emitEqualityBody(Backend *b, EqualityKind *entry) {
-    Value left = value(b, entry->left, "%%left"), right = value(b, entry->right, "%%right");
+    Value left = load(b, value(b, entry->left, "%%left"));
+    Value right = load(b, value(b, entry->right, "%%right"));
     BufferKind *a = bufferKind(b, left.kind), *c = bufferKind(b, right.kind);
     if ((a && a->map) || (c && c->map)) {
         if (!a || !c || !a->map || !c->map || left.kind != right.kind) {
@@ -119,8 +124,8 @@ static void prepareEqualityHelpers(Backend *b) {
         Scope scope = {.parent = b->globalScope};
         b->scope = &scope; b->body = tmpfile(); b->slots = tmpfile(); b->boxRegion = (Value){0}; b->terminated = 0;
         emitEqualityBody(b, entry);
-        fprintf(b->out, "define internal i1 @__ocean.equal.%u.%u(%s %%left, %s %%right) {\nentry:\n",
-                (unsigned)entry->left, (unsigned)entry->right, irType(b, entry->left), irType(b, entry->right));
+        fprintf(b->out, "define internal i1 @__ocean.equal.%u.%u(ptr %%left, ptr %%right) {\nentry:\n",
+                (unsigned)entry->left, (unsigned)entry->right);
         copy(b->slots, b->out); copy(b->body, b->out); fputs("}\n", b->out);
         fclose(b->slots); fclose(b->body); clearScope(&scope); b->scope = NULL;
     }
