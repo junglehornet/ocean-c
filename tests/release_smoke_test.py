@@ -10,10 +10,13 @@ import tempfile
 
 compiler = str(Path(sys.argv[1]).resolve())
 runner = shlex.split(os.environ.get("OCEAN_TEST_RUNNER", ""))
+timeout_scale = int(os.environ.get("OCEAN_RELEASE_TEST_TIMEOUT_SCALE", "1"))
+if timeout_scale <= 0:
+    raise ValueError("OCEAN_RELEASE_TEST_TIMEOUT_SCALE must be a positive integer")
 
 
 def execute(*args, **kwargs):
-    result = subprocess.run([*runner, compiler, *args], text=True, capture_output=True, timeout=60, **kwargs)
+    result = subprocess.run([*runner, compiler, *args], text=True, capture_output=True, timeout=60 * timeout_scale, **kwargs)
     assert result.returncode == 0, (args, result.stdout, result.stderr)
     return result
 
@@ -28,11 +31,11 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
     binary = root / ("test output" + suffix)
     for _ in range(2):
         execute("build", str(root), "-o", str(binary), env=environment)
-        assert subprocess.check_output([*runner, str(binary)], text=True).strip() == "release smoke"
+        assert subprocess.check_output([*runner, str(binary)], text=True, timeout=60 * timeout_scale).strip() == "release smoke"
     assert execute("run", str(root), env=environment).stdout.strip() == "release smoke"
     source.write_text('package main; func main() { panic "release panic"; }', encoding="utf-8")
     failure = subprocess.run([*runner, compiler, "run", str(root)], env=environment,
-                             text=True, capture_output=True, timeout=60)
+                             text=True, capture_output=True, timeout=60 * timeout_scale)
     assert failure.returncode == 1 and "Panic: release panic" in failure.stderr, failure
     source.write_text("package main; func main() {}", encoding="utf-8")
     test = root / "main_test.oc"
@@ -56,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
     for _ in range(2):
         execute("build", str(runtime), "-o", str(runtime_binary), env=environment)
         result = subprocess.run([*runner, str(runtime_binary)], check=True,
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=30 * timeout_scale)
         assert result.stdout == "runtime constant\n", result
     library = root / "runtime.o"
     (runtime / "main.oc").write_text('package nativefixture; import "sync"; import "os/exec"; import "io"; '
@@ -90,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
                 assert byte, "LSP closed the stream"
                 header += byte
             return json.loads(server.stdout.read(int(header.split(b":", 1)[1].strip())))
-        return pool.submit(read).result(timeout=30)
+        return pool.submit(read).result(timeout=30 * timeout_scale)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         send("initialize", {}, 1)
@@ -109,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
         send("shutdown", None, 3)
         assert receive()["id"] == 3
         send("exit")
-        assert server.wait(timeout=10) == 0
+        assert server.wait(timeout=10 * timeout_scale) == 0
     finally:
         if server.poll() is None:
             server.kill()

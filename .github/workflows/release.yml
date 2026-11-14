@@ -119,6 +119,9 @@ jobs:
 
   riscv64:
     name: riscv64-linux (QEMU)
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 90
     runs-on: ubuntu-24.04
     steps:
@@ -133,29 +136,57 @@ jobs:
           ref: ${{ github.ref_name }}
           path: release-stdlib
           persist-credentials: false
+      - name: Select weekly RISC-V dependency cache
+        id: riscv-cache
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Restore RISC-V static curl
+        id: riscv-curl
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ocean-riscv-cache/static-curl
+          key: riscv64-ubuntu26-clang21-curl-v1-${{ steps.riscv-cache.outputs.week }}-${{ hashFiles('.github/workflows/release.yml', '.github/scripts/build-static-curl.sh') }}
+      - name: Restore RISC-V compiler objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ocean-riscv-cache/ccache
+          key: riscv64-ubuntu26-clang21-objects-v1-${{ steps.riscv-cache.outputs.week }}-${{ hashFiles('.github/workflows/release.yml') }}-${{ github.sha }}
+          restore-keys: |
+            riscv64-ubuntu26-clang21-objects-v1-${{ steps.riscv-cache.outputs.week }}-${{ hashFiles('.github/workflows/release.yml') }}-
       - uses: uraimo/run-on-arch-action@v3
         name: Native RISC-V build under emulation
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
         with:
+          githubToken: ${{ github.token }}
+          setup: mkdir -p "$RUNNER_TEMP/ocean-riscv-cache"
+          dockerRunArgs: -v "${{ runner.temp }}/ocean-riscv-cache:/tmp/ocean-riscv-cache"
           arch: none
           distro: none
           base_image: --platform=linux/riscv64 riscv64/ubuntu:26.04
           env: |
             RELEASE_VERSION: ${{ github.ref_name }}
           install: |
+            echo "Dependency cache week: ${{ steps.riscv-cache.outputs.week }}"
             apt-get update
-            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev libjitterentropy3-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
+            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev libjitterentropy3-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git ccache
           run: |
             mkdir -p /tmp/ocean-tools
             for tool in clang ld.lld llvm-ar llvm-ranlib; do ln -sf "/usr/bin/$tool-21" "/tmp/ocean-tools/$tool"; done
             export PATH="/tmp/ocean-tools:$PATH" PYTHONUTF8=1
             clang --version
             export CMAKE_GENERATOR=Ninja CMAKE_BUILD_PARALLEL_LEVEL=2
+            export CCACHE_DIR=/tmp/ocean-riscv-cache/ccache CCACHE_MAXSIZE=512M
+            export CCACHE_COMPILERCHECK=content CCACHE_UMASK=0022
+            ccache --zero-stats
+            # Compilation and LSP workers run under QEMU; retain bounded waits.
+            export OCEAN_RELEASE_TEST_TIMEOUT_SCALE=10
             git config --global --add safe.directory "$PWD"
-            bash .github/scripts/build-static-curl.sh /tmp/ocean-static-curl
-            export RELEASE_STATIC_PKG_CONFIG_PATH=/tmp/ocean-static-curl/lib/pkgconfig
-            python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --stdlib release-stdlib
+            if [[ "${{ steps.riscv-curl.outputs.cache-hit }}" != true ]]; then
+              bash .github/scripts/build-static-curl.sh /tmp/ocean-riscv-cache/static-curl
+            fi
+            export RELEASE_STATIC_PKG_CONFIG_PATH=/tmp/ocean-riscv-cache/static-curl/lib/pkgconfig
+            python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --stdlib release-stdlib --cmake-arg=-DCMAKE_C_COMPILER_LAUNCHER=ccache
+            ccache --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: release-riscv64-linux

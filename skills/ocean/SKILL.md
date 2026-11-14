@@ -64,7 +64,12 @@ Compiler and installer tar assets use `<name>_<version>_<arch>-<os>.tar`;
 Windows additionally gets zip assets. Archives contain one executable only.
 The installer is entirely native Ocean. Matching ocean-deps tar.xz assets
 provide optional toolchain and library bundles.
-Releases retain separate native runners (RISC-V uses QEMU). Linux release
+Releases retain separate native runners (RISC-V uses QEMU). The release smoke
+test accepts a positive integer `OCEAN_RELEASE_TEST_TIMEOUT_SCALE` (default 1);
+the QEMU job uses 10 for compilation, execution, and LSP wait limits. Its prepared
+dependency image and static curl are cached with weekly refreshes; compiler
+objects use ccache. Keys separate RISC-V/Ubuntu/LLVM versions and dependency
+configuration. Compilation and release checks still execute under QEMU. Linux release
 installers use a private static libcurl with OpenSSL and threaded DNS, built by
 `.github/scripts/build-static-curl.sh`; `RELEASE_STATIC_PKG_CONFIG_PATH` selects
 its metadata only for the installer link. Ordinary builds and dependency bundles

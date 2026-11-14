@@ -918,3 +918,16 @@ Ctrl+C, external signals, timeout, renderer crashes, and noninteractive modes.
 `ocean_test_parallel_test.py` checks serial package phases, no-argument Parallel
 markers, pause/continue events, the shared cross-package worker budget, nested
 parallel subtests, cleanup ordering, and slot reclamation after package failure.
+
+The release smoke gate (`release_smoke_test.py`) keeps bounded waits for compiler
+commands, generated programs, and LSP messages/shutdown. Native runs use the
+default limits; `OCEAN_RELEASE_TEST_TIMEOUT_SCALE` accepts a positive integer
+multiplier (default 1). The RISC-V release job sets it to 10 for QEMU emulation.
+
+The RISC-V release job caches its prepared dependency image through GHCR
+(`packages: write` on that job), plus static curl and ccache objects through
+Actions cache. Dependency caches refresh weekly; curl also keys on its build
+script and workflow, and compiler objects on the workflow and source revision
+with fallback to earlier revisions in the same dependency configuration.
+Compiler contents are checked by ccache and hit/miss statistics are logged.
+All RISC-V release checks and compilation still run under QEMU.
