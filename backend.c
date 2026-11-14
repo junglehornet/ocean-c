@@ -246,7 +246,7 @@ typedef struct {
     unsigned nMethods;
     unsigned recordDepth, interfaceDepth, enumDepth;
     parseResult *program;
-    FILE *out, *body, *slots, *globalOutput, *deferredOutput;
+    FILE *out, *body, *slots, *globalOutput, *deferredOutput, *assemblyOutput;
     int initializingGlobals;
     Scope *scope;
     Scope *functionScope;
@@ -256,6 +256,7 @@ typedef struct {
     unsigned breakLabel, continueLabel;
     int terminated, errors;
     int functionHasAsm;
+    unsigned assemblyBlocks;
     ClosureInstance *closures, *lastClosure, *closure;
     ClosureCellType *closureCells;
     unsigned nClosures;
@@ -5151,6 +5152,26 @@ static void emitAssembly(Backend *b, struct stmt_asm *v, const char *architectur
     b->functionHasAsm = 1;
     Value *operands = checked(sizeof(*operands) * (v->nOperands + 1));
     for (size_t i=0; i<v->nOperands; i++) operands[i] = find(b, v->operands[i].lexeme);
+    FILE *caller = b->body;
+    int outlined = !strcmp(architecture, "riscv64");
+    if (outlined) {
+        // Dense clobbers plus stackrestore/large caller frames can exhaust
+        // RISC-V's register scavenger. Keep the asm frame small and pass the
+        // original variable addresses, preserving read/write operand semantics.
+        if (!b->assemblyOutput) b->assemblyOutput = tmpfile();
+        if (!b->assemblyOutput) { fail(b, "could not create assembly helper buffer"); free(operands); return; }
+        unsigned id = ++b->assemblyBlocks;
+        fprintf(caller, "  call void @__ocean.asm.%u(", id);
+        fprintf(b->assemblyOutput, "define internal void @__ocean.asm.%u(", id);
+        for (size_t i = 0; i < v->nOperands; i++) {
+            fprintf(caller, "%sptr %s", i ? ", " : "", operands[i].operand);
+            fprintf(b->assemblyOutput, "%sptr %%asm.operand%zu", i ? ", " : "", i);
+            operands[i] = value(b, operands[i].kind, "%%asm.operand%zu", i);
+        }
+        fputs(")\n", caller);
+        fputs(") noinline noredzone {\nentry:\n", b->assemblyOutput);
+        b->body = b->assemblyOutput;
+    }
     fprintf(b->body, "  call void asm sideeffect alignstack%s \"", x86 ? " inteldialect" : "");
     // Escape LLVM string bytes and LLVM's operand-template dollar marker.
     size_t reference = 0;
@@ -5194,6 +5215,10 @@ static void emitAssembly(Backend *b, struct stmt_asm *v, const char *architectur
         fprintf(b->body, "%sptr elementtype(%s) %s", i ? ", " : "", irType(b, slot.kind), slot.operand);
     }
     fputs(")\n", b->body);
+    if (outlined) {
+        fputs("  ret void\n}\n", b->assemblyOutput);
+        b->body = caller;
+    }
     free(operands);
 }
 
@@ -5928,6 +5953,7 @@ static int validateLayout(Backend *b, BufferKind *t) {
 }
 static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
     b->functionHasAsm = 0;
+    b->assemblyOutput = NULL;
     b->boxRegion = (Value){0};
     b->body = tmpfile();
     b->slots = tmpfile();
@@ -6063,6 +6089,11 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
     if (copy(b->slots, output) || copy(b->body, output))
         fail(b, "could not write function IR");
     fprintf(output, "}\n");
+    if (b->assemblyOutput) {
+        if (copy(b->assemblyOutput, output)) fail(b, "could not write assembly helpers");
+        fclose(b->assemblyOutput);
+        b->assemblyOutput = NULL;
+    }
     fclose(b->slots);
     fclose(b->body);
     clearScope(&scope);

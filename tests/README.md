@@ -799,6 +799,10 @@ binary64 inputs against `snprintf` and runs the Windows x64 call sequence agains
 native `ms_abi` test shims on Linux. Foreign objects are assembled, not executed;
 macOS/Windows and foreign-architecture behavior still needs native CI coverage.
 The `io.oc` fixture mirrors the standard-library implementation without externs.
+The RISC-V cross-assembly checks also use `asm_backend_probe --large-frame` to
+combine a 32 KiB frame, live register values, and dynamic stack save/restore.
+Both O0 and O2 must compile successfully; dense clobbers in the caller previously
+exhausted LLVM's register scavenger. RISC-V asm helpers keep those spills bounded.
 
 When `llvm-objdump` is available, `installer_platform_test.py` cross-assembles
 the actual installer ARM64 detection blocks for Linux, macOS, and Windows at

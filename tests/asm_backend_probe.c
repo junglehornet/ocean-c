@@ -15,15 +15,17 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (argc != 2) return 2;
-    FILE *file = fopen(argv[1], "rb");
+    int largeFrame = argc == 3 && !strcmp(argv[1], "--large-frame");
+    if (argc != 2 && !largeFrame) return 2;
+    const char *filename = argv[largeFrame ? 2 : 1];
+    FILE *file = fopen(filename, "rb");
     if (!file || fseek(file, 0, SEEK_END)) return 2;
     long length = ftell(file);
     if (length < 0 || fseek(file, 0, SEEK_SET)) return 2;
     char *source = calloc((size_t)length + 1, 1);
     if (!source || fread(source, 1, (size_t)length, file) != (size_t)length) return 2;
     fclose(file);
-    parseResult program = parseTokensWithSource(scanTokens(source, argv[1]), source);
+    parseResult program = parseTokensWithSource(scanTokens(source, (char *)filename), source);
     if (program.hasError || program.nStatements != 1 || program.statements[0].type != STMT_FUNC) return 2;
     struct stmt_func *function = program.statements[0].value;
     if (function->body.nStmts != 1 || function->body.stmts[0].type != STMT_ASM) return 2;
@@ -32,7 +34,13 @@ int main(int argc, char **argv) {
     if (!bindings) return 2;
     Scope scope = {.bindings=node->nOperands ? bindings : NULL};
     Backend backend = {.body=stdout, .scope=&scope, .program=&program};
+    if (largeFrame) puts("declare ptr @llvm.stacksave.p0()\ndeclare void @llvm.stackrestore.p0(ptr)");
     puts("define i64 @sample(ptr %p, i64 %n) noinline noredzone {");
+    if (largeFrame) {
+        puts("%frame = alloca [32768 x i8], align 16\nstore volatile i8 7, ptr %frame");
+        puts("%saved = call ptr @llvm.stacksave.p0()\n%variable = alloca i8, i64 %n, align 16\nstore volatile i8 1, ptr %variable");
+        for (int i = 0; i < 32; i++) fprintf(stdout, "%%live%d = load volatile i64, ptr %%p\n", i);
+    }
     const char *resultSlot = NULL;
     for (size_t i=0; i<node->nOperands; i++) {
         const char *name = node->operands[i].lexeme;
@@ -48,8 +56,18 @@ int main(int argc, char **argv) {
         if (!strcmp(name, "written") || !strcmp(name, "result")) resultSlot = bindings[i].address.operand;
     }
     emitAssembly(&backend, node, node->architecture.lexeme);
+    if (largeFrame) {
+        puts("%kept = load volatile i8, ptr %frame\n%sum0 = add i64 %live0, 0");
+        for (int i = 1; i < 32; i++) fprintf(stdout, "%%sum%d = add i64 %%sum%d, %%live%d\n", i, i-1, i);
+        puts("store volatile i64 %sum31, ptr %p");
+        puts("call void @llvm.stackrestore.p0(ptr %saved)");
+    }
     if (resultSlot) fprintf(stdout, "%%answer = load i64, ptr %s\nret i64 %%answer\n}\n", resultSlot);
     else puts("ret i64 0\n}");
+    if (backend.assemblyOutput) {
+        copy(backend.assemblyOutput, stdout);
+        fclose(backend.assemblyOutput);
+    }
     free(bindings);
     return backend.errors != 0;
 }
