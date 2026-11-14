@@ -49,6 +49,11 @@ The installer runs entirely as native Ocean code. Each target also uploads
 bundle for installation within the Ocean prefix. Linux includes a C sysroot;
 macOS uses Apple's separately installed SDK. Every bundle compiles and executes
 a libffi/libcurl probe after relocation before publication.
+Linux library collection uses Clang's search result and multiarch directories
+when pkg-config reports a generic libdir such as `/usr/lib`. It includes both
+developer link names and versioned shared-library files, and fails explicitly
+if libffi or libcurl cannot be located. The RISC-V container installs curl and
+CA certificates before downloading the pinned installer dependency source.
 
 `scripts/release.py` passes `VERSION`, `COMMIT`, `COMMIT_DATE`, `COMMIT_YEAR`, and
 `BUILD_DATE` to the GNUmakefile. It verifies that HEAD is the tagged commit and

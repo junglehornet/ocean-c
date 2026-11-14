@@ -13,9 +13,39 @@ import zipfile
 spec = importlib.util.spec_from_file_location("release", Path(__file__).resolve().parents[1] / "scripts/release.py")
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+import dependency_bundle
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_linux_bundle_finds_multiarch_libraries_with_generic_pkgconfig_libdir(self):
+        for machine in ("x86_64-linux-gnu", "aarch64-linux-gnu", "riscv64-linux-gnu"):
+            with self.subTest(machine=machine), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                libdir = root / "usr/lib"
+                multiarch = libdir / machine
+                multiarch.mkdir(parents=True)
+                for name in ("libffi.so", "libffi.so.8"):
+                    (multiarch / name).write_bytes(b"shared-library fixture")
+                with mock.patch.object(dependency_bundle, "output", side_effect=[str(libdir), "libffi.so"]):
+                    files = dependency_bundle.linux_shared_libraries("libffi", "libffi", "clang", machine)
+                self.assertEqual({file.name for file in files}, {"libffi.so", "libffi.so.8"})
+                self.assertTrue(all(file.parent == multiarch for file in files))
+                for file in files:
+                    dependency_bundle.copy(file, root / "bundle/lib" / file.name)
+                self.assertEqual((root / "bundle/lib/libffi.so").read_bytes(), b"shared-library fixture")
+
+    def test_linux_bundle_uses_driver_lookup_and_rejects_missing_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "libfixture.so"
+            library.write_bytes(b"driver-selected library")
+            with mock.patch.object(dependency_bundle, "output", side_effect=[str(root / "missing"), str(library)]):
+                self.assertEqual(dependency_bundle.linux_shared_libraries(
+                    "fixture", "libfixture", "clang", "fixture-linux-gnu"), [library])
+            with mock.patch.object(dependency_bundle, "output", side_effect=[str(root / "missing"), "libmissing.so"]):
+                with self.assertRaisesRegex(RuntimeError, "Cannot locate shared fixture libraries"):
+                    dependency_bundle.linux_shared_libraries("fixture", "libmissing", "clang", "fixture-linux-gnu")
+
     def test_each_supported_target_has_a_flat_archive(self):
         self.assertEqual(len(release.TARGETS), 7)
         with tempfile.TemporaryDirectory() as directory:
