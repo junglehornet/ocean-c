@@ -21,7 +21,7 @@ func main() (int status) {
     if (len(args) == 2 && args[1] == "--help") {
         io.Println("Ocean native installer. Requires Git and the system's file utilities (PowerShell on Windows).");
         io.Println("Run without arguments to choose a matching release, destination, and PATH scope.");
-        io.Println("Options: --help, --platform. No Python runtime or helper script is used."); return 0;
+        io.Println("Options: --help, --platform."); return 0;
     }
     require(platform != "unsupported" && architecture != "unsupported", "unsupported installer target");
     if (len(args) == 3 && args[1] == "--apply") {
