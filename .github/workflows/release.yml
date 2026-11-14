@@ -144,7 +144,7 @@ jobs:
             RELEASE_VERSION: ${{ github.ref_name }}
           install: |
             apt-get update
-            apt-get install -y clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
+            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
           run: |
             mkdir -p /tmp/ocean-tools
             for tool in clang ld.lld llvm-ar llvm-ranlib; do ln -sf "/usr/bin/$tool-21" "/tmp/ocean-tools/$tool"; done

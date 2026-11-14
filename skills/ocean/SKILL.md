@@ -70,6 +70,10 @@ installers use a private static libcurl with OpenSSL and threaded DNS, built by
 its metadata only for the installer link. Ordinary builds and dependency bundles
 use system libcurl. Windows release metadata checks use the checkout Git via
 `RELEASE_GIT`. The installer's `--platform` prints one `<arch>-<os>` token.
+Linux dependency bundles locate libffi/libcurl through Clang's library lookup
+and multiarch directories as well as pkg-config, and reject missing shared
+libraries before packaging. RISC-V's emulated build installs the curl executable
+and CA certificates for its checksum-verified source downloads.
 
 Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
 CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a

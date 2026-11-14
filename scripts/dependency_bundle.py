@@ -23,6 +23,24 @@ def copy(source, target):
         shutil.copy2(source.resolve(),target)
 
 
+def linux_shared_libraries(package, stem, clang, machine):
+    # Ubuntu's libffi.pc can name /usr/lib while the actual developer symlink
+    # and SONAME files live in /usr/lib/<multiarch>. Include the driver's own
+    # search result as well, rather than silently producing an empty bundle.
+    directory = Path(output('pkg-config', '--variable=libdir', package))
+    located = Path(output(str(clang), '-print-file-name=' + stem + '.so'))
+    candidates = [directory, directory / machine, Path('/usr/lib') / machine,
+                  Path('/lib') / machine]
+    if located.is_absolute():
+        candidates.insert(0, located.parent)
+    for candidate in dict.fromkeys(candidates):
+        files = sorted(file for file in candidate.glob(stem + '.so*') if file.is_file())
+        if files:
+            return files
+    raise RuntimeError(f'Cannot locate shared {package} libraries (pkg-config libdir: {directory}, '
+                       f'Clang lookup: {located}, multiarch: {machine})')
+
+
 def build_bundle(destination, version, arch, system):
     with tempfile.TemporaryDirectory(prefix='ocean-dependencies-') as temporary:
         root=Path(temporary)/'bundle';(root/'bin').mkdir(parents=True);(root/'lib').mkdir()
@@ -64,9 +82,8 @@ def build_bundle(destination, version, arch, system):
             # Shared dependencies, including developer link names, are local to lib/.
             native_libraries=set()
             for name in ('libffi','libcurl'):
-                directory=Path(output('pkg-config','--variable=libdir',name))
-                pattern='libffi.so*' if name=='libffi' else 'libcurl.so*'
-                for file in directory.glob(pattern): copy(file,root/'lib'/file.name);native_libraries.add(file.resolve())
+                for file in linux_shared_libraries(name, name, clang, machine):
+                    copy(file,root/'lib'/file.name);native_libraries.add(file.resolve())
             for name in ('libffi','libcurl'):
                 directory=Path(output('pkg-config','--variable=includedir',name))
                 if name=='libcurl' and (directory/'curl').exists(): copy(directory/'curl',root/'include/curl')
