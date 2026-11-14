@@ -36,6 +36,14 @@ Windows also uploads both archives as `.zip`. Compiler archives contain only
 folder, helper script, or DLL in either archive. Linux and Windows installer
 builds use `--static`; macOS uses the system runtime libraries.
 
+Linux release jobs first run `.github/scripts/build-static-curl.sh` to build a
+checksum-pinned static libcurl with OpenSSL and threaded DNS. SSH, GSSAPI, and
+other optional dependencies are disabled: Ubuntu does not ship every static
+library required by its general-purpose libcurl.a. The helper verifies a fully
+static TLS/asynchronous-DNS probe before building Ocean. Only the installer link
+uses this private `libcurl.pc`, selected by `RELEASE_STATIC_PKG_CONFIG_PATH`;
+normal program tests and dependency bundles still use the system libcurl.
+
 The installer runs entirely as native Ocean code. Each target also uploads
 `ocean-deps_<tag>_<arch>-<os>.tar.xz`, a relocatable Clang, linker and library
 bundle for installation within the Ocean prefix. Linux includes a C sysroot;
@@ -49,6 +57,10 @@ also uploads its build metadata JSON and archive SHA-256 checksums. The installe
 installed `installation.json` takes its version, commit, commit date, and build
 date from that verified compiler output, adding the install date and stdlib
 commit. Metadata comes from the selected compiler executable, rather than the installer build.
+Windows preserves the Git executable used by checkout in `RELEASE_GIT`, so
+metadata verification does not switch Git installations after MSYS2 setup.
+Tag verification is local: deleting a remote tag after checkout does not remove
+the fetched local tag. A missing or mismatched local tag still fails the build.
 
 Every build runs native smoke tests for importing the stdlib, checking, cached
 compilation, executable paths containing spaces, execution, 64-bit integer
@@ -65,6 +77,9 @@ To exercise one build locally, check out the desired compiler tag and matching
 stdlib tag, install its native dependencies, then run:
 
 ```sh
+# Linux standalone installers need a complete static libcurl dependency closure:
+bash .github/scripts/build-static-curl.sh /tmp/ocean-static-curl
+export RELEASE_STATIC_PKG_CONFIG_PATH=/tmp/ocean-static-curl/lib/pkgconfig
 python3 scripts/release.py --version 1.2.3 --os linux --arch x86_64 \
   --stdlib /path/to/tagged/ocean-src
 ```

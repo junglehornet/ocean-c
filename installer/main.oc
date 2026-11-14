@@ -17,7 +17,7 @@ func main() (int status) {
     defer func() { message := recover(); if (message != null) os.Stderr().unwrap().Write("Ocean installer: " + io.Sprint(message) + "\n"); }();
     platform, architecture = target();
     args := os.Args();
-    if (len(args) == 2 && args[1] == "--platform") { io.Println(architecture,"-",platform); return 0; }
+    if (len(args) == 2 && args[1] == "--platform") { io.Println(architecture + "-" + platform); return 0; }
     if (len(args) == 2 && args[1] == "--help") {
         io.Println("Ocean native installer. Requires Git and the system's file utilities (PowerShell on Windows).");
         io.Println("Run without arguments to choose a matching release, destination, and PATH scope.");

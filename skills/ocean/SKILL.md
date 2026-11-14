@@ -64,6 +64,12 @@ Compiler and installer tar assets use `<name>_<version>_<arch>-<os>.tar`;
 Windows additionally gets zip assets. Archives contain one executable only.
 The installer is entirely native Ocean. Matching ocean-deps tar.xz assets
 provide optional toolchain and library bundles.
+Releases retain separate native runners (RISC-V uses QEMU). Linux release
+installers use a private static libcurl with OpenSSL and threaded DNS, built by
+`.github/scripts/build-static-curl.sh`; `RELEASE_STATIC_PKG_CONFIG_PATH` selects
+its metadata only for the installer link. Ordinary builds and dependency bundles
+use system libcurl. Windows release metadata checks use the checkout Git via
+`RELEASE_GIT`. The installer's `--platform` prints one `<arch>-<os>` token.
 
 Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
 CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a
@@ -1169,7 +1175,11 @@ Linux x86-64/AArch64/RISC-V64, macOS x86-64/AArch64, and Windows x86-64/AArch64.
 The matching compiler links -lcurl automatically, including object-cache hits.
 The development/import library, shared library/DLL dependencies, and trust store
 must be installed. Manual links also need -lcurl and Ocean's ordinary ABI/thread
-runtime dependencies. Static transitive dependency discovery is not implemented.
+runtime dependencies. Static HTTP executable links query
+`pkg-config --static --libs libcurl`; install pkg-config and the complete static
+dependency closure advertised by libcurl.pc. Some distributions omit static
+libraries for optional SSH/GSSAPI backends, requiring a reduced static libcurl
+build. Dynamic links continue to use -lcurl.
 
 Get(url) and Post(url, contentType, body) return Result<Response>. NewRequest
 accepts HTTP/HTTPS; empty method means GET. Client.Do/Get/Post return the same

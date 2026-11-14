@@ -18,6 +18,8 @@ parser=argparse.ArgumentParser()
 parser.add_argument('installer',type=Path)
 args=parser.parse_args()
 installer=args.installer.resolve()
+target=subprocess.check_output([str(installer),'--platform'],text=True).strip()
+assert target in ('x86_64-linux','aarch64-linux','riscv64-linux'), target
 def run(*args,**kw):
     return subprocess.check_output(args,text=True,stderr=subprocess.DEVNULL,**kw).strip()
 with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as directory:
@@ -67,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
             if self.path.startswith('/api/repos/'):
                 releases=[]
                 for tag,pre in [('2.0.0-beta',True),('1.0.0',False)]:
-                    releases.append(dict(tag_name=tag,prerelease=pre,draft=False,assets=[dict(name=f'ocean-c_{tag}_x86_64-linux.tar',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/redirect',digest='sha256:'+hashlib.sha256(state['body']).hexdigest()),dict(name=f'ocean-deps_{tag}_x86_64-linux.tar.xz',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/deps.tar.xz',digest='sha256:'+hashlib.sha256(state['deps']).hexdigest())]))
+                    releases.append(dict(tag_name=tag,prerelease=pre,draft=False,assets=[dict(name=f'ocean-c_{tag}_{target}.tar',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/redirect',digest='sha256:'+hashlib.sha256(state['body']).hexdigest()),dict(name=f'ocean-deps_{tag}_{target}.tar.xz',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/deps.tar.xz',digest='sha256:'+hashlib.sha256(state['deps']).hexdigest())]))
                 data=json.dumps(releases).encode();self.send_response(200)
             elif self.path=='/redirect':
                 state['redirects']+=1;self.send_response(302);self.send_header('Location','/compiler.tar');self.send_header('Content-Length','0');self.end_headers();return

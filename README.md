@@ -2041,8 +2041,12 @@ and a configured trust store. The compiler links `-lcurl` only for programs
 using libcurl declarations and preserves this requirement on full object-cache
 hits. Unrelated programs and the Wasm HTTP transport do not link libcurl.
 Manual IR links need the same library and ordinary Ocean ABI/thread runtime
-requirements. Static libcurl transitive dependencies are not discovered
-by the compiler.
+requirements. Static HTTP executable links discover libcurl's transitive flags
+with `pkg-config --static --libs libcurl`. Install pkg-config and every required
+static library; a distribution's libcurl.a can depend on optional SSH/GSSAPI
+libraries that are not available statically. Linux release installers use a
+private libcurl build without those optional backends; see
+[`scripts/RELEASING.md`](scripts/RELEASING.md).
 
 Package loading selects `*_native.oc` and `*_native_test.oc` only for native
 builds, and `*_wasm.oc` and `*_wasm_test.oc` only with `OCOS=js OCARCH=wasm`.
