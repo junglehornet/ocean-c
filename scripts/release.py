@@ -25,16 +25,26 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
+def git(*args):
+    return run(os.environ.get("RELEASE_GIT", "git"), *args)
+
+
 def metadata(version):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
         raise ValueError("Release tags must be filename-safe version strings.")
-    commit = run("git", "rev-parse", "HEAD")
-    tag_commit = run("git", "rev-parse", "--verify", f"refs/tags/{version}^{{commit}}")
+    commit = git("rev-parse", "HEAD")
+    # Resolve annotated and lightweight tags without caret revision syntax.
+    # A remote deletion cannot remove a tag already fetched into this checkout.
+    try:
+        tag_commit = git("log", "-1", "--format=%H", f"refs/tags/{version}", "--")
+    except subprocess.CalledProcessError as error:
+        raise ValueError(f"Release tag {version!r} is not resolvable in the local checkout; "
+                         "verify the fetched tag and RELEASE_GIT executable.") from error
     if commit != tag_commit:
         raise ValueError("Checkout HEAD does not match the release tag.")
     return dict(VERSION=version, COMMIT=commit,
-                COMMIT_DATE=run("git", "show", "-s", "--format=%cs", commit),
-                COMMIT_YEAR=run("git", "show", "-s", "--format=%cd", "--date=format:%Y", commit),
+                COMMIT_DATE=git("show", "-s", "--format=%cs", commit),
+                COMMIT_YEAR=git("show", "-s", "--format=%cd", "--date=format:%Y", commit),
                 BUILD_DATE=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
 
@@ -87,8 +97,13 @@ def build(args):
     assert run(str(compiler), "-v") == expected
     installer = args.build_dir.resolve() / ("ocean-installer" + extension)
     flags = ["--static"] if args.os in ("linux", "windows") else []
-    subprocess.run([str(compiler), "build", *flags, "installer", "-o", str(installer)], env=environment, check=True)
-    assert run(str(installer), "--platform") == f"{args.arch}-{args.os}"
+    installer_environment = dict(environment)
+    if args.os == "linux" and os.environ.get("RELEASE_STATIC_PKG_CONFIG_PATH"):
+        installer_environment["PKG_CONFIG_PATH"] = os.environ["RELEASE_STATIC_PKG_CONFIG_PATH"] + (
+            os.pathsep + environment["PKG_CONFIG_PATH"] if environment.get("PKG_CONFIG_PATH") else "")
+    subprocess.run([str(compiler), "build", *flags, "installer", "-o", str(installer)], env=installer_environment, check=True)
+    reported_platform = run(str(installer), "--platform")
+    assert reported_platform == f"{args.arch}-{args.os}", f"Unexpected installer platform: {reported_platform!r}"
     subprocess.run([str(installer), "--help"], check=True)
     subprocess.run([str(compiler), "test", "installer", "--notty"], env=environment, check=True)
     subprocess.run([str(compiler), "test", str(args.stdlib.resolve() / "os/exec"), "--notty"], env=environment, check=True)

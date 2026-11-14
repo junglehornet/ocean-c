@@ -589,10 +589,18 @@ static void scan_literal_number(struct scannerState *state) {
         if (value != 0) value*=powl(10,negative?-(long double)exponent:(long double)exponent);
     }
     if(is_alphaNumeric(s[at]))goto invalid;
-    if((overflow && !floating) || (floating && !isfinite((double)value)))goto invalid;
+    if(overflow && !floating)goto invalid;
     token result={.type=floating?LITERAL_FLOAT:LITERAL_INT,.line=state->thisLine,.column=state->thisColumn,.filename=state->filename};
     size_t n=at-start;result.lexeme=malloc(n+1);assert(result.lexeme);memcpy(result.lexeme,s+start,n);result.lexeme[n]=0;
-    if(floating)result.numValue.floating=(double)value;
+    if(floating) {
+        // Parse decimal/hexadecimal text directly to binary64. Accumulating
+        // fractional digits in long double misrounds on Windows ARM64, where
+        // long double has no extra precision. The compiler keeps the C locale.
+        char *end = NULL;
+        double parsed = base == 10 || base == 16 ? strtod(result.lexeme, &end) : (double)value;
+        if ((end && *end) || !isfinite(parsed)) { free(result.lexeme); goto invalid; }
+        result.numValue.floating = parsed;
+    }
     else {result.unsignedLiteral=integer>INT64_MAX;result.numValue.unsignedInteger=integer;}
     while(state->offset+1<at)next_char(state);
     push_tokenlist(state->list,result);return;

@@ -517,7 +517,7 @@ static int testOneMain(int argc, char **argv) {
     }
     char directory[4096]; oceanTemporary(directory, sizeof(directory), ".ocean-test-XXXXXX");
     if (!mkdtemp(directory)) { perror("ocean test: temporary directory"); return 1; }
-    char executable[sizeof(directory) + 16]; snprintf(executable, sizeof(executable), "%s/program", directory);
+    char executable[sizeof(directory) + 16]; snprintf(executable, sizeof(executable), "%s/program" OCEAN_EXECUTABLE_SUFFIX, directory);
     packageBuild *build = loadTestPackage(location, directory);
     parseResult *program = packageProgram(build);
     int failed = !program;
@@ -533,7 +533,7 @@ static int testOneMain(int argc, char **argv) {
         }
     if (!failed) failed = nativeBuild(NULL, program, executable, 0, 0);
     char displayExecutable[sizeof(directory) + 16];
-    snprintf(displayExecutable, sizeof(displayExecutable), "%s/display", directory);
+    snprintf(displayExecutable, sizeof(displayExecutable), "%s/display" OCEAN_EXECUTABLE_SUFFIX, directory);
     if (!failed && live && (!multiMode || multiUI.displayPID <= 0)) {
         packageBuild *displayBuild = loadTestDisplay();
         parseResult *displayProgram = packageProgram(displayBuild);

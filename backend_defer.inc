@@ -90,7 +90,8 @@ static void scheduleDefer(Backend *b, struct stmt_func *f, MethodInstance *metho
     for (size_t i = 0; i < count; i++) fprintf(description, ", %s", irType(b, captures[i].kind));
     fputs(" }", description); fclose(description);
     Value capture = temp(b, RAW_POINTER);
-    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64))\n", capture.operand, layout);
+    fprintf(b->body, "  %s = call ptr %s(i64 ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64))\n",
+        capture.operand, libcSymbol(b, "malloc"), layout);
     Value *copies = checked(sizeof(Value) * (count + 1));
     for (size_t remaining = count; remaining > 0; remaining--) {
         size_t i = remaining - 1;
@@ -238,13 +239,44 @@ static Value scheduleIntrinsicDefer(Backend *b, expr *callExpression) {
     return value(b, VOID, "");
 }
 
+// ARM64 MinGW supplies a paired non-SEH implementation; x64 _setjmp takes
+// a frame argument (null requests the matching non-unwinding longjmp path).
+static const char *deferSetjmpName(void) {
+#if defined(_WIN32) && defined(__aarch64__)
+    if (!backendWasm()) return "__mingw_setjmp";
+#endif
+    return "_setjmp";
+}
+static const char *deferSetjmpArguments(void) {
+#if defined(_WIN32) && defined(__x86_64__)
+    if (!backendWasm()) return ", ptr null";
+#endif
+    return "";
+}
+// Darwin's _setjmp does not save the signal mask; only _longjmp can restore
+// that buffer. Mixing it with longjmp reads state that was never initialized.
+static const char *deferLongjmpNameForTarget(int darwin) {
+    return darwin ? "_longjmp" : "longjmp";
+}
+static const char *deferLongjmpName(void) {
+#if defined(_WIN32) && defined(__aarch64__)
+    if (!backendWasm()) return "__mingw_longjmp";
+#endif
+#ifdef __APPLE__
+    return deferLongjmpNameForTarget(!backendWasm());
+#else
+    return deferLongjmpNameForTarget(0);
+#endif
+}
+
 // The native driver and recovery buffers use the compiler host's libc ABI.
 static void emitDeferRuntime(Backend *b) {
+    fprintf(b->out, "declare i32 %s(ptr%s) returns_twice\n"
+            "declare void %s(ptr, i32) noreturn\n",
+        libcSymbol(b, deferSetjmpName()), *deferSetjmpArguments() ? ", ptr" : "", libcSymbol(b, deferLongjmpName()));
     fputs(
         "@__ocean.defer_head = internal thread_local global ptr null\n"
         "@__ocean.recovery_head = internal thread_local global ptr null\n"
-        "declare i32 @\"\\01_setjmp\"(ptr) returns_twice\n"
-        "declare void @\"\\01longjmp\"(ptr, i32) noreturn\n"
         "\n"
         "define internal void @__ocean.enter(ptr %frame) {\n"
         "  %parent = load ptr, ptr @__ocean.defer_head\n"
@@ -369,8 +401,10 @@ static void emitDeferRuntime(Backend *b) {
         "  br i1 %recovered, label %resume, label %next\n"
         "resume:\n"
         "  %environment = getelementptr %__ocean.defer_frame, ptr %frame, i32 0, i32 3\n"
-        "  %buffer = load ptr, ptr %environment\n"
-        "  call void @\"\\01longjmp\"(ptr %buffer, i32 1)\n"
+        "  %buffer = load ptr, ptr %environment\n", b->out);
+    fprintf(b->out, "  call void %s(ptr %%buffer, i32 1)\n",
+        libcSymbol(b, deferLongjmpName()));
+    fputs(
         "  unreachable\n"
         "next:\n"
         "  call void @__ocean.discard_defers(ptr %frame)\n"
@@ -389,8 +423,9 @@ static void emitDeferRuntime(Backend *b) {
         "define internal void @__ocean.dispose_capture(ptr %capture) {\n"
         "  %drop.slot = getelementptr { ptr, ptr, ptr }, ptr %capture, i32 0, i32 2\n"
         "  %drop = load ptr, ptr %drop.slot\n"
-        "  call void %drop(ptr %capture)\n"
-        "  call void @\"\\01free\"(ptr %capture)\n"
+        "  call void %drop(ptr %capture)\n", b->out);
+    fprintf(b->out, "  call void %s(ptr %%capture)\n", libcSymbol(b, "free"));
+    fputs(
         "  ret void\n"
         "}\n"
         "define internal void @__ocean.discard_defers(ptr %frame) {\n"
@@ -436,6 +471,5 @@ static void emitDeferRuntime(Backend *b) {
         "  br label %loop\n"
         "done:\n"
         "  ret void\n"
-        "}\n"
-        , b->out);
+        "}\n", b->out);
 }

@@ -195,6 +195,10 @@ if(BUILD_TESTING)
     if(UNIX)
         target_link_libraries(asm_backend_probe PRIVATE m)
     endif()
+    add_test(NAME libc_symbol_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/libc_symbol_test.py"
+        "$<TARGET_FILE:asm_backend_probe>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(libc_symbol_test PROPERTIES TIMEOUT 60)
     add_test(NAME standard_library_asm_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/standard_library_asm_test.py"
         "$<TARGET_FILE:ocean-c>" "$<TARGET_FILE:asm_backend_probe>" "${OCEAN_CLANG_EXECUTABLE}")
@@ -253,6 +257,23 @@ if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     add_executable(runtime_threads_test runtime_threads.c tests/runtime_threads_test.c)
     target_link_libraries(runtime_threads_test PRIVATE Threads::Threads)
+    if(UNIX)
+        # Darwin exposes wait() through its runtime headers. Make that namespace
+        # visible on every POSIX test host to catch accidental libc collisions.
+        target_compile_definitions(runtime_threads_test PRIVATE _POSIX_C_SOURCE=200809L)
+        target_compile_options(runtime_threads_test PRIVATE -include sys/wait.h)
+    endif()
+    if(EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/os/exec/exec.oc")
+        add_test(NAME release_smoke_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_smoke_test.py" "$<TARGET_FILE:ocean-c>")
+        set_tests_properties(release_smoke_test PROPERTIES TIMEOUT 180
+            ENVIRONMENT "OCEAN_SRC=${OCEAN_STANDARD_LIBRARY_SOURCE}")
+    endif()
+    if(UNIX)
+        add_test(NAME process_spawn_api_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_spawn_api_test.py" "${OCEAN_CLANG_EXECUTABLE}")
+        set_tests_properties(process_spawn_api_test PROPERTIES TIMEOUT 60)
+    endif()
     add_test(NAME runtime_threads_test COMMAND runtime_threads_test)
     set_tests_properties(runtime_threads_test PROPERTIES TIMEOUT 30)
     if(EXISTS "${OCEAN_STANDARD_LIBRARY_SOURCE}/threads/tests/test_threads.py")

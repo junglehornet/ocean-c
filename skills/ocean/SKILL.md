@@ -23,6 +23,11 @@ An installed compiler is named `ocean`; `ocean-c` accepts the same interface.
 From a compiler checkout, build it with a C23 compiler, CMake, and libffi development
 headers. Clang must be on PATH to check, link, or run Ocean programs. LLVM development
 libraries are unnecessary: Ocean emits textual LLVM IR and invokes Clang.
+Wasm program/package code uses `-O1` for register coloring to stay within
+JavaScript engine local-variable limits; large shared reflection support keeps
+the default pipeline to bound compilation time. Native Windows executables
+reserve an 8 MiB default stack. Native Windows run/test helpers use `.exe`
+paths, and deferred recovery uses the matching host CRT ABI.
 
 ```sh
 cmake -S . -B build
@@ -59,11 +64,18 @@ Compiler and installer tar assets use `<name>_<version>_<arch>-<os>.tar`;
 Windows additionally gets zip assets. Archives contain one executable only.
 The installer is entirely native Ocean. Matching ocean-deps tar.xz assets
 provide optional toolchain and library bundles.
+Releases retain separate native runners (RISC-V uses QEMU). Linux release
+installers use a private static libcurl with OpenSSL and threaded DNS, built by
+`.github/scripts/build-static-curl.sh`; `RELEASE_STATIC_PKG_CONFIG_PATH` selects
+its metadata only for the installer link. Ordinary builds and dependency bundles
+use system libcurl. Windows release metadata checks use the checkout Git via
+`RELEASE_GIT`. The installer's `--platform` prints one `<arch>-<os>` token.
 
 Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
 CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a
-Windows GNU/MinGW Clang toolchain on PATH. Integer literals use fixed 64-bit
-storage on every native host, including Windows where C `long` is 32-bit.
+Windows GNU/MinGW Clang toolchain on PATH. Decimal floating-point literals are
+converted directly to binary64 rather than accumulated in host `long double`, including on Windows ARM64.
+Integer literals use fixed 64-bit storage on every native host, including Windows where C `long` is 32-bit.
 Windows LSP requests run in isolated re-executed workers with editor overlays;
 Windows unit tests use captured reports, not the Unix live terminal frontend.
 Package/module resolution and installed `bin/`/`src/` layout are unchanged.
@@ -98,12 +110,28 @@ Fix errors and inspect warnings before using `run` for behavior checks.
 `build` produces a native executable for a root `main` package; other packages
 produce object files and cannot be run. Default output is the directory name for
 executables, `<package>.o` for libraries, and `a.ll` for emitted LLVM. `-o` overrides it.
-Library objects and bundled native thread runtime objects use relocatable linking
-(`-r -nostdlib`), without executable-only PIE options.
+Unix and Wasm library objects use relocatable linking (`-r -nostdlib`).
+Native Windows library artifacts and cached objects bundled with C runtimes are
+indexed COFF archives, even when named `.o`; `llvm-ar` must be on PATH with Clang.
+CI uses Clang 23 on x86-64/AArch64 and native Clang 21 on RISC-V. Use Clang 23
+for JavaScript/Wasm, including cached programs with shared method specializations.
 
 With caching enabled, native builds emit LLVM directly into one module per source
 package and a shared support module for globals, startup, concrete specializations,
-and runtime helpers.
+and runtime helpers. Native-module symbol serialization uses an in-memory
+buffer on all hosts, including Windows; it does not create a temporary file for
+each LLVM line.
+Compiler runtime libc imports preserve each target's symbol spelling: Mach-O
+imports have a leading underscore, while ELF, Win64 COFF, and Wasm do not.
+POSIX worker threads reserve at least 8 MiB of stack, preserving larger host
+defaults; this also applies to native test workers on macOS.
+Darwin relocatable runtime and library links preserve private external symbols
+so cached package objects can resolve shared constants and helpers.
+Native Darwin recovery pairs `_setjmp` with `_longjmp`; WebAssembly and
+Windows keep their target-specific recovery ABI.
+The embedded process runtime uses the standard spawn working-directory API on
+macOS 26, with a guarded Darwin extension fallback for older SDKs and systems.
+
 Each source package compiles all its ordinary functions, so the same cached object
 can serve callers using different functions. Executable linking removes unreachable
 functions and data using function/data sections (`--gc-sections`, or `-dead_strip`
@@ -479,6 +507,8 @@ create a named mutable byte array for persistent C access.
 unconstrained `T`; no comparability constraint is required. Operands still follow
 the language's type-compatibility and pointer/null rules.
 
+Aggregate equality helpers pass borrowed snapshots by pointer, avoiding native
+aggregate argument packing differences across targets.
 Struct equality recursively compares stored fields, ignoring padding. Arrays
 compare lengths and then elements recursively, including nested arrays and
 structs. Capacity and allocation address do not affect array equality. Fixed,
@@ -1145,7 +1175,11 @@ Linux x86-64/AArch64/RISC-V64, macOS x86-64/AArch64, and Windows x86-64/AArch64.
 The matching compiler links -lcurl automatically, including object-cache hits.
 The development/import library, shared library/DLL dependencies, and trust store
 must be installed. Manual links also need -lcurl and Ocean's ordinary ABI/thread
-runtime dependencies. Static transitive dependency discovery is not implemented.
+runtime dependencies. Static HTTP executable links query
+`pkg-config --static --libs libcurl`; install pkg-config and the complete static
+dependency closure advertised by libcurl.pc. Some distributions omit static
+libraries for optional SSH/GSSAPI backends, requiring a reduced static libcurl
+build. Dynamic links continue to use -lcurl.
 
 Get(url) and Post(url, contentType, body) return Result<Response>. NewRequest
 accepts HTTP/HTTPS; empty method means GET. Client.Do/Get/Post return the same

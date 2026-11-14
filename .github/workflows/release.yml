@@ -5,6 +5,9 @@ on:
     tags:
       - '*'
 
+env:
+  PYTHONUTF8: "1"
+
 permissions:
   contents: read
 
@@ -43,16 +46,22 @@ jobs:
         if: matrix.os != 'windows'
         with:
           python-version: '3.12'
+      - name: Preserve the checkout Git executable on Windows
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: '"RELEASE_GIT=$((Get-Command git).Source)" >> $env:GITHUB_ENV'
       - name: Linux dependencies
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-19 lld-19 llvm-19 libffi-dev libcurl4-openssl-dev libssl-dev libpsl-dev libidn2-dev libnghttp2-dev libssh2-1-dev librtmp-dev libkrb5-dev libldap2-dev libbrotli-dev libzstd-dev libunistring-dev zlib1g-dev pkg-config patchelf build-essential xz-utils make ninja-build
+          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev libssl-dev pkg-config patchelf build-essential xz-utils make ninja-build
           python3 -m pip install 'cmake>=4.2,<5'
-          mkdir -p "$RUNNER_TEMP/ocean-tools"
-          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/ocean-tools/clang"
-          for tool in ld.lld llvm-ar llvm-ranlib; do ln -s "/usr/bin/$tool-19" "$RUNNER_TEMP/ocean-tools/$tool"; done
-          echo "$RUNNER_TEMP/ocean-tools" >> "$GITHUB_PATH"
+          bash .github/scripts/install-llvm.sh
+      - name: Build standalone installer HTTP dependencies
+        if: matrix.os == 'linux'
+        run: |
+          bash .github/scripts/build-static-curl.sh "$RUNNER_TEMP/ocean-static-curl"
+          echo "RELEASE_STATIC_PKG_CONFIG_PATH=$RUNNER_TEMP/ocean-static-curl/lib/pkgconfig" >> "$GITHUB_ENV"
       - name: macOS dependencies
         if: matrix.os == 'macos'
         run: |
@@ -85,6 +94,8 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
+          clang --version
+          [[ "$(clang -dumpversion)" == 23.* ]]
           python3 scripts/release.py --version "$RELEASE_VERSION" --os "$RELEASE_OS" --arch "$RELEASE_ARCH" --stdlib release-stdlib
       - name: Build, verify metadata, test, and package native Windows binaries
         if: matrix.os == 'windows'
@@ -95,6 +106,9 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
+          set -euo pipefail
+          clang --version
+          [[ "$(clang -dumpversion)" == 23.* ]]
           python scripts/release.py --version "$RELEASE_VERSION" --os windows --arch "$RELEASE_ARCH" --stdlib release-stdlib --cmake-arg=-DCMAKE_EXE_LINKER_FLAGS=-static --cmake-arg=-DCMAKE_RC_COMPILER=llvm-rc --cmake-arg="-DOCEAN_FFI_INCLUDE_DIR=$(cygpath -m "$MINGW_PREFIX/include")"
       - uses: actions/upload-artifact@v4
         with:
@@ -130,10 +144,16 @@ jobs:
             RELEASE_VERSION: ${{ github.ref_name }}
           install: |
             apt-get update
-            apt-get install -y clang lld llvm cmake libffi-dev libcurl4-openssl-dev libssl-dev libpsl-dev libidn2-dev libnghttp2-dev libssh2-1-dev librtmp-dev libkrb5-dev libldap2-dev libbrotli-dev libzstd-dev libunistring-dev zlib1g-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
+            apt-get install -y clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git
           run: |
+            mkdir -p /tmp/ocean-tools
+            for tool in clang ld.lld llvm-ar llvm-ranlib; do ln -sf "/usr/bin/$tool-21" "/tmp/ocean-tools/$tool"; done
+            export PATH="/tmp/ocean-tools:$PATH" PYTHONUTF8=1
+            clang --version
             export CMAKE_GENERATOR=Ninja CMAKE_BUILD_PARALLEL_LEVEL=2
             git config --global --add safe.directory "$PWD"
+            bash .github/scripts/build-static-curl.sh /tmp/ocean-static-curl
+            export RELEASE_STATIC_PKG_CONFIG_PATH=/tmp/ocean-static-curl/lib/pkgconfig
             python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --stdlib release-stdlib
       - uses: actions/upload-artifact@v4
         with:

@@ -378,6 +378,18 @@ static Value value(Backend *b, Kind k, const char *fmt, ...) {
     va_end(args);
     return (Value){.kind = k, .operand = ownOperand(b, text)};
 }
+// LLVM's \01 escape suppresses target mangling while keeping runtime imports
+// distinct from user FFI declarations. Mach-O therefore needs an explicit '_'.
+static const char *libcSymbolForTarget(Backend *b, const char *name, int darwin) {
+    return value(b, RAW_POINTER, "@\"\\01%s%s\"", darwin ? "_" : "", name).operand;
+}
+static const char *libcSymbol(Backend *b, const char *name) {
+#ifdef __APPLE__
+    return libcSymbolForTarget(b, name, !backendWasm());
+#else
+    return libcSymbolForTarget(b, name, 0);
+#endif
+}
 static void nativeName(Backend *, const char *, const char *);
 static const char *nativeKindIdentity(Backend *, Kind);
 static void nativeDeferredIdentity(Backend *, unsigned);
@@ -2111,10 +2123,12 @@ static Value allocateCollection(Backend *b, Kind kind, Value count) {
     Value result = temp(b, kind), data = temp(b, RAW_POINTER);
     b->returnTransportUsed = 1;
     Value base = temp(b, RAW_POINTER);
-    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 32)\n", base.operand);
+    fprintf(b->body, "  %s = call ptr %s(i64 32)\n",
+        base.operand, libcSymbol(b, "malloc"));
     rawStore(b, base, value(b, RAW_POINTER, "inttoptr (i64 1 to ptr)"));
     fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 8\n", result.operand, base.operand);
-    fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", data.operand, bytes.operand);
+    fprintf(b->body, "  %s = call ptr %s(i64 %s)\n",
+        data.operand, libcSymbol(b, "malloc"), bytes.operand);
     rawStore(b, value(b, INT, "%s", result.operand), count);
     Value cap = temp(b, INT), field = temp(b, RAW_POINTER);
     fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 1\n", cap.operand, result.operand);
@@ -2133,6 +2147,17 @@ static Value mapCountAddress(Backend *b, Value map) {
 }
 static Value collectionCopy(Backend *b, Value source, Kind target) {
     Value count = arrayLength(b, source), result = allocateCollection(b, target, count);
+    BufferKind *from = bufferKind(b, source.kind), *to = bufferKind(b, target);
+    if (from->element == to->element && !ownsArrays(b, to->element)) {
+        Value data = arrayData(b, source), destination = arrayData(b, result);
+        Value bytes = temp(b, INT), stride = storageSize(b, to->element);
+        fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, count.operand, stride.operand);
+        fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
+                destination.operand, data.operand, bytes.operand);
+        b->dataCopyUsed = 1;
+        if (to->map) rawStore(b, mapCountAddress(b, result), load(b, mapCountAddress(b, source)));
+        return result;
+    }
     Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
     unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
     jump(b, condition); label(b, condition);
@@ -2544,10 +2569,12 @@ static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
         rawStore(b, cursor, next); jump(b, condition); label(b, done);
     }
     Value data = arrayData(b, dynamicArray);
-    fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", data.operand);
+    fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), data.operand);
     Value base = temp(b, RAW_POINTER);
     fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", base.operand, dynamicArray.operand);
-    fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", base.operand);
+    fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), base.operand);
     jump(b, end); label(b, end);
 }
 static Value arrayBytes(Backend *b, Value array) {
@@ -2625,7 +2652,8 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
         if (b->copyTransport == 3) result = source;
         else if (b->copyTransport == 1) {
             b->returnTransportUsed = 1;
-            fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", base.operand, allocationSize.operand);
+            fprintf(b->body, "  %s = call ptr %s(i64 %s)\n",
+        base.operand, libcSymbol(b, "malloc"), allocationSize.operand);
             Value present = temp(b, BOOL);
             fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, base.operand);
             unsigned good = ++b->label, bad = ++b->label;
@@ -2675,7 +2703,8 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
             detachDynamicArrayTemporary(b, source);
             Value base = temp(b, RAW_POINTER);
             fprintf(b->body, "  %s = getelementptr i8, ptr %s, i64 -8\n", base.operand, source.operand);
-            fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", base.operand);
+            fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), base.operand);
         }
         if (b->copyTransport != 3) trackDynamicArrays(b, result);
         return result;
@@ -2694,6 +2723,14 @@ static Value copyValue(Backend *b, Value source, unsigned depth) {
 static void initializeArray(Backend *b, Value array, Value count) {
     BufferKind *t = bufferKind(b, array.kind);
     count = coerce(b, count, INT);
+    // Byte collections dominate string/request preparation. Avoid an unoptimized
+    // checked element loop for every zeroed byte, especially under emulation.
+    if (t->element == I8 || t->element == U8) {
+        Value data = arrayData(b, array);
+        fprintf(b->body, "  call void @llvm.memset.p0.i64(ptr %s, i8 0, i64 %s, i1 false)\n", data.operand, count.operand);
+        b->dataCopyUsed = 1;
+        return;
+    }
     Value cursor = slot(b, INT);
     rawStore(b, cursor, value(b, INT, "0"));
     unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
@@ -4064,7 +4101,8 @@ static Value expressionImpl(Backend *b, expr *e) {
         fprintf(b->body, "  %s = icmp ne i64 %s, 0\n", nonempty.operand, size.operand);
         fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 1\n", bytes.operand, nonempty.operand, size.operand);
         b->newUsed = 1;
-        fprintf(b->body, "  %s = call ptr @\"\\01calloc\"(i64 1, i64 %s)\n", result.operand, bytes.operand);
+        fprintf(b->body, "  %s = call ptr %s(i64 1, i64 %s)\n",
+        result.operand, libcSymbol(b, "calloc"), bytes.operand);
         Value present = temp(b, BOOL);
         fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, result.operand);
         unsigned good = ++b->label, bad = ++b->label;
@@ -4462,7 +4500,8 @@ static Value expressionImpl(Backend *b, expr *e) {
                 if (addressable(&v->params[0])) rawStore(b, address(b, &v->params[0]), emptyValue(b, item.kind));
             } else {
                 if (t && t->shape == 6) dropNestedDynamicArrays(b, load(b, value(b, t->element, "%s", item.operand)), 0);
-                fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", item.operand);
+                fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), item.operand);
             }
             return value(b, VOID, "");
         }
@@ -5785,12 +5824,11 @@ static void emitBoundsRuntime(Backend *b) {
         "  call void @__ocean.panic_report(ptr %%m, i64 %%n, ptr %%f, i64 %%l, i64 %%c, ptr %%s)\n  unreachable\n}\n");
     Value panicPrefix = moduleString(b, "Panic: ");
     Value panicLocation = moduleString(b, "\n  --> %s:%lld:%lld\n");
-    fprintf(b->out,
-            "declare i64 @\"\\01write\"(i32, ptr, i64)\n"
+    fprintf(b->out, "declare i64 %s(i32, ptr, i64)\n"
             "define internal void @__ocean.panic_report(ptr %%message, i64 %%size, ptr %%file, i64 %%line, "
             "i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
-            "  call i64 @\"\\01write\"(i32 2, ptr %s, i64 7)\n"
-            "  call i64 @\"\\01write\"(i32 2, ptr %%message, i64 %%size)\n"
+            "  call i64 %s(i32 2, ptr %s, i64 7)\n"
+            "  call i64 %s(i32 2, ptr %%message, i64 %%size)\n"
             "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %s, ptr %%file, i64 %%line, i64 %%column)\n"
             "  call void @__ocean.runtime_diagnostic(ptr %%file, i64 %%line, i64 %%column, ptr %%snippet)\n"
             "  unreachable\n}\n"
@@ -5799,7 +5837,8 @@ static void emitBoundsRuntime(Backend *b) {
             "  call i32 (i32, ptr, ...) @%s(i32 2, ptr %%format, i64 %%index, i64 %%length, "
             "ptr %%file, i64 %%line, i64 %%column)\n"
             "  call void @__ocean.runtime_diagnostic(ptr %%file, i64 %%line, i64 %%column, ptr %%snippet)\n"
-            "  unreachable\n}\n", panicPrefix.operand, printName, panicLocation.operand, printName);
+            "  unreachable\n}\n",
+        libcSymbol(b, "write"), libcSymbol(b, "write"), panicPrefix.operand, libcSymbol(b, "write"), printName, panicLocation.operand, printName);
     fprintf(b->out,
             "define internal void @__ocean.return_panic(ptr %%message, i64 %%size, ptr %%file, "
             "i64 %%line, i64 %%column, ptr %%snippet) noreturn {\nentry:\n"
@@ -5958,7 +5997,8 @@ static void emitFunction(Backend *b, struct stmt_func *f, FILE *output) {
         fprintf(b->slots, "  %s = alloca [%zu x i8], align %zu\n", buffer.operand, sizeof(jmp_buf), (size_t)_Alignof(jmp_buf));
         fprintf(b->body, "  %s = getelementptr %%__ocean.defer_frame, ptr %s, i32 0, i32 3\n", environment.operand, b->deferFrame.operand);
         fprintf(b->body, "  store ptr %s, ptr %s\n", buffer.operand, environment.operand);
-        fprintf(b->body, "  %s = call i32 @\"\\01_setjmp\"(ptr %s)\n", resumed.operand, buffer.operand);
+        fprintf(b->body, "  %s = call i32 %s(ptr %s%s)\n",
+        resumed.operand, libcSymbol(b, deferSetjmpName()), buffer.operand, deferSetjmpArguments());
         fprintf(b->body, "  %s = icmp ne i32 %s, 0\n", recovering.operand, resumed.operand);
         recoverLabel = ++b->label;
         unsigned startLabel = ++b->label;
@@ -6259,7 +6299,8 @@ static void emitAnyType(Backend *b, Kind kind) {
             if (t->shape == 4) pointer = copied;
             else {
                 pointer = temp(b, RAW_POINTER);
-                fprintf(b->body, "  %s = call ptr @\"\\01malloc\"(i64 %s)\n", pointer.operand, size.operand);
+                fprintf(b->body, "  %s = call ptr %s(i64 %s)\n",
+        pointer.operand, libcSymbol(b, "malloc"), size.operand);
                 Value present = temp(b, BOOL);
                 fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, pointer.operand);
                 unsigned good = ++b->label, bad = ++b->label;
@@ -6310,7 +6351,8 @@ static void emitAnyType(Backend *b, Kind kind) {
             Value source = t->shape == 4 ? value(b, kind, "%s", pointer.operand)
                                        : load(b, value(b, kind, "%s", pointer.operand));
             copyValue(b, source, 0);
-            if (t->shape != 4) fprintf(b->body, "  call void @\"\\01free\"(ptr %s)\n", pointer.operand);
+            if (t->shape != 4) fprintf(b->body, "  call void %s(ptr %s)\n",
+        libcSymbol(b, "free"), pointer.operand);
             jump(b, done); label(b, done); fprintf(b->body, "  ret void\n");
         }
         copy(b->slots, b->out); copy(b->body, b->out); fprintf(b->out, "}\n");
@@ -6654,8 +6696,9 @@ static void emitAnyRuntime(Backend *b) {
         "  %drop = load ptr, ptr %slot\n"
         "  %owned = icmp ne ptr %drop, null\n"
         "  br i1 %owned, label %allocate, label %done\n"
-        "allocate:\n"
-        "  %node = call ptr @\"\\01malloc\"(i64 ptrtoint (ptr getelementptr ({ ptr, { ptr, i64 } }, ptr null, i64 1) to i64))\n"
+        "allocate:\n", b->out);
+    fprintf(b->out, "  %%node = call ptr %s(i64 ptrtoint (ptr getelementptr ({ ptr, { ptr, i64 } }, ptr null, i64 1) to i64))\n", libcSymbol(b, "malloc"));
+    fputs(
         "  %ok = icmp ne ptr %node, null\n"
         "  br i1 %ok, label %link, label %bad\nbad:\n  call void @llvm.trap()\n  unreachable\n"
         "link:\n"
@@ -6673,8 +6716,9 @@ static void emitAnyRuntime(Backend *b) {
         "  %next = load ptr, ptr %node\n"
         "  %value = getelementptr { ptr, { ptr, i64 } }, ptr %node, i32 0, i32 1\n"
         "  %box = load { ptr, i64 }, ptr %value\n"
-        "  call void @__ocean.any.drop({ ptr, i64 } %box)\n"
-        "  call void @\"\\01free\"(ptr %node)\n"
+        "  call void @__ocean.any.drop({ ptr, i64 } %box)\n", b->out);
+    fprintf(b->out, "  call void %s(ptr %%node)\n", libcSymbol(b, "free"));
+    fputs(
         "  br label %check\ndone:\n  store ptr %stop, ptr %region\n  ret void\n}\n", b->out);
 }
 
@@ -7000,15 +7044,19 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
     if (copy(functions, output)) fail(&b, "could not write module functions");
     fclose(functions);
     if (b.stringComparisonUsed)
-        fprintf(output, "declare i32 @\"\\01memcmp\"(ptr, ptr, i64)\n");
+        fprintf(output, "declare i32 %s(ptr, ptr, i64)\n",
+        libcSymbol(&b, "memcmp"));
     if (b.dataCopyUsed)
-        fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n");
-    if (b.newUsed) fprintf(output, "declare ptr @\"\\01calloc\"(i64, i64)\n");
+        fprintf(output, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)\n"
+                        "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)\n");
+    if (b.newUsed) fprintf(output, "declare ptr %s(i64, i64)\n",
+        libcSymbol(&b, "calloc"));
     {
         // Deferred captures and boxed values use libc allocation. Distinct IR
         // names avoid conflicts with user declarations of the same symbols.
-        fprintf(output, "declare ptr @\"\\01malloc\"(i64)\n"
-                        "declare void @\"\\01free\"(ptr)\n");
+        fprintf(output, "declare ptr %s(i64)\n"
+                        "declare void %s(ptr)\n",
+        libcSymbol(&b, "malloc"), libcSymbol(&b, "free"));
     }
     emitFFIRuntime(&b);
     if (b.nullChecksUsed || b.ffiUsed) fprintf(output, "declare void @llvm.trap() cold noreturn nounwind\n");
@@ -7178,6 +7226,22 @@ invalid:
 }
 static void freeCurlFlags(char **flags, size_t count) { for (size_t i = 0; i < count; i++) free(flags[i]); free(flags); }
 
+#ifdef _WIN32
+// COFF has no relocatable link. Keep runtime and generated objects together in
+// an indexed archive, flattening previous archives when packaging libraries.
+static int archiveWindowsObjects(const char *output, const char **objects, size_t count) {
+    char **args = checked((count + 5) * sizeof(*args));
+    args[0] = "llvm-ar"; args[1] = "qcLs"; args[2] = (char *)output;
+    for (size_t i = 0; i < count; i++) args[i + 3] = (char *)objects[i];
+    args[count + 3] = NULL;
+    // mkstemp reserves the output path; llvm-ar needs an absent or valid archive.
+    unlink(output);
+    int failed = oceanRun(args); free(args);
+    if (failed) fputs("backend error: llvm-ar failed to package COFF objects\n", stderr);
+    return failed;
+}
+#endif
+
 static int compileLLVMMode(const char *irPath, const char *outputPath, int object, const char *objectPath, int staticLink) {
     size_t len = strlen(outputPath) + 16;
     char *staged = checked(len);
@@ -7210,12 +7274,21 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
     if (needsThreads && (!object || ownsThreadRuntime) && !threadObject) { unlink(staged); free(staged); return 1; }
     char *processObject = needsProcess && (!object || ownsProcessRuntime) ? compileProcessRuntime() : NULL;
     if (needsProcess && (!object || ownsProcessRuntime) && !processObject) { if (threadObject) { unlink(threadObject); free(threadObject); } unlink(staged); free(staged); return 1; }
+    int coffObject = 0;
+#ifdef _WIN32
+    coffObject = object && !backendWasm();
+#endif
     size_t curlCount = 0; char **curlFlags = needsCurl && staticLink && !object ? staticCurlFlags(&curlCount) : NULL;
     if (needsCurl && staticLink && !object && !curlFlags) { if (processObject) { unlink(processObject); free(processObject); } if (threadObject) { unlink(threadObject); free(threadObject); } unlink(staged); free(staged); return 1; }
         char **args = checked((48 + curlCount) * sizeof(*args)); size_t n = 0;
         args[n++] = "clang"; args[n++] = "-Wno-override-module";
         if (backendWasm()) {
             args[n++] = "--target=wasm32-unknown-unknown";
+            // Package support can contain very large reflection dispatchers.
+            // Keep their compilation bounded; user/package code needs register
+            // coloring to stay within JavaScript's per-function local limit.
+            const char *base = strrchr(irPath, '/'); base = base ? base + 1 : irPath;
+            if (strcmp(base, "support.ll")) { args[n++] = "-O1"; args[n++] = "-fno-inline"; }
             if (!object) { args[n++] = "-nostdlib"; args[n++] = "-Wl,--no-entry"; args[n++] = "-Wl,--export=main"; args[n++] = "-Wl,--allow-undefined"; }
         }
         args[n++] = "-ffunction-sections"; args[n++] = "-fdata-sections";
@@ -7230,18 +7303,22 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         if (objectPath) args[n++] = (char *)objectPath;
         else {
             if (object) {
-                if (threadObject || processObject) {
+                if (!coffObject && (threadObject || processObject)) {
                     args[n++] = "-r"; args[n++] = "-nostdlib";
+#if defined(__APPLE__)
+                    // Other package objects still import hidden support symbols.
+                    if (!backendWasm()) args[n++] = "-Wl,-keep_private_externs";
+#endif
                 } else args[n++] = "-c";
             }
             args[n++] = "-x"; args[n++] = "ir"; args[n++] = (char *)irPath;
         }
-        if (threadObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = threadObject; }
-        if (processObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = processObject; }
+        if (threadObject && !coffObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = threadObject; }
+        if (processObject && !coffObject) { args[n++] = "-x"; args[n++] = "none"; args[n++] = processObject; }
         args[n++] = "-o"; args[n++] = staged;
         if (!object) {
 #if defined(_WIN32)
-            if (!backendWasm()) { args[n++] = "-lkernel32"; args[n++] = "-lshell32"; }
+            if (!backendWasm()) { args[n++] = "-lkernel32"; args[n++] = "-lshell32"; args[n++] = "-Wl,--stack,8388608"; }
 #endif
             if (needsFFI && !backendWasm()) args[n++] = "-lffi";
             if (needsCurl && !backendWasm()) args[n++] = "-lcurl";
@@ -7252,6 +7329,17 @@ static int compileLLVMMode(const char *irPath, const char *outputPath, int objec
         for (size_t i = 0; i < curlCount; i++) args[n++] = curlFlags[i];
         args[n] = NULL;
     int failed = oceanRun(args);
+#ifdef _WIN32
+    if (!failed && coffObject && (threadObject || processObject)) {
+        char *archive = checked(strlen(staged) + 3); sprintf(archive, "%s.a", staged);
+        const char *objects[3] = {staged}; size_t count = 1;
+        if (threadObject) objects[count++] = threadObject;
+        if (processObject) objects[count++] = processObject;
+        failed = archiveWindowsObjects(archive, objects, count);
+        if (!failed) { unlink(staged); failed = rename(archive, staged) != 0; }
+        unlink(archive); free(archive);
+    }
+#endif
     free(args); freeCurlFlags(curlFlags, curlCount);
     if (processObject) { unlink(processObject); free(processObject); }
     if (failed == 127) fputs("could not execute clang (install clang and add it to PATH)\n", stderr);
@@ -7302,6 +7390,17 @@ int checkBackend(parseResult *program) {
 }
 
 int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, int curl, int processes, const char *output, int library, int staticLink) {
+#ifdef _WIN32
+    if (library && !backendWasm()) {
+        char *staged = checked(strlen(output) + 16); sprintf(staged, "%s.XXXXXX", output);
+        int fd = mkstemp(staged);
+        if (fd < 0) { perror("could not create library output"); free(staged); return 1; }
+        close(fd);
+        int failed = archiveWindowsObjects(staged, objects, count);
+        if (!failed && rename(staged, output)) { perror("could not save library"); failed = 1; }
+        unlink(staged); free(staged); return failed;
+    }
+#endif
     char *staged=checked(strlen(output)+16);sprintf(staged,"%s.XXXXXX",output);
     int fd=mkstemp(staged);if(fd<0){perror("could not create output");free(staged);return 1;}close(fd);
     (void)processes; /* The support package object owns the process ABI. */
@@ -7322,13 +7421,19 @@ int linkLLVMObjects(const char **objects, size_t count, int ffi, int threads, in
 #endif
     }
     if(staticLink&&!library)args[n++]="-static";
-    if(library){args[n++]="-r";args[n++]="-nostdlib";}
+    if(library){
+        args[n++]="-r";args[n++]="-nostdlib";
+#if defined(__APPLE__)
+        // Preserve hidden definitions for callers of the relocatable library.
+        if (!backendWasm()) args[n++]="-Wl,-keep_private_externs";
+#endif
+    }
     for(size_t i=0;i<count;i++)args[n++]=(char*)objects[i];
     if (processObject) args[n++] = processObject;
     args[n++]="-o";args[n++]=staged;if(ffi&&!library&&!backendWasm())args[n++]="-lffi";
     if(curl&&!library&&!backendWasm())args[n++]="-lcurl";
 #if defined(_WIN32)
-    if(!library&&!backendWasm()){args[n++]="-lkernel32";args[n++]="-lshell32";}
+    if(!library&&!backendWasm()){args[n++]="-lkernel32";args[n++]="-lshell32";args[n++]="-Wl,--stack,8388608";}
 #endif
 #if !defined(_WIN32)
     if (threads && !library && !backendWasm()) args[n++]="-pthread";

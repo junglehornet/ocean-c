@@ -190,15 +190,17 @@ static void emitClosureRuntime(Backend *b) {
     if (!b->closuresUsed) return;
     fputs(
         "@__ocean.closure_head = internal global ptr null\n"
-        "@__ocean.closure_registered = internal global i8 0\n"
-        "declare i32 @\"\\01atexit\"(ptr)\n"
+        "@__ocean.closure_registered = internal global i8 0\n", b->out);
+    fprintf(b->out, "declare i32 %s(ptr)\n", libcSymbol(b, "atexit"));
+    fputs(
         "define internal ptr @__ocean.closure_alloc(i64 %size, ptr %drop) {\n"
         "entry:\n"
         "  %registration = cmpxchg ptr @__ocean.closure_registered, i8 0, i8 1 acq_rel acquire\n"
         "  %first = extractvalue { i8, i1 } %registration, 1\n"
         "  br i1 %first, label %register, label %wait\n"
-        "register:\n"
-        "  call i32 @\"\\01atexit\"(ptr @__ocean.closure_cleanup)\n"
+        "register:\n", b->out);
+    fprintf(b->out, "  call i32 %s(ptr @__ocean.closure_cleanup)\n", libcSymbol(b, "atexit"));
+    fputs(
         "  store atomic i8 2, ptr @__ocean.closure_registered release, align 1\n"
         "  br label %allocate\n"
         "wait:\n"
@@ -206,8 +208,9 @@ static void emitClosureRuntime(Backend *b) {
         "  %ready = icmp eq i8 %state, 2\n"
         "  br i1 %ready, label %allocate, label %wait\n"
         "allocate:\n"
-        "  %total = add i64 %size, 16\n"
-        "  %node = call ptr @\"\\01malloc\"(i64 %total)\n"
+        "  %total = add i64 %size, 16\n", b->out);
+    fprintf(b->out, "  %%node = call ptr %s(i64 %%total)\n", libcSymbol(b, "malloc"));
+    fputs(
         "  %drop.slot = getelementptr { ptr, ptr }, ptr %node, i32 0, i32 1\n"
         "  store ptr %drop, ptr %drop.slot\n"
         "  br label %publish\n"
@@ -234,7 +237,8 @@ static void emitClosureRuntime(Backend *b) {
         "  br i1 %has.drop, label %destroy, label %free\ndestroy:\n"
         "  %payload = getelementptr i8, ptr %node, i64 16\n"
         "  call void %drop(ptr %payload)\n"
-        "  br label %free\nfree:\n"
-        "  call void @\"\\01free\"(ptr %node)\n"
+        "  br label %free\nfree:\n", b->out);
+    fprintf(b->out, "  call void %s(ptr %%node)\n", libcSymbol(b, "free"));
+    fputs(
         "  br label %loop\ndone:\n  ret void\n}\n", b->out);
 }

@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
     assert failure.returncode == 1 and "Panic: release panic" in failure.stderr, failure
     source.write_text("package main; func main() {}", encoding="utf-8")
     test = root / "main_test.oc"
-    test.write_text('package main; import "testing"; func TestRelease(t *testing.T) { if (9223372036854775807 < 0) t.Fatal("integer width"); }', encoding="utf-8")
+    test.write_text('package main; import "testing"; func TestRelease(t *testing.T) { if (9223372036854775807 < 0) t.Fatal("integer width"); } func TestRecovery(t *testing.T) { defer func() { if (recover() == null) t.Fatal("missing panic"); }(); panic "native recovery"; }', encoding="utf-8")
     execute("test", "--notty", str(root), env=environment)
     other = root / "other"
     other.mkdir()
@@ -44,6 +44,33 @@ with tempfile.TemporaryDirectory(prefix="ocean release ") as directory:
     (other / "sample_test.oc").write_text('package sample; import "testing"; func TestOther(t *testing.T) { t.Parallel(); }', encoding="utf-8")
     execute("test", "--notty", "-t", "2", str(root), str(other), env=environment)
     test.unlink()
+    # Cached support includes both native runtimes. COFF packages must use
+    # archive composition, not an unsupported relocatable (-r) link. On Mach-O,
+    # hidden constants must remain external through runtime/library composition.
+    runtime = root / "runtime"
+    runtime.mkdir()
+    (runtime / "main.oc").write_text('package main; import "sync"; import "os/exec"; import "io"; '
+        'func main() int { m: sync.Mutex; m.Lock(); m.Unlock(); io.Println("runtime constant").unwrap(); '
+        'if (!exec.LookPath("ocean-missing-release-fixture-9861").hasError()) return 1; return 0; }')
+    runtime_binary = root / ("runtime output" + suffix)
+    for _ in range(2):
+        execute("build", str(runtime), "-o", str(runtime_binary), env=environment)
+        result = subprocess.run([*runner, str(runtime_binary)], check=True,
+                                capture_output=True, text=True, timeout=30)
+        assert result.stdout == "runtime constant\n", result
+    library = root / "runtime.o"
+    (runtime / "main.oc").write_text('package nativefixture; import "sync"; import "os/exec"; import "io"; '
+        'func Probe() { m: sync.Mutex; m.Lock(); m.Unlock(); io.Println("library constant"); exec.LookPath("ocean-missing-release-fixture-9861"); }')
+    execute("build", str(runtime), "-o", str(library), env=environment)
+    if os.name == "nt":
+        assert library.read_bytes().startswith(b"!<arch>\n")
+
+    if sys.platform == "darwin":
+        symbols = subprocess.check_output(["nm", "-m", str(library)], text=True)
+        for name in (".constant.", "Probe"):
+            assert any(name in line and "private external" in line
+                       for line in symbols.splitlines()), symbols
+
     # LSP receives overlays through the native Windows re-exec worker too.
     server = subprocess.Popen([*runner, compiler, "check", "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     def send(method, params=None, number=None):

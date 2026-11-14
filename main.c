@@ -1,3 +1,6 @@
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
 #include "platform.h"
@@ -194,7 +197,7 @@ static int packageMain(int argc, char **argv) {
         }
         temporaryExecutable = malloc(strlen(temporaryDirectory) + 16);
         if (!temporaryExecutable) { rmdir(temporaryDirectory); free(temporaryDirectory); freePackage(build); return 1; }
-        sprintf(temporaryExecutable, "%s/program", temporaryDirectory);
+        sprintf(temporaryExecutable, "%s/program" OCEAN_EXECUTABLE_SUFFIX, temporaryDirectory);
         output = temporaryExecutable;
         struct sigaction action = {0}; action.sa_handler = forwardSignal;
         sigemptyset(&action.sa_mask);

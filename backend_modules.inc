@@ -143,18 +143,45 @@ static size_t nativeSymbolLength(const char *p) {
     } else while (isalnum((unsigned char)*p) || (*p && strchr("._$-", *p))) p++;
     return (size_t)(p - start);
 }
+// Symbol normalization runs once per IR line. Keep the builder in memory:
+// Windows' open_memstream compatibility implementation uses a temporary file.
+static int nativeAppend(Backend *b, char **text, size_t *length, size_t *capacity,
+                        const char *part, size_t count) {
+    if (count > SIZE_MAX - *length - 1) {
+        fail(b, "native module line is too large"); return 0;
+    }
+    size_t needed = *length + count + 1;
+    if (needed > *capacity) {
+        size_t grown = *capacity;
+        while (grown < needed) grown = grown > SIZE_MAX / 2 ? needed : grown * 2;
+        char *next = realloc(*text, grown);
+        if (!next) { fail(b, "could not serialize native module"); return 0; }
+        *text = next; *capacity = grown;
+    }
+    memcpy(*text + *length, part, count); *length += count;
+    (*text)[*length] = 0; return 1;
+}
 static char *nativeLine(Backend *b, const char *line) {
-    char *result = NULL; size_t length = 0;
-    FILE *out = open_memstream(&result, &length);
-    if (!out) { fail(b, "could not serialize native module"); return strdup(""); }
+    size_t length = 0, capacity = strlen(line) + 1;
+    char *result = checked(capacity);
     while (*line) {
         if (*line == '@' || (*line == '%' && !strncmp(line, "%ocean.struct.", 14))) {
             size_t n = nativeSymbolLength(line);
             char *symbol = strndup(line, n);
-            fputs(nativeSymbol(b, symbol), out); free(symbol); line += n;
-        } else fputc(*line++, out);
+            if (!symbol) { fail(b, "could not serialize native symbol"); free(result); return strdup(""); }
+            const char *replacement = nativeSymbol(b, symbol);
+            int ok = nativeAppend(b, &result, &length, &capacity, replacement, strlen(replacement));
+            free(symbol); line += n;
+            if (!ok) { free(result); return strdup(""); }
+        } else {
+            const char *start = line++;
+            while (*line && *line != '@' && !(*line == '%' && !strncmp(line, "%ocean.struct.", 14))) line++;
+            if (!nativeAppend(b, &result, &length, &capacity, start, (size_t)(line - start))) {
+                free(result); return strdup("");
+            }
+        }
     }
-    fclose(out); return result;
+    return result;
 }
 static char *nativePublicLine(const char *line) {
     const char *where = strstr(line, "private "); size_t length = 8;

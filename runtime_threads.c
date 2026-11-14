@@ -28,7 +28,7 @@ static void lock(Lock *p) { EnterCriticalSection(p); }
 static void unlock(Lock *p) { LeaveCriticalSection(p); }
 static void cond_init(Cond *p) { InitializeConditionVariable(p); }
 static void broadcast(Cond *p) { WakeAllConditionVariable(p); }
-static void wait(Cond *p, Lock *m) {
+static void cond_wait(Cond *p, Lock *m) {
     if (!SleepConditionVariableCS(p, m, 10) && GetLastError() != ERROR_TIMEOUT) abort();
 }
 static void join(Handle h) { if (WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0) abort(); CloseHandle(h); }
@@ -45,7 +45,7 @@ static void lock(Lock *p) { checked(pthread_mutex_lock(p)); }
 static void unlock(Lock *p) { checked(pthread_mutex_unlock(p)); }
 static void cond_init(Cond *p) { checked(pthread_cond_init(p, NULL)); }
 static void broadcast(Cond *p) { checked(pthread_cond_broadcast(p)); }
-static void wait(Cond *p, Lock *m) {
+static void cond_wait(Cond *p, Lock *m) {
     struct timespec deadline;
     if (clock_gettime(CLOCK_REALTIME, &deadline)) abort();
     deadline.tv_nsec += 10000000;
@@ -167,7 +167,19 @@ int64_t ocean_threads_spawn(void *code, void *environment) {
     t->handle = CreateThread(NULL, 0, start, t, 0, NULL);
     int failed = t->handle == NULL;
 #else
-    int failed = pthread_create(&t->handle, NULL, start, t);
+    // Darwin defaults new pthreads to 512 KiB, which is too small for native
+    // Ocean parsing and other recursive code. Preserve larger host defaults.
+    pthread_attr_t attributes;
+    int failed = pthread_attr_init(&attributes);
+    if (!failed) {
+        size_t stack_size = 0;
+        failed = pthread_attr_getstacksize(&attributes, &stack_size);
+        const size_t minimum_stack = 8 * 1024 * 1024;
+        if (!failed && stack_size < minimum_stack)
+            failed = pthread_attr_setstacksize(&attributes, minimum_stack);
+        if (!failed) failed = pthread_create(&t->handle, &attributes, start, t);
+        pthread_attr_destroy(&attributes);
+    }
 #endif
     if (failed) { unlock(&registry); free(t); return -1; }
     next_id++;
@@ -190,7 +202,7 @@ int32_t ocean_threads_await(int64_t id) {
     if (!t || t == self) { unlock(&registry); return t ? -2 : -1; }
     while (!t->done || t->joining) {
         if (cancelled()) { unlock(&registry); ocean_runtime_thread_return(); }
-        wait(&changed, &registry);
+        cond_wait(&changed, &registry);
     }
     if (t->joined || t == &main_thread) { unlock(&registry); ocean_threads_checkpoint(); return 0; }
     t->joining = 1;
@@ -206,7 +218,7 @@ void ocean_threads_yield(void) {
     if (!self) abort();
     lock(&registry);
     self->yielded = 1;
-    while (self->yielded && !cancelled()) wait(&changed, &registry);
+    while (self->yielded && !cancelled()) cond_wait(&changed, &registry);
     self->yielded = 0;
     unlock(&registry);
     ocean_threads_checkpoint();
@@ -290,7 +302,7 @@ void ocean_threads_mutex_lock(void *slot) {
     lock(&s->gate);
     while (s->locked) {
         if (cancelled()) { unlock(&s->gate); ocean_runtime_thread_return(); }
-        wait(&s->changed, &s->gate);
+        cond_wait(&s->changed, &s->gate);
     }
     // Cancel before taking ownership, so an unregistered defer cannot strand it.
     if (cancelled()) { unlock(&s->gate); ocean_runtime_thread_return(); }
@@ -325,7 +337,7 @@ void ocean_threads_group_wait(void *slot) {
             if (cancelled()) {
                 s->waiters--; unlock(&s->gate); ocean_runtime_thread_return();
             }
-            wait(&s->changed, &s->gate);
+            cond_wait(&s->changed, &s->gate);
         }
         s->waiters--;
     }

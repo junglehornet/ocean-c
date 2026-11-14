@@ -75,6 +75,12 @@ int main(void) {
     }
     assert(!strcmp(list->arr[2].lexeme, "0xff"));
     release(list);
+    list = scan("1.2345678901234567 1.00000000000000011102230246251565404236316680908203125 5e-324 1e-99999");
+    assert(list->arr[0].numValue.floating == 0x1.3c0ca428c59fbp+0);
+    assert(list->arr[1].numValue.floating == 1.0); // halfway, ties to even
+    assert(list->arr[2].numValue.floating == 0x0.0000000000001p-1022);
+    assert(list->arr[3].numValue.floating == 0.0);
+    release(list);
     list = scan("12.5 0.25 1.0");
     double floats[] = {12.5, 0.25, 1.0};
     assert(list->top == 4);

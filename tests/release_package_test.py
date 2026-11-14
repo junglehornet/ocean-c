@@ -1,6 +1,9 @@
 """Release asset naming, contents, checksums, and tag metadata without CI access."""
 import importlib.util
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -49,6 +52,42 @@ class ReleaseTests(unittest.TestCase):
         for tag in ("../../escape", "tag with spaces", "", "-option"):
             with self.assertRaises(ValueError):
                 release.metadata(tag)
+
+    def test_real_tags_survive_remote_deletion_and_mismatches_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            origin = Path(directory) / "origin"
+            checkout = Path(directory) / "checkout"
+            executable = shutil.which("git")
+
+            def git(*args, cwd=origin):
+                return subprocess.check_output([executable, *args], cwd=cwd,
+                                               text=True, stderr=subprocess.DEVNULL).strip()
+
+            origin.mkdir()
+            git("init")
+            git("config", "user.name", "Release Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("commit", "--allow-empty", "-m", "First")
+            git("tag", "lightweight")
+            git("tag", "-a", "annotated", "-m", "Annotated release")
+            git("clone", str(origin), str(checkout), cwd=Path(directory))
+            git("tag", "-d", "lightweight", "annotated")
+
+            def run(*args):
+                return subprocess.check_output(args, cwd=checkout, text=True,
+                                               stderr=subprocess.DEVNULL).strip()
+
+            with mock.patch.dict(os.environ, RELEASE_GIT=executable), \
+                    mock.patch.object(release, "run", side_effect=run) as invoke:
+                for tag in ("lightweight", "annotated"):
+                    self.assertEqual(release.metadata(tag)["COMMIT"], git("rev-parse", "HEAD"))
+                self.assertTrue(all(call.args[0] == executable for call in invoke.call_args_list))
+                with self.assertRaisesRegex(ValueError, "not resolvable in the local checkout"):
+                    release.metadata("missing")
+                git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--allow-empty", "-m", "Second", cwd=checkout)
+                with self.assertRaisesRegex(ValueError, "HEAD does not match"):
+                    release.metadata("annotated")
 
 
 if __name__ == "__main__":
