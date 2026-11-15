@@ -76,7 +76,9 @@ and final SHA256SUMS. Relocated tool/probe checks remain inside QEMU. Linux rele
 installers use a private static libcurl with OpenSSL and c-ares DNS, built by
 `.github/scripts/build-static-curl.sh`; `RELEASE_STATIC_PKG_CONFIG_PATH` selects
 its metadata only for the installer link. Linux release builders require
-`libc-ares-dev` (including its static archive). c-ares avoids loading host glibc
+`libc-ares-dev` (including `libcares.a` or `libcares_static.a`); the build
+stages it under the private prefix as `libcares.a` so pkg-config's `-lcares`
+works with Ubuntu 24.04 too. c-ares avoids loading host glibc
 NSS modules into the static installer, which can crash during DNS resolution. Ordinary builds and dependency bundles
 use system libcurl. Windows release metadata checks use the checkout Git via
 `RELEASE_GIT`. The installer's `--platform` prints one `<arch>-<os>` token.

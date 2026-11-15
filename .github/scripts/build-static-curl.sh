@@ -7,8 +7,17 @@ prefix="${1:?usage: build-static-curl.sh PREFIX}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 pkg-config --exists libcares || { echo "Static HTTP build requires libc-ares-dev and pkg-config" >&2; exit 1; }
-cares_library="$(pkg-config --variable=libdir libcares)/libcares.a"
-test -f "$cares_library" || { echo "Missing static c-ares archive: $cares_library" >&2; exit 1; }
+cares_libdir="$(pkg-config --variable=libdir libcares)"
+cares_library="$cares_libdir/libcares.a"
+if [[ ! -f "$cares_library" ]]; then
+  cares_library="$cares_libdir/libcares_static.a"
+fi
+test -f "$cares_library" || { echo "Missing static c-ares archive (libcares.a or libcares_static.a) in $cares_libdir" >&2; exit 1; }
+# Ubuntu 24.04 calls the archive libcares_static.a, but its pkg-config metadata
+# still requests -lcares. Keep that link name private to the installer closure.
+mkdir -p "$prefix/lib"
+cp "$cares_library" "$prefix/lib/libcares.a"
+cares_library="$prefix/lib/libcares.a"
 version=8.23.0
 curl -fsSL --retry 3 "https://curl.se/download/curl-$version.tar.xz" -o "$work/curl.tar.xz"
 echo '8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5  '"$work/curl.tar.xz" | sha256sum --check

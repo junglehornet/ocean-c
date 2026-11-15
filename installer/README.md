@@ -40,7 +40,9 @@ the Windows user or machine environment. Open a new shell after installation.
 
 Linux release builds use static libcurl with c-ares DNS to avoid loading host
 glibc NSS modules into the static executable. The HTTP dependency build requires
-`libc-ares-dev` and verifies that curl actually selected c-ares.
+`libc-ares-dev` and accepts either `libcares.a` or Ubuntu 24.04's
+`libcares_static.a`. It stages a private `libcares.a` link name for pkg-config
+and verifies that curl actually selected c-ares.
 
 Release archives contain only `ocean-installer` (`ocean-installer.exe` on Windows).
 Dependency bundles are separate `ocean-deps_<tag>_<arch>-<os>.tar.xz` assets.
