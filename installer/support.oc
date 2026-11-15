@@ -121,6 +121,7 @@ func now() string {
 }
 func object(value any) map[string]any { return value.(map[string]any); }
 func text(value any) string { switch (value.(type)) { case string: return value.(string); default: return ""; } }
+func optionalText(values map[string]any, key string) string { value, _ := values[key]; return text(value); }
 func flag(value any) bool { switch (value.(type)) { case bool: return value.(bool); default: return false; } }
 func array(value any) mixed any[] { return value.(mixed any[]); }
 func encode(value any) string { return json.Marshal(value).unwrap(); }

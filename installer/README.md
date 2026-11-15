@@ -56,4 +56,6 @@ python3 installer/test_native_installer.py ./ocean-installer
 ```
 
 Python is used only by the offline integration test driver, which creates local
-repositories and a loopback HTTP fixture. It never installs system packages.
+repositories and a loopback HTTP fixture. It also tests the serialized system-wide
+apply plan with a fake package manager and temporary profile paths. It never
+installs system packages or requires elevation.

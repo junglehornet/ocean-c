@@ -59,3 +59,10 @@ func TestArchiveValidation(t *testing.T) {
     if(!archiveRejected(tarFixture("ocean-c","target",'2'),path))t.Fatal("symlink accepted");
     if(!archiveRejected("truncated",path))t.Fatal("truncation accepted");
 }
+
+func TestOptionalPlanFields(t *testing.T) {
+    plan := make(map[string]any);
+    if (optionalText(plan,"owner") != "" || optionalText(plan,"extraBin") != "") t.Fatal("missing optional plan field");
+    plan["owner"] = "1000:1000"; plan["extraBin"] = "C:/Ocean/bin";
+    if (optionalText(plan,"owner") != "1000:1000" || optionalText(plan,"extraBin") != "C:/Ocean/bin") t.Fatal("optional plan field lost");
+}

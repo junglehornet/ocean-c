@@ -124,5 +124,26 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
         (destination/'installation.json').write_text('{')
         result=invoke('2\n\n');assert 'Unknown version' in result.stdout
         invoke('')
+        # Exercise the serialized plan consumed after elevation without sudo,
+        # host profile writes, or real package installation. Global plans omit
+        # the per-user owner field, which must not abort apply after apt runs.
+        tools=root/'fake-tools';tools.mkdir();packageLog=root/'package.log'
+        fakeApt=tools/'apt-get'
+        fakeApt.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$OCEAN_TEST_PACKAGE_LOG"\n')
+        fakeApt.chmod(0o755)
+        globalDestination=root/'global-ocean';globalProfile=root/'global-profile'
+        globalPayload=root/'global-payload';(globalPayload/'bin').mkdir(parents=True)
+        shutil.copy2(binary,globalPayload/'bin/ocean')
+        plan=dict(system=True,destination=str(globalDestination),payload=str(globalPayload),
+                  bin=str(globalDestination/'bin'),replace=False,dependencies='system',manager='apt-get',
+                  entries=[dict(path=str(globalProfile),content='# Ocean fixture\n',whole=False)])
+        request=root/'apply.json';request.write_text(json.dumps(plan))
+        applyEnv=dict(env,PATH=str(tools)+os.pathsep+env.get('PATH',''),OCEAN_TEST_PACKAGE_LOG=str(packageLog))
+        result=subprocess.run([str(installer),'--apply',str(request)],text=True,capture_output=True,env=applyEnv,timeout=30)
+        assert result.returncode==0,(result.returncode,result.stdout,result.stderr)
+        assert packageLog.read_text().splitlines()==['update','install -y clang lld build-essential libffi-dev libcurl4-openssl-dev pkg-config']
+        assert (globalDestination/'bin/ocean').read_bytes()==binary.read_bytes()
+        assert globalProfile.read_text()=='# Ocean fixture\n'
+        assert not list(root.glob('global-ocean.install-*'))
         server.shutdown();thread.join()
 print('Native installer integration fixtures passed.')

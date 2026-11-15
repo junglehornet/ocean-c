@@ -166,7 +166,7 @@ func apply(plan map[string]any) {
     }();
     if (platform == "windows") {
         oldRegistry = registryPath(flag(plan["system"])); value := text(plan["bin"]);
-        extra := text(plan["extraBin"]); if (extra != "") value += ";"+extra;
+        extra := optionalText(plan,"extraBin"); if (extra != "") value += ";"+extra;
         for (_, part := range split(oldRegistry,";")) { if (part != "" && part != value) value += ";" + part; }
         registryChanged = true; setRegistry(value,flag(plan["system"]));
     } else {
@@ -178,7 +178,7 @@ func apply(plan map[string]any) {
             missing := string[]{}; at := parent(path);
             for (!exists(at)) { missing.append(at); at = parent(at); }
             mkdir(parent(path)); writeFile(path,editProfile(original,item));
-            owner := text(plan["owner"]);
+            owner := optionalText(plan,"owner");
             if (owner != "") { if (!had) command("chown","--",owner,path); for (_, dir := range missing) command("chown","--",owner,dir); }
         }
     }

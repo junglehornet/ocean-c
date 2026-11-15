@@ -53,7 +53,9 @@ The compiler repository also contains an interactive release installer in
 use the resulting native executable directly. It requires Git and system file
 utilities, and offers system package installation or a relocatable Clang/libffi/
 libcurl bundle within the selected Ocean prefix (including user-local paths).
-See `installer/README.md` for platform requirements.
+See `installer/README.md` for platform requirements. The offline native installer
+integration suite also exercises serialized system-wide apply plans with a fake
+package manager; it does not require sudo or change host packages or profiles.
 
 Tagged compiler releases build all seven native targets: Linux x86_64,
 AArch64, and RISC-V64; macOS x86_64 and AArch64; Windows x86_64 and AArch64.
