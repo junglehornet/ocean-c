@@ -42,6 +42,14 @@ Clang on PATH must target Windows GNU/MinGW for linking Ocean programs. Windows
 unit tests use captured reports; the live terminal test frontend is Unix-only.
 Ocean `int` literals retain their 64-bit range on Windows.
 
+Nightly releases are checked daily at **00:00 UTC** from `main` in both
+`ocean-c` and `ocean-src`. A change in either repository produces matching
+`nightly-YYYY.MM.DD` tags and a prerelease build for all seven native targets.
+Unchanged sources are skipped until 30 days have elapsed since the last published
+nightly. Compiler object caches are reused; release metadata and the installer
+are rebuilt for each new tag. There is no `nightly` branch. GitHub may delay the
+scheduled job during busy periods.
+
 Build or run a package directory (requires `clang` on `PATH`):
 
 ```sh

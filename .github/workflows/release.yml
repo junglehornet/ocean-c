@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - '*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Existing matching compiler and stdlib release tag'
+        required: true
+        type: string
 
 env:
   PYTHONUTF8: "1"
@@ -12,12 +18,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   native:
     name: ${{ matrix.arch }}-${{ matrix.os }}
+    env:
+      CCACHE_MAXSIZE: 512M
+      CCACHE_COMPILERCHECK: content
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
@@ -39,9 +49,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: junglehornet/ocean-src
-          ref: ${{ github.ref_name }}
+          ref: ${{ inputs.tag || github.ref_name }}
           path: release-stdlib
           persist-credentials: false
+      - name: Restore native compiler objects
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ocean-ccache
+          key: compiler-v1-${{ matrix.runner }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', '.github/workflows/release.yml') }}-${{ inputs.tag || github.ref_name }}
+          restore-keys: |
+            compiler-v1-${{ matrix.runner }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', '.github/workflows/release.yml') }}-
       - uses: actions/setup-python@v5
         if: matrix.os != 'windows'
         with:
@@ -54,7 +71,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev libssl-dev libc-ares-dev pkg-config patchelf build-essential xz-utils make ninja-build
+          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev libssl-dev libc-ares-dev pkg-config patchelf build-essential xz-utils make ninja-build ccache
           python3 -m pip install 'cmake>=4.2,<5'
           bash .github/scripts/install-llvm.sh
       - name: Build standalone installer HTTP dependencies
@@ -65,7 +82,7 @@ jobs:
       - name: macOS dependencies
         if: matrix.os == 'macos'
         run: |
-          brew install llvm lld libffi curl pkgconf ninja
+          brew install llvm lld libffi curl pkgconf ninja ccache
           python3 -m pip install 'cmake>=4.2,<5'
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
@@ -82,6 +99,7 @@ jobs:
             ${{ matrix.prefix }}-llvm
             ${{ matrix.prefix }}-cmake
             ${{ matrix.prefix }}-ninja
+            ${{ matrix.prefix }}-ccache
             ${{ matrix.prefix }}-libffi
             ${{ matrix.prefix }}-curl
             ${{ matrix.prefix }}-pkgconf
@@ -89,28 +107,32 @@ jobs:
       - name: Build, verify metadata, test, and package Unix binaries
         if: matrix.os != 'windows'
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
           RELEASE_OS: ${{ matrix.os }}
           RELEASE_ARCH: ${{ matrix.arch }}
           CMAKE_GENERATOR: Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
+          export CCACHE_DIR="$RUNNER_TEMP/ocean-ccache"
           clang --version
           [[ "$(clang -dumpversion)" == 23.* ]]
-          python3 scripts/release.py --version "$RELEASE_VERSION" --os "$RELEASE_OS" --arch "$RELEASE_ARCH" --stdlib release-stdlib
+          python3 scripts/release.py --version "$RELEASE_VERSION" --os "$RELEASE_OS" --arch "$RELEASE_ARCH" --stdlib release-stdlib --cmake-arg=-DCMAKE_C_COMPILER_LAUNCHER=ccache
+          ccache --show-stats
       - name: Build, verify metadata, test, and package native Windows binaries
         if: matrix.os == 'windows'
         shell: msys2 {0}
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
           RELEASE_ARCH: ${{ matrix.arch }}
           CMAKE_GENERATOR: Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
           set -euo pipefail
+          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ocean-ccache"
           clang --version
           [[ "$(clang -dumpversion)" == 23.* ]]
-          python scripts/release.py --version "$RELEASE_VERSION" --os windows --arch "$RELEASE_ARCH" --stdlib release-stdlib --cmake-arg=-DCMAKE_EXE_LINKER_FLAGS=-static --cmake-arg=-DCMAKE_RC_COMPILER=llvm-rc --cmake-arg="-DOCEAN_FFI_INCLUDE_DIR=$(cygpath -m "$MINGW_PREFIX/include")"
+          python scripts/release.py --version "$RELEASE_VERSION" --os windows --arch "$RELEASE_ARCH" --stdlib release-stdlib --cmake-arg=-DCMAKE_C_COMPILER_LAUNCHER=ccache --cmake-arg=-DCMAKE_EXE_LINKER_FLAGS=-static --cmake-arg=-DCMAKE_RC_COMPILER=llvm-rc --cmake-arg="-DOCEAN_FFI_INCLUDE_DIR=$(cygpath -m "$MINGW_PREFIX/include")"
+          ccache --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.arch }}-${{ matrix.os }}
@@ -127,13 +149,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: junglehornet/ocean-src
-          ref: ${{ github.ref_name }}
+          ref: ${{ inputs.tag || github.ref_name }}
           path: release-stdlib
           persist-credentials: false
       - name: Select weekly RISC-V dependency cache
@@ -155,7 +178,7 @@ jobs:
       - uses: uraimo/run-on-arch-action@v3
         name: Native RISC-V build under emulation
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
         with:
           githubToken: ${{ github.token }}
           setup: mkdir -p "$RUNNER_TEMP/ocean-riscv-cache"
@@ -164,7 +187,7 @@ jobs:
           distro: none
           base_image: --platform=linux/riscv64 riscv64/ubuntu:26.04
           env: |
-            RELEASE_VERSION: ${{ github.ref_name }}
+            RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
           install: |
             echo "Dependency cache week: ${{ steps.riscv-cache.outputs.week }}"
             apt-get update
@@ -189,7 +212,7 @@ jobs:
             ccache --show-stats
       - name: Compress verified RISC-V dependencies on the host
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           sudo chown -R "$(id -u):$(id -g)" dist
           python3 scripts/release.py --version "$RELEASE_VERSION" --os linux --arch riscv64 --finalize-dependency-compression
@@ -213,7 +236,7 @@ jobs:
           path: dist
       - name: Verify the complete artifact set
         env:
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           python3 - <<'PY'
           import os
@@ -231,10 +254,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           if ! gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
-            gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" --generate-notes --draft
+            prerelease=()
+            if [[ "$RELEASE_VERSION" == nightly-* ]]; then prerelease=(--prerelease); fi
+            gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" --generate-notes --draft "${prerelease[@]}"
           fi
           gh release upload "$RELEASE_VERSION" dist/* --clobber
           gh release edit "$RELEASE_VERSION" --draft=false

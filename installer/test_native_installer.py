@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
         (repo/'sample.oc').write_text('package sample;\n')
         run('git','-C',str(repo),'add','.')
         run('git','-C',str(repo),'commit','-m','Fixture')
-        for tag in ['0.5.0','1.0.0','2.0.0-beta']:
+        for tag in ['0.5.0','1.0.0','nightly-2026.11.15']:
             run('git','-C',str(repo),'tag','-a',tag,'-m',tag)
     compiler=repos['ocean-c'];commit=run('git','-C',str(compiler),'rev-parse','HEAD');date=run('git','-C',str(compiler),'show','-s','--format=%cs','HEAD')
     run('git','-C',str(compiler),'checkout','-b','stable')
@@ -41,17 +41,17 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
     commit=run('git','-C',str(compiler),'rev-parse','HEAD')
     date=run('git','-C',str(compiler),'show','-s','--format=%cs','HEAD')
     run('git','-C',str(compiler),'checkout','main')
-    run('git','-C',str(compiler),'checkout','-b','nightly')
-    (compiler/'nightly-only').write_text('x');run('git','-C',str(compiler),'add','.');run('git','-C',str(compiler),'commit','-m','Nightly only')
-    run('git','-C',str(compiler),'tag','-f','-a','2.0.0-beta','-m','Nightly tag')
+    # Nightlies come directly from main; this fixture has no nightly branch.
+    (compiler/'nightly-snapshot').write_text('x');run('git','-C',str(compiler),'add','.');run('git','-C',str(compiler),'commit','-m','Nightly only')
+    run('git','-C',str(compiler),'tag','-f','-a','nightly-2026.11.15','-m','Nightly tag')
     run('git','-C',str(compiler),'checkout','main')
     (compiler/'main-only').write_text('x');run('git','-C',str(compiler),'add','.');run('git','-C',str(compiler),'commit','-m','Main only');run('git','-C',str(compiler),'tag','9.0.0')
     binary=root/'fixture-compiler'
     # A real native fixture, so there is no Python/shell fallback in the installed compiler.
     code=root/'fixture.c';code.write_text('#include <stdio.h>\nint main(void){puts("Ocean compiler (ocean-c) 1.0.0\\nCommit '+commit+' ('+date+'), built 2026-11-13T12:00:00Z\\nCopyright Connor Egan '+date[:4]+'");}\n')
     subprocess.run(['clang',str(code),'-o',str(binary)],check=True)
-    nightlyCommit=run('git','-C',str(compiler),'rev-parse','nightly')
-    nightlyCode=root/'nightly.c';nightlyCode.write_text(code.read_text().replace('1.0.0','2.0.0-beta').replace(commit,nightlyCommit))
+    nightlyCommit=run('git','-C',str(compiler),'rev-parse','nightly-2026.11.15^{commit}')
+    nightlyCode=root/'nightly.c';nightlyCode.write_text(code.read_text().replace('1.0.0','nightly-2026.11.15').replace(commit,nightlyCommit))
     nightlyBinary=root/'fixture-nightly';subprocess.run(['clang',str(nightlyCode),'-o',str(nightlyBinary)],check=True)
     def archive(name='ocean-c', binary=binary):
         stream=io.BytesIO()
@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
         def do_GET(self):
             if self.path.startswith('/api/repos/'):
                 releases=[]
-                for tag,pre in [('2.0.0-beta',True),('1.0.0',False)]:
+                for tag,pre in [('nightly-2026.11.15',True),('1.0.0',False)]:
                     releases.append(dict(tag_name=tag,prerelease=pre,draft=False,assets=[dict(name=f'ocean-c_{tag}_{target}.tar',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/redirect',digest='sha256:'+hashlib.sha256(state['body']).hexdigest()),dict(name=f'ocean-deps_{tag}_{target}.tar.xz',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/deps.tar.xz',digest='sha256:'+hashlib.sha256(state['deps']).hexdigest())]))
                 data=json.dumps(releases).encode();self.send_response(200)
             elif self.path=='/redirect':
@@ -92,10 +92,10 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
             return result
         result=invoke('2\ny\n1\nlatest\n',True)
         assert '9.0.0' not in result.stdout,result.stdout
-        assert '2.0.0-beta' in result.stdout,result.stdout
+        assert 'nightly-2026.11.15' in result.stdout,result.stdout
         assert result.stdout.count('. 1.0.0')==1,result.stdout
         assert result.stdout.count('. 0.5.0')==1,result.stdout
-        assert 'stable or nightly' in result.stdout,result.stdout
+        assert 'nightly tags from main' in result.stdout,result.stdout
         assert state['redirects']>0
         metadata=json.loads((destination/'installation.json').read_text())
         assert metadata['version']=='1.0.0' and metadata['commit']==commit,metadata
@@ -120,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
         state['body']=archive(binary=nightlyBinary)
         invoke(f'2\nremove {destination}\ny\n1\nlatest-nightly\n',True)
         metadata=json.loads((destination/'installation.json').read_text())
-        assert metadata['version']=='2.0.0-beta' and metadata['commit']==nightlyCommit,metadata
+        assert metadata['version']=='nightly-2026.11.15' and metadata['commit']==nightlyCommit,metadata
         (destination/'installation.json').write_text('{')
         result=invoke('2\n\n');assert 'Unknown version' in result.stdout
         invoke('')

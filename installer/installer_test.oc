@@ -66,3 +66,10 @@ func TestOptionalPlanFields(t *testing.T) {
     plan["owner"] = "1000:1000"; plan["extraBin"] = "C:/Ocean/bin";
     if (optionalText(plan,"owner") != "1000:1000" || optionalText(plan,"extraBin") != "C:/Ocean/bin") t.Fatal("optional plan field lost");
 }
+
+func TestNightlyTagNames(t *testing.T) {
+    if (!nightlyTag("nightly-2026.11.15") || !nightlyTag("nightly")) t.Fatal("nightly tag rejected");
+    for (_,tag:=range string[]{"2.0.0-beta","nightly-2026.1.15","nightly-2026.13.15","nightly-2026.11.00","nightly-202x.11.15"}) {
+        if (nightlyTag(tag)) t.Fatal("invalid nightly tag accepted");
+    }
+}

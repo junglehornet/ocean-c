@@ -1,0 +1,49 @@
+name: Nightly from main
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-main
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      build: ${{ steps.nightly.outputs.build }}
+      tag: ${{ steps.nightly.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Check out standard-library main for matching tags
+        uses: actions/checkout@v4
+        with:
+          repository: junglehornet/ocean-src
+          ref: main
+          fetch-depth: 0
+          path: nightly-stdlib
+          ssh-key: ${{ secrets.NIGHTLY_STDLIB_SSH_KEY }}
+      - name: Tag snapshots only when a build is due
+        id: nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nightly.py --stdlib nightly-stdlib
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}

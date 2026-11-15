@@ -57,6 +57,24 @@ See `installer/README.md` for platform requirements. The offline native installe
 integration suite also exercises serialized system-wide apply plans with a fake
 package manager; it does not require sudo or change host packages or profiles.
 
+`.github/workflows/nightly.yml` checks both repositories' `main` snapshots at
+00:00 UTC daily (GitHub scheduling can be delayed). If either commit differs
+from the last published nightly, or 30 days have passed without one, it creates
+matching annotated `nightly-YYYY.MM.DD` tags and calls the release workflow
+directly. Unchanged recent sources skip every build job. The `nightly` branches
+are retired. Published nightlies are prereleases; the installer recognizes their
+dated tags reachable from `main`, with stable releases still selected from
+`stable`. `latest-nightly` never falls back to stable. Each tag records both
+snapshots; retries reuse them and never move a tag. Missing/failed releases do
+not reset the 30-day clock. Manual dispatch applies the same gating rules.
+`NIGHTLY_STDLIB_SSH_KEY` is a dedicated write deploy key for ocean-src, stored
+only in the compiler repository's Actions secrets. The compiler tag uses its
+own GITHUB_TOKEN. The explicit reusable-workflow call builds the new tag even
+though token-created tag pushes do not trigger another workflow.
+All release targets use ccache for compiler objects, checking compiler contents.
+A stdlib-only change reuses compiler code objects; the compiler is relinked with
+fresh tag/date metadata, and the Ocean installer is rebuilt and verified.
+
 Tagged compiler releases build all seven native targets: Linux x86_64,
 AArch64, and RISC-V64; macOS x86_64 and AArch64; Windows x86_64 and AArch64.
 Release builds pass the literal tag and commit/date metadata through Make.

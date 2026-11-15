@@ -114,6 +114,8 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_test.py" "$<TARGET_FILE:ocean-c>")
     add_test(NAME release_package_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_package_test.py")
+    add_test(NAME nightly_release_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/nightly_release_test.py")
     add_test(NAME dependency_bundle_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_bundle_test.py")
     add_test(NAME installer_test COMMAND $<TARGET_FILE:ocean-c> test

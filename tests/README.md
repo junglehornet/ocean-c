@@ -939,3 +939,11 @@ script's `--defer-dependency-compression` and
 the checksum manifest. Package tests check archive contents, final checksums,
 and preservation of the input tar if compression fails. Bundle probe commands
 use the release smoke timeout multiplier and print their stages.
+
+`nightly_release_test.py` uses real local Git repositories to check paired main
+snapshot tags, stdlib-only and compiler-only changes, unchanged-source skips,
+the exact 30-day boundary, published/draft release selection, conflict rejection,
+and retrying partially pushed snapshots after main moves. Installer fixtures
+exercise dated nightlies from main with no nightly branch. The scheduled release
+workflow calls the reusable release gate explicitly after tagging; the native
+compiler objects are cached, but fresh version metadata remains mandatory.
