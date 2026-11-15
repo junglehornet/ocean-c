@@ -73,9 +73,11 @@ configuration. Compilation and release checks still execute under QEMU. RISC-V u
 `--defer-dependency-compression` to stage a verified dependency tar, then
 `--finalize-dependency-compression` on the x86-64 host to create the `.tar.xz`
 and final SHA256SUMS. Relocated tool/probe checks remain inside QEMU. Linux release
-installers use a private static libcurl with OpenSSL and threaded DNS, built by
+installers use a private static libcurl with OpenSSL and c-ares DNS, built by
 `.github/scripts/build-static-curl.sh`; `RELEASE_STATIC_PKG_CONFIG_PATH` selects
-its metadata only for the installer link. Ordinary builds and dependency bundles
+its metadata only for the installer link. Linux release builders require
+`libc-ares-dev` (including its static archive). c-ares avoids loading host glibc
+NSS modules into the static installer, which can crash during DNS resolution. Ordinary builds and dependency bundles
 use system libcurl. Windows release metadata checks use the checkout Git via
 `RELEASE_GIT`. The installer's `--platform` prints one `<arch>-<os>` token.
 Linux dependency bundles locate libffi/libcurl through Clang's library lookup

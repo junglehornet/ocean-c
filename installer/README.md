@@ -38,6 +38,10 @@ requires explicit consent. Package-manager changes cannot be rolled back.
 PATH configuration supports Bash, Zsh, Fish, csh and POSIX shells on Unix, and
 the Windows user or machine environment. Open a new shell after installation.
 
+Linux release builds use static libcurl with c-ares DNS to avoid loading host
+glibc NSS modules into the static executable. The HTTP dependency build requires
+`libc-ares-dev` and verifies that curl actually selected c-ares.
+
 Release archives contain only `ocean-installer` (`ocean-installer.exe` on Windows).
 Dependency bundles are separate `ocean-deps_<tag>_<arch>-<os>.tar.xz` assets.
 All seven native platforms are supported; Wasm is excluded.

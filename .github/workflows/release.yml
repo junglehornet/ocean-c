@@ -54,7 +54,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev libssl-dev pkg-config patchelf build-essential xz-utils make ninja-build
+          sudo apt-get install -y curl gnupg libffi-dev libcurl4-openssl-dev libssl-dev libc-ares-dev pkg-config patchelf build-essential xz-utils make ninja-build
           python3 -m pip install 'cmake>=4.2,<5'
           bash .github/scripts/install-llvm.sh
       - name: Build standalone installer HTTP dependencies
@@ -168,7 +168,7 @@ jobs:
           install: |
             echo "Dependency cache week: ${{ steps.riscv-cache.outputs.week }}"
             apt-get update
-            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev libjitterentropy3-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git ccache
+            apt-get install -y curl ca-certificates clang-21 lld-21 llvm-21 cmake libffi-dev libcurl4-openssl-dev libssl-dev libc-ares-dev libjitterentropy3-dev pkg-config patchelf build-essential xz-utils make ninja-build python3 git ccache
           run: |
             mkdir -p /tmp/ocean-tools
             for tool in clang ld.lld llvm-ar llvm-ranlib; do ln -sf "/usr/bin/$tool-21" "/tmp/ocean-tools/$tool"; done

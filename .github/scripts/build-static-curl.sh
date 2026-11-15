@@ -6,6 +6,9 @@ set -euo pipefail
 prefix="${1:?usage: build-static-curl.sh PREFIX}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+pkg-config --exists libcares || { echo "Static HTTP build requires libc-ares-dev and pkg-config" >&2; exit 1; }
+cares_library="$(pkg-config --variable=libdir libcares)/libcares.a"
+test -f "$cares_library" || { echo "Missing static c-ares archive: $cares_library" >&2; exit 1; }
 version=8.23.0
 curl -fsSL --retry 3 "https://curl.se/download/curl-$version.tar.xz" -o "$work/curl.tar.xz"
 echo '8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5  '"$work/curl.tar.xz" | sha256sum --check
@@ -16,7 +19,9 @@ cmake -S "$work/curl-$version" -B "$work/build" -G Ninja \
   -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON \
   -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \
   -DCURL_USE_OPENSSL=ON -DOPENSSL_USE_STATIC_LIBS=ON \
-  -DENABLE_THREADED_RESOLVER=ON \
+  -DENABLE_ARES=ON -DCARES_LIBRARY="$cares_library" \
+  -DCARES_INCLUDE_DIR="$(pkg-config --variable=includedir libcares)" \
+  -DENABLE_THREADED_RESOLVER=OFF \
   -DCURL_DISABLE_LDAP=ON -DCURL_DISABLE_LDAPS=ON \
   -DCURL_USE_GSSAPI=OFF -DCURL_USE_LIBSSH=OFF -DCURL_USE_LIBSSH2=OFF \
   -DCURL_USE_LIBPSL=OFF -DUSE_LIBIDN2=OFF -DUSE_NGHTTP2=OFF \
@@ -25,12 +30,14 @@ cmake -S "$work/curl-$version" -B "$work/build" -G Ninja \
 cmake --build "$work/build" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 cmake --install "$work/build"
 
+# c-ares avoids glibc getaddrinfo loading host NSS modules into a static
+# executable. Mixing the bundled glibc with host libc can SIGFPE in pthread init.
 # Exercise the exact static dependency closure before the expensive Ocean build.
 cat > "$work/probe.c" <<'C'
 #include <curl/curl.h>
 int main(void) {
     const curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
-    return !v->ssl_version || !(v->features & CURL_VERSION_SSL) ||
+    return !v->ares || !v->ssl_version || !(v->features & CURL_VERSION_SSL) ||
            !(v->features & CURL_VERSION_ASYNCHDNS);
 }
 C
