@@ -41,8 +41,11 @@ Build with `make VERSION=1.2.3` (default: `dev`), or configure CMake with
 `cmake -S . -B build -DOCEAN_VERSION=1.2.3` before building. The Make wrapper
 uses `build/` by default; override it with `BUILD_DIR=...`. `ocean -v` and
 `ocean --version` print the version, full Git commit hash, commit date, UTC build
-date, and copyright year from the commit date. Metadata refreshes on each build;
-source archives without Git metadata report `unknown` for commit fields.
+date, and copyright year from the commit date. Metadata refreshes on each build. When all commit fields are supplied,
+metadata generation skips Git discovery and copies its header within CMake
+without launching a nested CMake process (important under RISC-V QEMU).
+Unchanged header contents retain their timestamp for compiler-object caching.
+Source archives without Git metadata report `unknown` for commit fields.
 `SOURCE_DATE_EPOCH` can fix the build timestamp for reproducible builds.
 The top-level `-v` does not change `ocean test -v` (verbose test reporting).
 Module/package resolution, program builds, and standard-library integration are

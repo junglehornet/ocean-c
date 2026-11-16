@@ -112,6 +112,8 @@ if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME version_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_test.py" "$<TARGET_FILE:ocean-c>")
+    add_test(NAME build_info_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_info_test.py")
     add_test(NAME release_package_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_package_test.py")
     add_test(NAME nightly_release_test COMMAND ${Python3_EXECUTABLE}

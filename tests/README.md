@@ -951,3 +951,7 @@ compiler objects are cached, but fresh version metadata remains mandatory.
 Nightly date tests cover the preceding UTC day, delayed starts, non-UTC input,
 30/31-day month rollovers, February in ordinary/leap years, and year boundaries.
 The release name is the same tag supplied to all build and publishing jobs.
+
+`build_info_test.py` checks release metadata generation without Git discovery or
+a nested CMake executable, stable header timestamps for identical metadata,
+refresh on new release versions, and Git fallback for source builds.

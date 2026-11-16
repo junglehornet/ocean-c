@@ -1,5 +1,9 @@
 # Run for each build so commits and build dates never depend on reconfiguration.
-find_package(Git QUIET)
+# Releases provide all commit fields. Avoid spawning Git (and its --version
+# probe) under QEMU when no discovery is needed.
+if("${OCEAN_COMMIT}" STREQUAL "" OR "${OCEAN_COMMIT_DATE}" STREQUAL "" OR "${OCEAN_COMMIT_YEAR}" STREQUAL "")
+    find_package(Git QUIET)
+endif()
 if(GIT_FOUND)
     foreach(field IN ITEMS COMMIT COMMIT_DATE COMMIT_YEAR)
         if(NOT "${OCEAN_${field}}" STREQUAL "")
@@ -39,7 +43,8 @@ foreach(field IN ITEMS VERSION COMMIT COMMIT_DATE COMMIT_YEAR BUILD_DATE)
     string(APPEND header "#define OCEAN_${field} \"${value}\"\n")
 endforeach()
 file(WRITE "${OCEAN_BINARY_DIR}/ocean_build_info.h.tmp" "${header}")
-execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-    "${OCEAN_BINARY_DIR}/ocean_build_info.h.tmp" "${OCEAN_BINARY_DIR}/ocean_build_info.h"
-    COMMAND_ERROR_IS_FATAL ANY)
+# COPYONLY updates the destination only when its contents change, without
+# launching another emulated CMake process from this build-time script.
+configure_file("${OCEAN_BINARY_DIR}/ocean_build_info.h.tmp"
+    "${OCEAN_BINARY_DIR}/ocean_build_info.h" COPYONLY)
 file(REMOVE "${OCEAN_BINARY_DIR}/ocean_build_info.h.tmp")
