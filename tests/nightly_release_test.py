@@ -46,9 +46,24 @@ class NightlyTests(unittest.TestCase):
     def prepare(self, now=NOW, releases=()):
         return nightly.prepare(self.compiler, self.stdlib, now, releases)
 
+    def test_tag_names_the_utc_day_that_ended(self):
+        cases = [
+            (dt.datetime(2026, 11, 25, tzinfo=UTC), "nightly-2026.11.24"),
+            (dt.datetime(2026, 12, 1, tzinfo=UTC), "nightly-2026.11.30"),
+            (dt.datetime(2026, 5, 1, tzinfo=UTC), "nightly-2026.04.30"),
+            (dt.datetime(2026, 3, 1, tzinfo=UTC), "nightly-2026.02.28"),
+            (dt.datetime(2028, 3, 1, tzinfo=UTC), "nightly-2028.02.29"),
+            (dt.datetime(2027, 1, 1, tzinfo=UTC), "nightly-2026.12.31"),
+            (dt.datetime(2026, 12, 1, 4, 35, tzinfo=UTC), "nightly-2026.11.30"),
+            (dt.datetime(2026, 11, 30, 20, tzinfo=dt.timezone(dt.timedelta(hours=-6))), "nightly-2026.11.30"),
+        ]
+        for instant, expected in cases:
+            with self.subTest(instant=instant):
+                self.assertEqual(nightly.nightly_tag(instant), expected)
+
     def test_first_build_creates_matching_annotated_tags_at_main(self):
         tag, reason = self.prepare()
-        self.assertEqual(tag, "nightly-2026.11.15")
+        self.assertEqual(tag, "nightly-2026.11.14")
         self.assertEqual(reason, "no published nightly")
         for repo in (self.compiler, self.stdlib):
             self.assertEqual(nightly.revision(repo, "refs/tags/" + tag), nightly.revision(repo, "main"))
@@ -64,7 +79,7 @@ class NightlyTests(unittest.TestCase):
         result, _ = self.prepare(next_day, [published(tag, NOW)])
         self.assertIsNone(result)
         for repo in (self.compiler, self.stdlib):
-            self.assertIsNone(nightly.revision(repo, "refs/tags/nightly-2026.11.16"))
+            self.assertIsNone(nightly.revision(repo, "refs/tags/nightly-2026.11.15"))
 
     def test_either_main_change_triggers_a_build(self):
         tag, _ = self.prepare()
@@ -76,7 +91,7 @@ class NightlyTests(unittest.TestCase):
         self.change(self.compiler)
         next_tag, reason = self.prepare(NOW + dt.timedelta(days=2),
                                         [published(source_tag, NOW + dt.timedelta(days=1))])
-        self.assertEqual(next_tag, "nightly-2026.11.17")
+        self.assertEqual(next_tag, "nightly-2026.11.16")
         self.assertEqual(reason, "main changed")
 
     def test_thirty_day_boundary_rebuilds_identical_commits(self):

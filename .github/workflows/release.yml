@@ -129,6 +129,12 @@ jobs:
         run: |
           set -euo pipefail
           export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ocean-ccache"
+          # Recent ARM64 pkgconf packages omit the generic native alias.
+          # _popen uses cmd.exe, so a Bash alias or shell script cannot replace it.
+          if [[ ! -f "$MINGW_PREFIX/bin/pkg-config.exe" ]]; then
+            cp "$MINGW_PREFIX/bin/pkgconf.exe" "$MINGW_PREFIX/bin/pkg-config.exe"
+          fi
+          python -c 'import subprocess; subprocess.run("pkg-config --static --libs libcurl", shell=True, check=True)'
           clang --version
           [[ "$(clang -dumpversion)" == 23.* ]]
           python scripts/release.py --version "$RELEASE_VERSION" --os windows --arch "$RELEASE_ARCH" --stdlib release-stdlib --cmake-arg=-DCMAKE_C_COMPILER_LAUNCHER=ccache --cmake-arg=-DCMAKE_EXE_LINKER_FLAGS=-static --cmake-arg=-DCMAKE_RC_COMPILER=llvm-rc --cmake-arg="-DOCEAN_FFI_INCLUDE_DIR=$(cygpath -m "$MINGW_PREFIX/include")"

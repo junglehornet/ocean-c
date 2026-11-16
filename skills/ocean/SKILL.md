@@ -60,7 +60,8 @@ package manager; it does not require sudo or change host packages or profiles.
 `.github/workflows/nightly.yml` checks both repositories' `main` snapshots at
 00:00 UTC daily (GitHub scheduling can be delayed). If either commit differs
 from the last published nightly, or 30 days have passed without one, it creates
-matching annotated `nightly-YYYY.MM.DD` tags and calls the release workflow
+matching annotated `nightly-YYYY.MM.DD` tags for the preceding UTC calendar day
+(December 1 midnight uses November 30) and calls the release workflow
 directly. Unchanged recent sources skip every build job. The `nightly` branches
 are retired. Published nightlies are prereleases; the installer recognizes their
 dated tags reachable from `main`, with stable releases still selected from
@@ -101,7 +102,10 @@ stages it under the private prefix as `libcares.a` so pkg-config's `-lcares`
 works with Ubuntu 24.04 too. c-ares avoids loading host glibc
 NSS modules into the static installer, which can crash during DNS resolution. Ordinary builds and dependency bundles
 use system libcurl. Windows release metadata checks use the checkout Git via
-`RELEASE_GIT`. The installer's `--platform` prints one `<arch>-<os>` token.
+`RELEASE_GIT`. Windows release setup supplies a real `pkg-config.exe` alias
+from `pkgconf.exe` when absent, and probes static curl flags from native Python
+before building (the compiler uses cmd.exe, which cannot run a Bash alias).
+The installer's `--platform` prints one `<arch>-<os>` token.
 Linux dependency bundles locate libffi/libcurl through Clang's library lookup
 and multiarch directories as well as pkg-config, and reject missing shared
 libraries before packaging. RISC-V's emulated build installs the curl executable

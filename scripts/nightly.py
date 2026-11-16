@@ -51,8 +51,15 @@ def ensure_tag(repo, tag, commit, snapshot):
     git(repo, "push", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
 
 
+def nightly_tag(now):
+    # A midnight run releases the UTC day that just ended, including when the
+    # job starts late. Calendar arithmetic handles month/year and leap days.
+    day = now.astimezone(UTC).date() - dt.timedelta(days=1)
+    return "nightly-" + day.strftime("%Y.%m.%d")
+
+
 def prepare(compiler, stdlib, now, releases):
-    tag = "nightly-" + now.astimezone(UTC).strftime("%Y.%m.%d")
+    tag = nightly_tag(now)
     if any(release["tag_name"] == tag and not release["draft"] for release in releases):
         return None, "today's nightly is already published"
     snapshot = dict(compiler=revision(compiler, "refs/remotes/origin/main"),

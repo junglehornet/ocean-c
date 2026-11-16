@@ -947,3 +947,7 @@ and retrying partially pushed snapshots after main moves. Installer fixtures
 exercise dated nightlies from main with no nightly branch. The scheduled release
 workflow calls the reusable release gate explicitly after tagging; the native
 compiler objects are cached, but fresh version metadata remains mandatory.
+
+Nightly date tests cover the preceding UTC day, delayed starts, non-UTC input,
+30/31-day month rollovers, February in ordinary/leap years, and year boundaries.
+The release name is the same tag supplied to all build and publishing jobs.

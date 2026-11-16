@@ -45,6 +45,8 @@ Ocean `int` literals retain their 64-bit range on Windows.
 Nightly releases are checked daily at **00:00 UTC** from `main` in both
 `ocean-c` and `ocean-src`. A change in either repository produces matching
 `nightly-YYYY.MM.DD` tags and a prerelease build for all seven native targets.
+The tag and release name use the UTC day that just ended: the midnight run on
+December 1, 2026 is named `nightly-2026.11.30`.
 Unchanged sources are skipped until 30 days have elapsed since the last published
 nightly. Compiler object caches are reused; release metadata and the installer
 are rebuilt for each new tag. There is no `nightly` branch. GitHub may delay the
