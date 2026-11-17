@@ -2,7 +2,7 @@
 
 Push a new version tag on the compiler repository to run
 `.github/workflows/release.yml`. Create the **same literal tag** on
-`junglehornet/ocean-src` first. The workflow checks out that stdlib tag to build
+`ocean-foundation/ocean-src` first. The workflow checks out that stdlib tag to build
 and test the installer; it never silently substitutes the library's main branch.
 Use filename-safe tags such as `1.2.3`, `v1.2.3`, or `1.2.3-rc.1`.
 

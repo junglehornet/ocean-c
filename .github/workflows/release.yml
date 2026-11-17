@@ -48,7 +48,7 @@ jobs:
       - name: Check out matching standard library tag
         uses: actions/checkout@v4
         with:
-          repository: junglehornet/ocean-src
+          repository: ocean-foundation/ocean-src
           ref: ${{ inputs.tag || github.ref_name }}
           path: release-stdlib
           persist-credentials: false
@@ -161,7 +161,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          repository: junglehornet/ocean-src
+          repository: ocean-foundation/ocean-src
           ref: ${{ inputs.tag || github.ref_name }}
           path: release-stdlib
           persist-credentials: false

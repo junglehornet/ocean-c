@@ -76,7 +76,7 @@ func prepare(work string, release Release) string {
     expectedDate := command("git", "-C", pathJoin(work, "compiler.git"), "show", "-s", "--format=%cs", release.commit);
     require(text(info["commit_date"]) == expectedDate, "compiler commit date does not match Git tag");
     source := pathJoin(payload, "src"); command("git", "init", source);
-    command("git", "-C", source, "fetch", "--depth=1", "--no-tags", "https://github.com/junglehornet/ocean-src.git", "refs/tags/" + release.version);
+    command("git", "-C", source, "fetch", "--depth=1", "--no-tags", "https://github.com/ocean-foundation/ocean-src.git", "refs/tags/" + release.version);
     commit := command("git", "-C", source, "rev-parse", "FETCH_HEAD^{commit}"); require(commit == release.sourceCommit, "stdlib tag changed during installation");
     command("git", "-C", source, "checkout", "--detach", commit);
     info["stdlib_commit"] = commit; info["stdlib_commit_date"] = command("git", "-C", source, "show", "-s", "--format=%cI", commit);

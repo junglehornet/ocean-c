@@ -47,13 +47,13 @@ func nightlyTag(tag string) bool {
 }
 func catalog(work string) Release[] {
     repo := pathJoin(work, "compiler.git"); command("git", "init", "--bare", repo);
-    command("git", "-C", repo, "fetch", "--filter=blob:none", "--tags", "--no-recurse-submodules", "https://github.com/junglehornet/ocean-c.git", "+refs/heads/stable:refs/remotes/origin/stable", "+refs/heads/main:refs/remotes/origin/main");
+    command("git", "-C", repo, "fetch", "--filter=blob:none", "--tags", "--no-recurse-submodules", "https://github.com/ocean-foundation/ocean-c.git", "+refs/heads/stable:refs/remotes/origin/stable", "+refs/heads/main:refs/remotes/origin/main");
     tags := split(command("git", "-C", repo, "for-each-ref", "--merged=refs/remotes/origin/stable", "--merged=refs/remotes/origin/main", "--sort=-version:refname", "--format=%(refname:strip=2)", "refs/tags"), "\n");
     stableTags := make(map[string]bool); mainTags := make(map[string]bool);
     for (_, tag := range split(command("git", "-C", repo, "tag", "--merged", "refs/remotes/origin/stable"), "\n")) stableTags[tag] = true;
     for (_, tag := range split(command("git", "-C", repo, "tag", "--merged", "refs/remotes/origin/main"), "\n")) mainTags[tag] = true;
     source := make(map[string]string);
-    remote := command("git", "ls-remote", "--tags", "https://github.com/junglehornet/ocean-src.git");
+    remote := command("git", "ls-remote", "--tags", "https://github.com/ocean-foundation/ocean-src.git");
     for (_, line := range split(remote, "\n")) {
         parts := split(line, "\t"); if (len(parts) != 2 || !starts(parts[1], "refs/tags/")) continue;
         name := parts[1][10:]; if (ends(name, "^{}")) source[name[:len(name)-3]] = parts[0];
@@ -61,7 +61,7 @@ func catalog(work string) Release[] {
     }
     published := make(map[string]any);
     for (page := 1; ; page++) {
-        items := array(api("/repos/junglehornet/ocean-c/releases?per_page=100&page=" + io.Sprint(page)));
+        items := array(api("/repos/ocean-foundation/ocean-c/releases?per_page=100&page=" + io.Sprint(page)));
         for (_, value := range items) { release := object(value); if (!flag(release["draft"])) published[text(release["tag_name"])] = value; }
         if (len(items) < 100) break;
     }

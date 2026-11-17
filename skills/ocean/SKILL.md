@@ -19,6 +19,10 @@ argument or returned expression; strings display as `string`.
 
 ## Tooling and build workflow
 
+The compiler and installer are maintained at `https://github.com/ocean-foundation/ocean-c`;
+the matching standard library is at `https://github.com/ocean-foundation/ocean-src`.
+Clone them as sibling checkouts when building from source.
+
 An installed compiler is named `ocean`; `ocean-c` accepts the same interface.
 From a compiler checkout, build it with a C23 compiler, CMake, and libffi development
 headers. Clang must be on PATH to check, link, or run Ocean programs. LLVM development

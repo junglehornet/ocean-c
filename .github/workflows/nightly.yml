@@ -28,7 +28,7 @@ jobs:
       - name: Check out standard-library main for matching tags
         uses: actions/checkout@v4
         with:
-          repository: junglehornet/ocean-src
+          repository: ocean-foundation/ocean-src
           ref: main
           fetch-depth: 0
           path: nightly-stdlib

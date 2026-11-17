@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self,*args):pass
         def do_GET(self):
-            if self.path.startswith('/api/repos/'):
+            if self.path.startswith('/api/repos/ocean-foundation/ocean-c/releases?'):
                 releases=[]
                 for tag,pre in [('nightly-2026.11.15',True),('1.0.0',False)]:
                     releases.append(dict(tag_name=tag,prerelease=pre,draft=False,assets=[dict(name=f'ocean-c_{tag}_{target}.tar',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/redirect',digest='sha256:'+hashlib.sha256(state['body']).hexdigest()),dict(name=f'ocean-deps_{tag}_{target}.tar.xz',browser_download_url=f'http://127.0.0.1:{self.server.server_port}/deps.tar.xz',digest='sha256:'+hashlib.sha256(state['deps']).hexdigest())]))
@@ -83,7 +83,7 @@ with tempfile.TemporaryDirectory(prefix='ocean-native-installer-test-') as direc
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         env=dict(os.environ,HOME=str(home),TMPDIR=str(temp),GITHUB_TOKEN='',OCEAN_INSTALLER_API_BASE=f'http://127.0.0.1:{server.server_port}/api',GIT_CONFIG_COUNT='2')
         for i,name in enumerate(['ocean-c','ocean-src']):
-            env[f'GIT_CONFIG_KEY_{i}']=f'url.{repos[name]}.insteadOf';env[f'GIT_CONFIG_VALUE_{i}']=f'https://github.com/junglehornet/{name}.git'
+            env[f'GIT_CONFIG_KEY_{i}']=f'url.{repos[name]}.insteadOf';env[f'GIT_CONFIG_VALUE_{i}']=f'https://github.com/ocean-foundation/{name}.git'
         destination=home/'.local/lib/ocean'
         def invoke(input,success=False):
             result=subprocess.run([str(installer)],input=input,text=True,capture_output=True,env=env,timeout=120)
