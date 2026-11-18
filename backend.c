@@ -48,7 +48,7 @@ static void emitTarget(FILE *out) {
 #define BOOL OCEAN_KIND_BOOL
 #define UINT OCEAN_KIND_UINT
 #endif
-typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER } Kind;
+typedef enum { VOID, INT, I32, FLOAT, BOOL, RAW_POINTER, I8, BAD, NULL_VALUE, SCALAR_ANY, I16, F32, UINT, U32, U16, U8, BUFFER, VARINT_BASE = 1048576 } Kind;
 typedef struct {
     Kind kind;
     const char *operand; // Backend-owned text; aggregate constants can be arbitrarily long.
@@ -304,6 +304,11 @@ static int definedKind(Backend *b, Kind kind) {
     return t && t->definition;
 }
 static const char *irType(Backend *b, Kind k) {
+    Kind scalar = representationKind(b, k);
+    if (scalar > VARINT_BASE && scalar <= VARINT_BASE + 64) {
+        static const char *widths[] = {"", "i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8", "i9", "i10", "i11", "i12", "i13", "i14", "i15", "i16", "i17", "i18", "i19", "i20", "i21", "i22", "i23", "i24", "i25", "i26", "i27", "i28", "i29", "i30", "i31", "i32", "i33", "i34", "i35", "i36", "i37", "i38", "i39", "i40", "i41", "i42", "i43", "i44", "i45", "i46", "i47", "i48", "i49", "i50", "i51", "i52", "i53", "i54", "i55", "i56", "i57", "i58", "i59", "i60", "i61", "i62", "i63", "i64"};
+        return widths[scalar - VARINT_BASE];
+    }
     BufferKind *buffer = bufferKind(b, k);
     if (buffer)
         return buffer->ir;
@@ -1131,6 +1136,11 @@ static Kind type(Backend *b, typeTokens t) {
                    ? arrayKind(b, k, (size_t)dimension.tokens[0].numValue.integer)
                    : pointerBufferKind(b, k);
     }
+    if (t.nTokens == 4 && !strcmp(t.tokens[0].lexeme, "varint") &&
+        t.tokens[1].type == LEFT_PAREN && t.tokens[2].type == LITERAL_INT &&
+        t.tokens[3].type == RIGHT_PAREN && t.tokens[2].numValue.integer >= 1 &&
+        t.tokens[2].numValue.integer <= 64)
+        return (Kind)(VARINT_BASE + t.tokens[2].numValue.integer);
     if (t.tokens[0].type == STAR)
         return pointerKind(b, type(b, (typeTokens){t.nTokens - 1, t.tokens + 1}));
     if (t.nTokens == 1)
@@ -1601,9 +1611,9 @@ static void clearScope(Scope *s) {
     }
 }
 static int unsignedInteger(Backend *b, Kind k) { k = representationKind(b, k); return k == UINT || k == U32 || k == U16 || k == U8; }
-static int integral(Backend *b, Kind k) { k = representationKind(b, k); return k == INT || k == I32 || k == I16 || k == I8 || unsignedInteger(b, k); }
+static int integral(Backend *b, Kind k) { k = representationKind(b, k); return (k > VARINT_BASE && k <= VARINT_BASE + 64) || k == INT || k == I32 || k == I16 || k == I8 || unsignedInteger(b, k); }
 static int floating(Backend *b, Kind k) { k = representationKind(b, k); return k == FLOAT || k == F32; }
-static int integerWidth(Backend *b, Kind k) { k = representationKind(b, k); return (k == I8 || k == U8) ? 8 : (k == I16 || k == U16) ? 16 : (k == I32 || k == U32) ? 32 : 64; }
+static int integerWidth(Backend *b, Kind k) { k = representationKind(b, k); return k > VARINT_BASE && k <= VARINT_BASE + 64 ? k - VARINT_BASE : (k == I8 || k == U8) ? 8 : (k == I16 || k == U16) ? 16 : (k == I32 || k == U32) ? 32 : 64; }
 // Mixed-width arithmetic uses 64-bit storage. Prefer signed storage when it
 // can represent both operand ranges; semantics rejects unsafe signed/u64 pairs.
 static Kind commonIntegerKind(Backend *b, Kind a, Kind c) {
@@ -1795,6 +1805,11 @@ static Value bufferLiteralSlot(Backend *, Kind);
 // native endian; narrow values occupy the beginning of an aligned eight-byte slot.
 static const char *ffiType(Backend *b, Kind kind) {
     kind = representationKind(b, kind);
+    if (kind > VARINT_BASE && kind <= VARINT_BASE + 64) {
+        unsigned bits = kind - VARINT_BASE;
+        return bits <= 8 ? "@ffi_type_sint8" : bits <= 16 ? "@ffi_type_sint16" :
+               bits <= 32 ? "@ffi_type_sint32" : "@ffi_type_sint64";
+    }
     if (kind == VOID) return "@ffi_type_void";
     if (kind == UINT) return "@ffi_type_uint64";
     if (kind == U32) return "@ffi_type_uint32";
@@ -1854,6 +1869,9 @@ static Value boxScalar(Backend *b, Value v, int promote) {
     if (promote != 2) reflectionInput(b, v.kind);
     Kind identity = v.kind;
     // Preserve Ocean identity while keeping small scalars ready for C varargs.
+    Kind scalar = representationKind(b, v.kind);
+    if (scalar > VARINT_BASE && scalar <= VARINT_BASE + 64)
+        v = convert(b, v, integerWidth(b, scalar) <= 32 ? I32 : INT);
     if (representationKind(b, v.kind) == BOOL || representationKind(b, v.kind) == I8 || representationKind(b, v.kind) == I16 || representationKind(b, v.kind) == U8 || representationKind(b, v.kind) == U16) v = convert(b, v, I32);
     if (representationKind(b, v.kind) == F32) v = convert(b, v, FLOAT);
     if (v.kind == NULL_VALUE) v = value(b, RAW_POINTER, "@__ocean.null");
@@ -4003,7 +4021,7 @@ static Value binary(Backend *b, enum binaryExprType op, Value a, Value c) {
     default:
         break;
     }
-    if (!instruction || representationKind(b, a.kind) >= BUFFER || a.kind == RAW_POINTER || a.kind == VOID || a.kind == BAD ||
+    if (!instruction || (representationKind(b, a.kind) >= BUFFER && !integral(b, a.kind)) || a.kind == RAW_POINTER || a.kind == VOID || a.kind == BAD ||
         (fp && !comparison && op != EXPR_ADD && op != EXPR_SUBTRACT && op != EXPR_MULTIPLY &&
          op != EXPR_DIVIDE)) {
         fail(b, "unsupported binary operator or operand type");
@@ -6300,7 +6318,7 @@ static void emitAnyType(Backend *b, Kind kind) {
     if (!aggregate) {
         b->ffiUsed = 1;
         fprintf(b->out, "%s = private constant { ptr, ptr, ptr } { ptr %s, ptr null, ptr null }\n",
-                metadata.operand, ffiType(b, representationKind(b, kind) == F32 ? FLOAT : representationKind(b, kind) == BOOL || representationKind(b, kind) == I8 || representationKind(b, kind) == I16 || representationKind(b, kind) == U8 || representationKind(b, kind) == U16 ? I32 : kind));
+                metadata.operand, ffiType(b, representationKind(b, kind) > VARINT_BASE ? (integerWidth(b, kind) <= 32 ? I32 : INT) : representationKind(b, kind) == F32 ? FLOAT : representationKind(b, kind) == BOOL || representationKind(b, kind) == I8 || representationKind(b, kind) == I16 || representationKind(b, kind) == U8 || representationKind(b, kind) == U16 ? I32 : kind));
         return;
     }
     b->returnTransportUsed = 1;

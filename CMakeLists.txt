@@ -232,6 +232,9 @@ if(BUILD_TESTING)
     add_test(NAME backend_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/backend_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(backend_test PROPERTIES TIMEOUT 60)
+    add_test(NAME varint_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/varint_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(varint_test PROPERTIES TIMEOUT 60)
     add_test(NAME type_definitions_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/type_definitions_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(type_definitions_test PROPERTIES TIMEOUT 60)

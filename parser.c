@@ -221,6 +221,14 @@ static expr atomicImpl(parserState *state) {
         case UNDERSCORE:
         case ANY:
         case IDENTIFIER: {
+            if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "varint")) {
+                size_t start = state->tokenIndex;
+                if (!parseSignatureType(state, 0)) return (expr){0};
+                struct expr_zero *prefix = calloc(1, sizeof(*prefix));
+                CHECK_MALLOC(prefix);
+                prefix->type = copySignatureSpan(state, start, state->tokenIndex);
+                return (expr){.type = EXPR_TYPE_TYPE_NAME, .underlying = prefix, .location = tok};
+            }
             if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "map") && peek(state).type == LEFT_BRACKET) {
                 parserState trial = *state; trial.quietErrors = 1;
                 if (parseSignatureType(&trial, 0) && currentToken(&trial).type == LEFT_CURLY_BRACE) {
@@ -1331,6 +1339,24 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
             return signatureError(state, "mixed requires an array type ending in []");
         return 1;
     }
+    if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "varint")) {
+        advance(state);
+        if (currentToken(state).type != LEFT_PAREN)
+            return signatureError(state, "varint requires a bit width: varint(n)");
+        advance(state);
+        if (currentToken(state).type != LITERAL_INT)
+            return signatureError(state, "varint width must be an integer literal from 1 to 64");
+        token width = currentToken(state);
+        if (width.numValue.integer < 1 || width.numValue.integer > 64)
+            return signatureError(state, "varint width must be from 1 to 64");
+        advance(state);
+        if (currentToken(state).type != RIGHT_PAREN)
+            return signatureError(state, "Expected closing parenthesis after varint width");
+        advance(state);
+        while (currentToken(state).type == LEFT_BRACKET)
+            if (!parseTypeBrackets(state, depth + 1)) return 0;
+        return 1;
+    }
     if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "buffer")) {
         tok = advance(state);
         if (tok.type != LESS_THAN) {
@@ -1621,6 +1647,7 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
             return signatureError(state, "Expected cast type; multi-token types require parentheses");
         if (!checkTypeName(state, tok)) return 0;
         if (tok.type == IDENTIFIER && ((!strcmp(tok.lexeme, "buffer") && peek(state).type == LESS_THAN) ||
+            !strcmp(tok.lexeme, "varint") ||
             peek(state).type == LEFT_BRACKET)) {
             if (!parseSignatureType(state, state->syntaxDepth + 1)) return 0;
         } else advance(state);

@@ -41,6 +41,7 @@ struct Type {
     int abstractParameter;
     int typeList;
     const char *spelling; // Keep explicit numeric type names for diagnostics.
+    unsigned varintBits;
     Type *semanticBase; // Numeric family used for operations; spelling retains storage width.
 };
 typedef struct Symbol {
@@ -245,6 +246,7 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
 static int integerShape(Type *t, int *isUnsigned) {
     if (definedType(t) || (canonical(t) != &integer && canonical(t) != &signedByte)) return 0;
     const char *name = t->spelling ? t->spelling : t->name;
+    if (t->varintBits) { *isUnsigned = 0; return t->varintBits; }
     *isUnsigned = name[0] == 'u' || !strcmp(name, "byte");
     if (!strcmp(name, "i8") || !strcmp(name, "u8") || !strcmp(name, "byte")) return 8;
     if (!strcmp(name, "i16") || !strcmp(name, "u16")) return 16;
@@ -466,6 +468,18 @@ static Type *typeOf(Context *c, typeTokens span) {
             v->bufferSize = 1;
             v->count = (size_t)sizedDimension.tokens[0].numValue.integer;
         }
+        return v;
+    }
+    if (t.type == IDENTIFIER && !strcmp(t.lexeme, "varint")) {
+        if (span.nTokens != 4 || span.tokens[1].type != LEFT_PAREN ||
+            span.tokens[2].type != LITERAL_INT || span.tokens[3].type != RIGHT_PAREN ||
+            span.tokens[2].numValue.integer < 1 || span.tokens[2].numValue.integer > 64) {
+            error(c, t, "varint width must be an integer literal from 1 to 64"); return &unknown;
+        }
+        Type *v = allocate(c, sizeof(*v));
+        v->varintBits = span.tokens[2].numValue.integer;
+        char *name = allocate(c, 24); snprintf(name, 24, "varint(%u)", v->varintBits);
+        v->name = v->spelling = name; v->semanticBase = &integer;
         return v;
     }
     if (t.type == IDENTIFIER && !strcmp(t.lexeme, "array")) {

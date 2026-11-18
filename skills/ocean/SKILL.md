@@ -352,6 +352,15 @@ not C `int`. Strings are immutable bytes; indexing reads a signed byte and `len`
 counts bytes. Character literals decode Unicode scalars. Identifiers support
 Unicode; exported names begin with Unicode uppercase letters.
 
+`varint(n)` is a built-in signed integer with exactly `n` value bits, where
+`n` is an integer literal from 1 through 64. Its range is -2^(n-1) through
+2^(n-1)-1; storage occupies whole bytes with target ABI alignment. Casts that
+narrow truncate bits. Integer widening and fitting-literal rules also apply.
+It is idiomatic to define a custom type with `type nibble varint(4);` rather
+than repeat `varint(4)` at every use. Named types are distinct: initialize with
+`x := 3->nibble;` and convert back with `x->int`. Use `varint(4)` directly when
+an anonymous width is appropriate, for example `x: varint(4) = 3;`.
+
 Integer variables convert implicitly only when the destination represents the full
 source range: `i8` to `i32`, `u8` to `u16`, and `u8` to `i16` work. Narrowing,
 signed-to-unsigned conversions, and unsigned-to-signed conversions without an
