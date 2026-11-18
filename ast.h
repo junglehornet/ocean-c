@@ -105,6 +105,7 @@ struct stmt_struct {
     size_t nFields; // Includes the immutable value-parameter prefix, in declaration order.
     typeTokens *fieldTypes;
     token *fieldNames;
+    unsigned *fieldBits; // Optional bitfield widths; zero denotes ordinary storage.
 };
 
 struct stmt_type {

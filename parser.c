@@ -364,7 +364,8 @@ static expr primary(parserState *state) {
 
             case LEFT_CURLY_BRACE: {
                 if (parent.type != EXPR_TYPE_IDENTIFIER && parent.type != EXPR_TYPE_DOT &&
-                    parent.type != EXPR_TYPE_INDEX && parent.type != EXPR_TYPE_INSTANTIATION) goto endLoop;
+                    parent.type != EXPR_TYPE_INDEX && parent.type != EXPR_TYPE_INSTANTIATION &&
+                    parent.type != EXPR_TYPE_TYPE_NAME) goto endLoop;
                 expr typeName = parent;
                 while (typeName.type == EXPR_TYPE_INDEX || typeName.type == EXPR_TYPE_INSTANTIATION)
                     typeName = typeName.type == EXPR_TYPE_INDEX ?
@@ -1055,12 +1056,14 @@ typedef struct signatureFields {
     token *names;
     typeTokens *types;
     char variadic;
+    unsigned *bits;
 } signatureFields;
 
 static void freeSignatureFields(signatureFields *fields) {
     for (size_t i = 0; i < fields->count; i++) free(fields->types[i].tokens);
     free(fields->types);
     free(fields->names);
+    free(fields->bits);
     *fields = (signatureFields){0};
 }
 
@@ -1224,9 +1227,22 @@ static char parseStructFields(parserState *state, signatureFields *fields,
     } while (1);
     size_t start = state->tokenIndex;
     if (!parseSignatureType(state, depth)) return 0;
+    size_t end = state->tokenIndex;
+    unsigned bits = 0;
+    if (currentToken(state).type == COLON) {
+        advance(state);
+        token width = currentToken(state);
+        if (width.type != LITERAL_INT || width.numValue.integer < 1 || width.numValue.integer > 64)
+            return signatureError(state, "bitfield size must be an integer literal from 1 to 64");
+        bits = width.numValue.integer;
+        advance(state);
+    }
+    fields->bits = realloc(fields->bits, (fields->count + count) * sizeof(unsigned));
+    CHECK_MALLOC(fields->bits);
     for (size_t i = 0; i < count; i++) {
         token name = state->tokens[namesStart + 2 * i];
-        if (!addSignatureField(state, fields, name, start, state->tokenIndex)) return 0;
+        fields->bits[fields->count] = bits;
+        if (!addSignatureField(state, fields, name, start, end)) return 0;
         if (indexModifier) *indexField = name;
     }
     return 1;
@@ -2248,6 +2264,10 @@ static stmt parseStruct(parserState *state) {
     result->nVarParams = valueParams.count;
     result->indexField = indexField;
     result->nFields = valueParams.count + fields.count;
+    result->fieldBits = calloc(result->nFields + 1, sizeof(unsigned));
+    CHECK_MALLOC(result->fieldBits);
+    if (fields.count) memcpy(result->fieldBits + valueParams.count, fields.bits, fields.count * sizeof(unsigned));
+    free(fields.bits); fields.bits = NULL;
     if (valueParams.count) {
         result->fieldNames = malloc(sizeof(token) * result->nFields);
         result->fieldTypes = malloc(sizeof(typeTokens) * result->nFields);

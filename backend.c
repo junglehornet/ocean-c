@@ -59,6 +59,8 @@ typedef struct {
     int homogeneousDynamic;
     const char *homogeneousArray; // Indexed writes retain the array element identity.
     Kind elementRequirement;
+    unsigned bitWidth, bitOffset;
+    Kind bitStorage; // Packed bitfield lvalue metadata.
     Kind backingKind; // A .data argument retains its source through a deferred call.
     const char *backingOperand;
     const char *length; // Lexical metadata for a sized raw buffer.
@@ -109,6 +111,9 @@ typedef struct BufferKind {
     int emptyEmitted; // Empty array headers have module lifetime, including returned zeros.
     const char *zeroOperand; // Cached LLVM constant for a concrete aggregate's default value.
     Kind *members;
+    size_t *fieldIndices;
+    unsigned *fieldOffsets;
+    Kind *fieldStorage;
     size_t count;
     char *ir;
     char *layout; // Inline byte-size header and payload layout for built-in arrays.
@@ -402,6 +407,8 @@ static void nativeDeferredIdentity(Backend *, unsigned);
 static void nativeConstantIdentity(Backend *, const char *, const void *, size_t);
 static void finishNativeModules(Backend *, FILE *);
 static Value temp(Backend *b, Kind k) { return value(b, k, "%%v%u", ++b->next); }
+static int integral(Backend *, Kind);
+static int integerWidth(Backend *, Kind);
 static Value aggregateEquality(Backend *, Value, Value);
 static Value boxedEquality(Backend *, enum binaryExprType, Value, Value);
 static Value specializedClosureValue(Backend *, expr *, int);
@@ -802,6 +809,35 @@ static Kind recordKind(Backend *b, struct stmt_struct *record, Kind *arguments, 
             fail(b, "runtime-sized inline struct fields are unsupported; use an unsized buffer or array reference");
             v->members[i] = BAD;
         } else v->members[i] = recordFieldKind(b, record->fieldTypes[i]);
+        if (record->fieldBits && record->fieldBits[i]) {
+            Kind scalar = representationKind(b, v->members[i]);
+            if (!integral(b, scalar) && scalar != BOOL) fail(b, "bitfield requires an integer or bool type");
+            else if (record->fieldBits[i] > (unsigned)(scalar == BOOL ? 1 : integerWidth(b, scalar)))
+                fail(b, "bitfield size exceeds its type width");
+        }
+    }
+    int hasBits = 0;
+    for (size_t i = 0; i < v->count; i++)
+        if (record->fieldBits && record->fieldBits[i]) hasBits = 1;
+    if (hasBits) {
+        v->fieldIndices = checked(sizeof(size_t) * v->count);
+        v->fieldOffsets = checked(sizeof(unsigned) * v->count);
+        v->fieldStorage = checked(sizeof(Kind) * v->count);
+        size_t physical = 0;
+        for (size_t i = 0; i < v->count;) {
+            unsigned bits = record->fieldBits[i];
+            if (!bits) {
+                v->fieldIndices[i] = physical++; v->fieldStorage[i] = v->members[i]; i++; continue;
+            }
+            size_t end = i; unsigned total = 0;
+            while (end < v->count && record->fieldBits[end] && total + record->fieldBits[end] <= 64) {
+                v->fieldIndices[end] = physical; v->fieldOffsets[end] = total;
+                total += record->fieldBits[end++];
+            }
+            Kind storage = (Kind)(VARINT_BASE + ((total + 7) / 8) * 8);
+            for (; i < end; i++) v->fieldStorage[i] = storage;
+            physical++;
+        }
     }
     b->recordDepth--;
     b->typeBindings = previous;
@@ -1696,7 +1732,52 @@ static Value boxArray(Backend *, Value);
 static int ownsArrays(Backend *, Kind);
 static Value copyValue(Backend *, Value, unsigned);
 static void copyInto(Backend *, Value, Value, unsigned);
+// Bitfields use read-modify-write so neighboring fields retain their values.
+static Value decodeBitfield(Backend *b, Value packed, Kind kind, unsigned bits, unsigned offset) {
+    if (offset) {
+        Value shifted = temp(b, packed.kind);
+        fprintf(b->body, "  %s = lshr %s %s, %u\n", shifted.operand, irType(b, packed.kind), packed.operand, offset);
+        packed = shifted;
+    }
+    Kind narrow = (Kind)(VARINT_BASE + bits);
+    Value part = convert(b, packed, narrow);
+    if (representationKind(b, kind) == BOOL) return value(b, kind, "%s", part.operand);
+    if (integerWidth(b, kind) == (int)bits) return value(b, kind, "%s", part.operand);
+    Value result = temp(b, kind);
+    fprintf(b->body, "  %s = %s %s %s to %s\n", result.operand,
+            unsignedInteger(b, kind) ? "zext" : "sext", irType(b, narrow), part.operand, irType(b, kind));
+    return result;
+}
+static Value encodeBitfield(Backend *b, Value packed, Value member, unsigned bits, unsigned offset) {
+    Kind narrow = (Kind)(VARINT_BASE + bits);
+    Value part = representationKind(b, member.kind) == BOOL
+        ? value(b, narrow, "%s", member.operand) : convert(b, member, narrow);
+    Value extended = part;
+    if (integerWidth(b, packed.kind) != (int)bits) {
+        extended = temp(b, packed.kind);
+        fprintf(b->body, "  %s = zext %s %s to %s\n", extended.operand, irType(b, narrow), part.operand, irType(b, packed.kind));
+    } else extended.kind = packed.kind;
+    if (offset) {
+        Value shifted = temp(b, packed.kind);
+        fprintf(b->body, "  %s = shl %s %s, %u\n", shifted.operand, irType(b, packed.kind), extended.operand, offset);
+        extended = shifted;
+    }
+    uint64_t mask = bits == 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1) << offset;
+    unsigned storageBits = integerWidth(b, packed.kind);
+    uint64_t keep = ~mask & (storageBits == 64 ? UINT64_MAX : (UINT64_C(1) << storageBits) - 1);
+    Value cleared = temp(b, packed.kind), result = temp(b, packed.kind);
+    fprintf(b->body, "  %s = and %s %s, %llu\n", cleared.operand, irType(b, packed.kind), packed.operand, (unsigned long long)keep);
+    fprintf(b->body, "  %s = or %s %s, %s\n", result.operand, irType(b, packed.kind), cleared.operand, extended.operand);
+    return result;
+}
 static void rawStore(Backend *b, Value address, Value v) {
+    if (address.bitWidth) {
+        Value packed = temp(b, address.bitStorage);
+        fprintf(b->body, "  %s = load %s, ptr %s\n", packed.operand, irType(b, packed.kind), address.operand);
+        Value updated = encodeBitfield(b, packed, coerce(b, v, address.kind), address.bitWidth, address.bitOffset);
+        fprintf(b->body, "  store %s %s, ptr %s\n", irType(b, updated.kind), updated.operand, address.operand);
+        return;
+    }
     BufferKind *target = bufferKind(b, address.kind);
     if (v.kind != address.kind && v.kind != NULL_VALUE &&
         (definedKind(b, v.kind) || definedKind(b, address.kind))) { fail(b, "distinct type requires an explicit cast"); return; }
@@ -1793,6 +1874,11 @@ static void store(Backend *b, Value address, Value v) {
     rawStore(b, address, v);
 }
 static Value load(Backend *b, Value address) {
+    if (address.bitWidth) {
+        Value packed = temp(b, address.bitStorage);
+        fprintf(b->body, "  %s = load %s, ptr %s\n", packed.operand, irType(b, packed.kind), address.operand);
+        return decodeBitfield(b, packed, address.kind, address.bitWidth, address.bitOffset);
+    }
     Value v = temp(b, address.kind);
     v.owner = address.owner;
     v.throughPointer = address.throughPointer;
@@ -2049,19 +2135,31 @@ static Value extract(Backend *b, Value aggregate, size_t index) {
         fail(b, "invalid aggregate extraction");
         return value(b, BAD, "0");
     }
+    size_t physical = t->fieldIndices ? t->fieldIndices[index] : index;
+    if (t->fieldIndices && t->record->fieldBits[index]) {
+        Value packed = temp(b, t->fieldStorage[index]);
+        fprintf(b->body, "  %s = extractvalue %s %s, %zu\n", packed.operand, t->ir, aggregate.operand, physical);
+        return decodeBitfield(b, packed, t->members[index], t->record->fieldBits[index], t->fieldOffsets[index]);
+    }
     Value result = temp(b, t->shape ? t->members[index] : t->element);
     fprintf(b->body, "  %s = extractvalue %s %s, %s%zu\n", result.operand, t->ir, aggregate.operand,
-            t->fixedArray && !t->shape ? "1, " : "", index);
+            t->fixedArray && !t->shape ? "1, " : "", physical);
     return result;
 }
 static Value insert(Backend *b, Value aggregate, Value member, size_t index) {
     BufferKind *t = bufferKind(b, aggregate.kind);
     Kind expected = t->shape ? t->members[index] : t->element;
     member = coerce(b, member, expected);
+    size_t physical = t->fieldIndices ? t->fieldIndices[index] : index;
+    if (t->fieldIndices && t->record->fieldBits[index]) {
+        Value packed = temp(b, t->fieldStorage[index]);
+        fprintf(b->body, "  %s = extractvalue %s %s, %zu\n", packed.operand, t->ir, aggregate.operand, physical);
+        member = encodeBitfield(b, packed, member, t->record->fieldBits[index], t->fieldOffsets[index]);
+    }
     Value result = temp(b, aggregate.kind);
     fprintf(b->body, "  %s = insertvalue %s %s, %s %s, %s%zu\n", result.operand, t->ir,
             aggregate.operand, irType(b, member.kind), member.operand,
-            t->fixedArray && !t->shape ? "1, " : "", index);
+            t->fixedArray && !t->shape ? "1, " : "", physical);
     return result;
 }
 static Value storageSize(Backend *b, Kind k) {
@@ -2829,8 +2927,13 @@ static void copyInto(Backend *b, Value destination, Value source, unsigned depth
     for (size_t i = 0; i < t->count; i++) {
         Kind member = t->shape ? t->members[i] : t->element;
         Value address = temp(b, member);
+        if (t->fieldIndices) {
+            address.bitWidth = t->record->fieldBits[i]; address.bitOffset = t->fieldOffsets[i];
+            address.bitStorage = t->fieldStorage[i];
+        }
         fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, %s%s %zu\n", address.operand, t->ir,
-                destination.operand, t->fixedArray && !t->shape ? "i32 1, " : "", t->shape ? "i32" : "i64", i);
+                destination.operand, t->fixedArray && !t->shape ? "i32 1, " : "", t->shape ? "i32" : "i64",
+                t->fieldIndices ? t->fieldIndices[i] : i);
         copyInto(b, address, extract(b, source, i), depth + 1);
     }
 }
@@ -3258,7 +3361,8 @@ static Value emptyValue(Backend *b, Kind kind) {
         }
         fputs(record ? "{ " : "[ ", constant);
         for (size_t i = 0; i < t->count; i++) {
-            Kind member = record ? t->members[i] : t->element;
+            if (t->fieldIndices && i && t->fieldIndices[i] == t->fieldIndices[i - 1]) continue;
+            Kind member = t->fieldStorage ? t->fieldStorage[i] : record ? t->members[i] : t->element;
             Value zero = emptyValue(b, member);
             fprintf(constant, "%s%s %s", i ? ", " : "", irType(b, member), zero.operand);
         }
@@ -3468,8 +3572,12 @@ static Value address(Backend *b, expr *e) {
                 Value result = temp(b, t->members[i]);
                 result.owner = base.owner;
                 result.throughPointer = base.throughPointer;
+                if (t->fieldIndices) {
+                    result.bitWidth = t->record->fieldBits[i];
+                    result.bitOffset = t->fieldOffsets[i]; result.bitStorage = t->fieldStorage[i];
+                }
                 fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 %zu\n",
-                        result.operand, t->ir, base.operand, i);
+                        result.operand, t->ir, base.operand, t->fieldIndices ? t->fieldIndices[i] : i);
                 return result;
             }
             fail(b, "unknown struct field");
@@ -4421,6 +4529,7 @@ static Value expressionImpl(Backend *b, expr *e) {
                     return value(b, BAD, "0");
                 }
                 Value addr = address(b, &dot->parent);
+                if (addr.bitWidth) { fail(b, "cannot take the address of a bitfield for a pointer receiver"); return value(b, BAD, "0"); }
                 receiver = value(b, method->receiver, "%s", addr.operand);
             } else {
                 receiver = expression(b, &dot->parent);
@@ -4862,6 +4971,7 @@ static Value expressionImpl(Backend *b, expr *e) {
         if (v->operation == UNARY_ADDRESS_OF) {
             Value storage = v->child.type == EXPR_TYPE_COMPOSITE
                                 ? materialize(b, &v->child) : address(b, &v->child);
+            if (storage.bitWidth) fail(b, "cannot take the address of a bitfield");
             if (v->child.type == EXPR_TYPE_COMPOSITE) escapeDynamicArrays(b, load(b, storage));
             return value(b, pointerKind(b, storage.kind), "%s", storage.operand);
         }
@@ -7084,8 +7194,10 @@ static int emitLLVMMode(parseResult *program, FILE *output, llvmPackages *units)
         fprintf(output, "%s = type { ", t->ir);
         // A byte-size header must determine array length even for empty records.
         if (!t->count) fprintf(output, "i8");
-        for (size_t i = 0; i < t->count; i++)
-            fprintf(output, "%s%s", i ? ", " : "", irType(&b, t->members[i]));
+        for (size_t i = 0; i < t->count; i++) {
+            if (t->fieldIndices && i && t->fieldIndices[i] == t->fieldIndices[i - 1]) continue;
+            fprintf(output, "%s%s", i ? ", " : "", irType(&b, t->fieldStorage ? t->fieldStorage[i] : t->members[i]));
+        }
         fprintf(output, " }\n");
     }
     if (copy(anyRuntime, output)) fail(&b, "could not write any runtime");
@@ -7157,6 +7269,7 @@ cleanup:
         if (!b.buffers->definition) {
             free(b.buffers->arguments);
             free(b.buffers->members);
+            free(b.buffers->fieldIndices); free(b.buffers->fieldOffsets); free(b.buffers->fieldStorage);
         }
         if (b.buffers->shape == 17 && !b.buffers->definition) free(b.buffers->callable);
         free(b.buffers->layout);

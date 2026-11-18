@@ -223,6 +223,7 @@ static Value scheduleIntrinsicDefer(Backend *b, expr *callExpression) {
         if (!strcmp(name, "array")) args[0] = expression(b, &dot->parent);
         else {
             Value storage = address(b, &dot->parent);
+            if (storage.bitWidth) { fail(b, "cannot take the address of a bitfield"); return value(b, BAD, "0"); }
             args[0] = value(b, pointerKind(b, storage.kind), "%s", storage.operand);
         }
     }

@@ -13,7 +13,7 @@
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 
 ((identifier) @type.builtin
- (#match? @type.builtin "^(int|uint|float|bool|string|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|array|buffer|map|void)$"))
+ (#match? @type.builtin "^(int|uint|float|bool|string|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|varint|array|buffer|map|void)$"))
 ((keyword) @type.builtin
  (#match? @type.builtin "^(any|mixed)$"))
 ((keyword) @keyword.control

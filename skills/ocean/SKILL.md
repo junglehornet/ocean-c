@@ -352,7 +352,7 @@ not C `int`. Strings are immutable bytes; indexing reads a signed byte and `len`
 counts bytes. Character literals decode Unicode scalars. Identifiers support
 Unicode; exported names begin with Unicode uppercase letters.
 
-`varint(n)` is a built-in signed integer with exactly `n` value bits, where
+`varint(n)` is a built-in signed integer with exactly `n` bits including the sign bit, where
 `n` is an integer literal from 1 through 64. Its range is -2^(n-1) through
 2^(n-1)-1; storage occupies whole bytes with target ABI alignment. Casts that
 narrow truncate bits. Integer widening and fitting-literal rules also apply.
@@ -360,6 +360,27 @@ It is idiomatic to define a custom type with `type nibble varint(4);` rather
 than repeat `varint(4)` at every use. Named types are distinct: initialize with
 `x := 3->nibble;` and convert back with `x->int`. Use `varint(4)` directly when
 an anonymous width is appropriate, for example `x: varint(4) = 3;`.
+
+Struct bitfields use `name T : size;`, for example:
+
+```ocean
+struct Flags { low uint : 4; high uint : 4; ready bool : 1; }
+```
+
+The size is an integer literal from 1 through 64, no greater than the backing
+type's width. Integer types, named integer types, and `bool` (size 1) are
+supported. Consecutive bitfields pack in declaration order, starting at the low
+bits, into shared storage of at most 64 bits; an ordinary field starts separate
+storage. Each group uses whole bytes and target ABI alignment. Two adjacent
+4-bit fields occupy one byte. Reads preserve the declared type and sign-extend
+signed fields from their field width. Writes truncate to the field width and
+preserve neighboring fields. Bitfields cannot have their address taken,
+including implicit borrowing for a pointer receiver.
+
+An explicitly written `varint(n)` field with a smaller bitfield size produces a
+warning and still compiles: `struct Small { num varint(6) : 5; }`. This warning
+does not apply to named types or aliases backed by `varint`, such as
+`type nibble varint(4); struct Packed { low nibble : 3; }`.
 
 Integer variables convert implicitly only when the destination represents the full
 source range: `i8` to `i32`, `u8` to `u16`, and `u8` to `i16` work. Narrowing,

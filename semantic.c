@@ -966,14 +966,25 @@ static Type *contextualInteger(Context *c, Type *expected, Type *actual, expr *e
     error(c, at, "integer literal is out of range; use an explicit -> cast to narrow");
     return actual;
 }
+static typeTokens numericTypeSpan(Type *type, token at) {
+    typeTokens span = {.nTokens = type->varintBits ? 4 : 1};
+    span.tokens = calloc(span.nTokens, sizeof(token));
+    for (size_t i = 0; i < span.nTokens; i++) span.tokens[i] = at;
+    span.tokens[0].type = IDENTIFIER;
+    span.tokens[0].lexeme = (char *)(type->spelling ? type->spelling : type->name);
+    if (type->varintBits) {
+        span.tokens[0].lexeme = "varint";
+        span.tokens[1].type = LEFT_PAREN; span.tokens[1].lexeme = "(";
+        span.tokens[2].type = LITERAL_INT; span.tokens[2].lexeme = "<width>";
+        span.tokens[2].numValue.integer = type->varintBits;
+        span.tokens[3].type = RIGHT_PAREN; span.tokens[3].lexeme = ")";
+    }
+    return span;
+}
 static void typeIntegerLiteral(Type *expected, expr *e) {
     struct expr_typecast *cast = calloc(1, sizeof(*cast));
     cast->child = *e;
-    cast->type.nTokens = 1;
-    cast->type.tokens = calloc(1, sizeof(token));
-    cast->type.tokens[0] = e->location;
-    cast->type.tokens[0].type = IDENTIFIER;
-    cast->type.tokens[0].lexeme = (char *)(expected->spelling ? expected->spelling : expected->name);
+    cast->type = numericTypeSpan(expected, e->location);
     e->type = EXPR_TYPE_TYPECAST;
     e->underlying = cast;
 }
@@ -2405,11 +2416,7 @@ static Type *expression(Context *c, expr *e) {
             }
             if (!typeSetSpan(result).nTokens && !result->abstractParameter &&
                 (numericType(result) || result == &boolean || result == &string)) {
-                v->checkedResult.nTokens = 1;
-                v->checkedResult.tokens = calloc(1,sizeof(token));
-                v->checkedResult.tokens[0] = at;
-                v->checkedResult.tokens[0].type = IDENTIFIER;
-                v->checkedResult.tokens[0].lexeme = (char *)(result == &string ? "string" : result->spelling ? result->spelling : result->name);
+                v->checkedResult = numericTypeSpan(result, at);
             }
             return result;
         }
@@ -2528,6 +2535,18 @@ static Type *expression(Context *c, expr *e) {
             !writable(c, &v->child))
             mutationError(c, &v->child, at, "increment requires a writable value");
         if (v->operation == UNARY_ADDRESS_OF) {
+            if (v->child.type == EXPR_TYPE_DOT) {
+                struct expr_dot *dot = v->child.underlying;
+                Type *parent = recordReceiver(expression(c, &dot->parent));
+                while (!parent->record && parent->element && !strcmp(parent->name, "pointer"))
+                    parent = recordReceiver(parent->element);
+                if (parent->record && parent->record->fieldBits && dot->field.type == EXPR_TYPE_IDENTIFIER) {
+                    const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
+                    for (size_t i = 0; i < parent->record->nFields; i++)
+                        if (parent->record->fieldBits[i] && !strcmp(parent->record->fieldNames[i].lexeme, name))
+                            error(c, at, "cannot take the address of a bitfield");
+                }
+            }
             if (v->child.type == EXPR_TYPE_INDEX && expression(c, &((struct expr_index *)v->child.underlying)->parent)->mapKey)
                 error(c, at, "cannot take the address of a map entry");
             if (arrayDataTarget(c, &v->child))
@@ -2939,6 +2958,24 @@ static void statement(Context *c, stmt *s) {
         for (size_t i = 0; i < v->nFields; i++) {
             Type *fieldType = fieldTypes[i];
             if (fieldType == &nothing) error(c, v->fieldNames[i], "void is not a field storage type");
+            if (v->fieldBits && v->fieldBits[i]) {
+                Type *base = fieldType;
+                while (base->underlying) base = base->underlying;
+                int isUnsigned = 0;
+                int width = canonical(base) == &boolean ? 1 : integerShape(base, &isUnsigned);
+                if (!width && canonical(base) != &any)
+                    error(c, v->fieldNames[i], "bitfield requires an integer or bool type");
+                else if (width && v->fieldBits[i] > (unsigned)width)
+                    error(c, v->fieldNames[i], "bitfield size exceeds its type width");
+                if (fieldType->varintBits && v->fieldTypes[i].nTokens == 4 &&
+                    !strcmp(v->fieldTypes[i].tokens[0].lexeme, "varint") &&
+                    v->fieldBits[i] < fieldType->varintBits) {
+                    token at = diagnosticLocation(c, v->fieldNames[i]);
+                    diagnostic(programSource(c->program, at.filename), at, "semantic", "warning",
+                               "bitfield size %u is smaller than explicit varint(%u)",
+                               v->fieldBits[i], fieldType->varintBits);
+                }
+            }
             Symbol *field = declare(c, v->fieldNames[i], fieldType, 0);
             if (field)
                 field->immutable = i < v->nVarParams;

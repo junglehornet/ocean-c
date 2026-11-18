@@ -34,8 +34,11 @@ func main() int {
     p := &x; *p = -11;
     b: any = x; y := b.(varint(6));
     if (sizeof(varint(4)) != 1 || sizeof(nibble) != 1) return 1;
-    if (n->int != -7 || identity(y)->int != -11 || a[1]->int != -3) return 2;
-    z := zero(varint(9)); return z->int;
+    if (n->int != -7 || identity(y)->int != -11 || a[1]->int != -3 || x != -11 || a[0] != 2) return 2;
+    z := zero(varint(9));
+    literal := varint(4)[2]{1, 2}; dynamic := varint(4)[]{3, 4};
+    if (literal[0] != 1 || dynamic[1] != 4) return 3;
+    return z->int;
 }''')
     body = []
     for width in range(1, 65):
