@@ -128,7 +128,7 @@ Build Windows compilers with native LLVM/MinGW (MSYS2 CLANG64 or CLANGARM64),
 CMake, Make/Ninja, and target-matching libffi headers. Ocean programs require a
 Windows GNU/MinGW Clang toolchain on PATH. Decimal floating-point literals are
 converted directly to binary64 rather than accumulated in host `long double`, including on Windows ARM64.
-Integer literals use fixed 64-bit storage on every native host, including Windows where C `long` is 32-bit.
+Integer literals through 64 bits use fixed-width storage on every native host, including Windows where C `long` is 32-bit; larger literals retain their exact magnitude for wide integer types.
 Synthesized enum comparison and match tags use `long long` storage as well,
 preventing reads past a 32-bit `long` allocation on Windows.
 Windows LSP requests run in isolated re-executed workers with editor overlays;
@@ -353,13 +353,52 @@ counts bytes. Character literals decode Unicode scalars. Identifiers support
 Unicode; exported names begin with Unicode uppercase letters.
 
 `varint(n)` is a built-in signed integer with exactly `n` bits including the sign bit, where
-`n` is an integer literal from 1 through 64. Its range is -2^(n-1) through
+`n` is an integer literal from 1 through 8388608. Its range is -2^(n-1) through
 2^(n-1)-1; storage occupies whole bytes with target ABI alignment. Casts that
 narrow truncate bits. Integer widening and fitting-literal rules also apply.
 It is idiomatic to define a custom type with `type nibble varint(4);` rather
 than repeat `varint(4)` at every use. Named types are distinct: initialize with
 `x := 3->nibble;` and convert back with `x->int`. Use `varint(4)` directly when
 an anonymous width is appropriate, for example `x: varint(4) = 3;`.
+
+`varuint(n)` is the unsigned counterpart of `varint(n)`, with an integer
+literal width from 1 through 8388608 and range 0 through 2^n-1. For example,
+`x: varuint(4) = 15; x++;` wraps to zero. Widening zero-extends; narrowing
+casts truncate. Signed-to-unsigned conversions require an explicit cast;
+unsigned-to-signed widening is implicit only if the signed destination can
+represent the full unsigned range. Division, remainder, comparisons, and
+right shifts use unsigned semantics. As with `varint`, prefer a named type
+such as `type nibble varuint(4);` for repeated use, initialized with
+`x := 15->nibble;`. Arrays, pointers, boxing, and bitfields support `varuint`.
+An explicit `varuint(6) : 5` bitfield warns and compiles; named types and
+aliases backed by `varuint` are exempt, just as for `varint`.
+
+Both parameterized integer families accept widths through **8,388,608 bits**,
+LLVM's inclusive maximum. Ordinary `int` and `uint` remain 64-bit. Decimal,
+hexadecimal, binary, and octal integer literals preserve their complete value.
+Literals exceeding `uint` infer `varuint(k)` with the minimum magnitude width;
+negative literals exceeding the ordinary range infer a fitting signed width.
+Prefer an explicit destination or named type for a stable storage width:
+
+```ocean
+type Counter varuint(256);
+value: varuint(128) = 340282366920938463463374607431768211455;
+count := 340282366920938463463374607431768211456->Counter;
+```
+
+Signed widening sign-extends and unsigned widening zero-extends. Mixed-width
+integer arithmetic uses at least 64 bits and retains larger operand widths.
+When a wide operation mixes signed and unsigned operands, its signed result
+has enough bits for both ranges; an explicit cast is required if that would
+exceed the maximum. Existing mixed-sign rules for operands up to 64 bits remain.
+Boxed values wider than 64 bits use owned heap storage and retain their exact
+type and value through copies, containers, and reflection. Very large widths
+can require substantial compilation time and memory; native lowering also
+depends on the installed LLVM target. C scalar interoperability is limited to
+64 bits: explicitly narrow a fitting value or pass a pointer to wide storage.
+Boxed wide integers cannot be passed directly to C variadic formatting.
+Standard-library `io.ParseInt` still returns a 64-bit `int`.
+Bitfield sizes remain 1–64 bits, even when their backing integer is wider.
 
 Struct bitfields use `name T : size;`, for example:
 
@@ -390,9 +429,10 @@ initializers, assignments, returns, and collection elements. Fitting integer
 literals may directly initialize or supply narrower types (`small: i8 = 42`);
 integer expressions and variables are checked by type, not their current value.
 Pointer and collection element storage types must match; scalar widening does
-not convert an `i8[]` into an `i32[]`. Mixed-width integer arithmetic promotes
-to 64 bits; fitting literals use the other operand's type. Mixed signed/unsigned
-arithmetic needs a cast if no signed 64-bit type can represent both ranges.
+not convert an `i8[]` into an `i32[]`. Mixed-width integer arithmetic uses at least 64 bits and preserves larger widths;
+fitting literals use the other operand's type. Operands up to 64 bits retain
+the existing mixed-sign cast requirements; wide mixed-sign operations use a
+signed type large enough for both ranges.
 
 Integer literals (including negative literals) automatically convert in float contexts,
 including typed initializers, assignments, arguments, returns, arithmetic, and

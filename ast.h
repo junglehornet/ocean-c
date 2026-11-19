@@ -327,6 +327,9 @@ enum literalType {
 struct expr_literal {
     enum literalType type;
     char unsignedLiteral;
+    char *wideInteger; // Borrowed token spelling; magnitude is never truncated.
+    unsigned integerBits;
+    int integerPowerOfTwo, negativeWide;
     size_t stringLength;
     void *value;
 };

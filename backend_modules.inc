@@ -30,8 +30,8 @@ static const char *nativeKindIdentity(Backend *b, Kind kind) {
     const char *key = value(b, RAW_POINTER, "$kind.%u", (unsigned)kind).operand;
     uintptr_t cached;
     if (hashmap_get(b->nativeNames, key, strlen(key), &cached)) return (const char *)cached;
-    if (kind > VARINT_BASE && kind <= VARINT_BASE + 64)
-        return value(b, RAW_POINTER, "varint%u", (unsigned)(kind - VARINT_BASE)).operand;
+    if (parameterizedIntegerWidth(kind))
+        return value(b, RAW_POINTER, "%s%u", kind > VARUINT_BASE ? "varuint" : "varint", parameterizedIntegerWidth(kind)).operand;
     if (kind < BUFFER) {
         const char *name = value(b, RAW_POINTER, "scalar%u", (unsigned)kind).operand;
         nativeName(b, key, name); return name;

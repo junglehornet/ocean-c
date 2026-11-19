@@ -221,7 +221,7 @@ static expr atomicImpl(parserState *state) {
         case UNDERSCORE:
         case ANY:
         case IDENTIFIER: {
-            if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "varint")) {
+            if (tok.type == IDENTIFIER && (!strcmp(tok.lexeme, "varint") || !strcmp(tok.lexeme, "varuint"))) {
                 size_t start = state->tokenIndex;
                 if (!parseSignatureType(state, 0)) return (expr){0};
                 struct expr_zero *prefix = calloc(1, sizeof(*prefix));
@@ -287,6 +287,8 @@ static expr atomicImpl(parserState *state) {
             struct expr_literal lit_int = {0};
             lit_int.type = LITERAL_TYPE_INT;
             lit_int.unsignedLiteral = tok.unsignedLiteral;
+            lit_int.wideInteger = tok.wideInteger; lit_int.integerBits = tok.integerBits;
+            lit_int.integerPowerOfTwo = tok.integerPowerOfTwo;
             lit_int.value = malloc(sizeof(int64_t));
             CHECK_MALLOC(lit_int.value);
             *(int64_t*) lit_int.value = tok.numValue.integer;
@@ -650,10 +652,20 @@ static expr secondaryImpl(parserState *state) {
             CHECK_SYNC;
             if (child2.type == EXPR_TYPE_LITERAL) {
                 struct expr_literal *literal = child2.underlying;
+                if (literal->type == LITERAL_TYPE_INT && literal->wideInteger) {
+                    literal->negativeWide = !literal->negativeWide;
+                    return child2;
+                }
                 if (literal->type == LITERAL_TYPE_INT && literal->unsignedLiteral &&
                     *(uint64_t *)literal->value == (uint64_t)INT64_MAX + 1) {
                     literal->unsignedLiteral = 0; *(int64_t *)literal->value = INT64_MIN;
                     return child2;
+                }
+                if (literal->type == LITERAL_TYPE_INT && literal->unsignedLiteral) {
+                    literal->wideInteger = malloc(24); CHECK_MALLOC(literal->wideInteger);
+                    snprintf(literal->wideInteger, 24, "u0x%" PRIx64, *(uint64_t *)literal->value);
+                    literal->integerBits = 64; literal->integerPowerOfTwo = 0;
+                    literal->negativeWide = 1; return child2;
                 }
             }
             struct expr_unary unary_n5 = {0};
@@ -1355,19 +1367,19 @@ static char parseSignatureTypeImpl(parserState *state, size_t depth) {
             return signatureError(state, "mixed requires an array type ending in []");
         return 1;
     }
-    if (tok.type == IDENTIFIER && !strcmp(tok.lexeme, "varint")) {
+    if (tok.type == IDENTIFIER && (!strcmp(tok.lexeme, "varint") || !strcmp(tok.lexeme, "varuint"))) {
         advance(state);
         if (currentToken(state).type != LEFT_PAREN)
-            return signatureError(state, "varint requires a bit width: varint(n)");
+            return signatureError(state, !strcmp(tok.lexeme, "varuint") ? "varuint requires a bit width: varuint(n)" : "varint requires a bit width: varint(n)");
         advance(state);
         if (currentToken(state).type != LITERAL_INT)
-            return signatureError(state, "varint width must be an integer literal from 1 to 64");
+            return signatureError(state, !strcmp(tok.lexeme, "varuint") ? "varuint width must be an integer literal from 1 to 8388608" : "varint width must be an integer literal from 1 to 8388608");
         token width = currentToken(state);
-        if (width.numValue.integer < 1 || width.numValue.integer > 64)
-            return signatureError(state, "varint width must be from 1 to 64");
+        if (width.wideInteger || width.numValue.integer < 1 || width.numValue.integer > OCEAN_MAX_INTEGER_BITS)
+            return signatureError(state, !strcmp(tok.lexeme, "varuint") ? "varuint width must be from 1 to 8388608" : "varint width must be from 1 to 8388608");
         advance(state);
         if (currentToken(state).type != RIGHT_PAREN)
-            return signatureError(state, "Expected closing parenthesis after varint width");
+            return signatureError(state, !strcmp(tok.lexeme, "varuint") ? "Expected closing parenthesis after varuint width" : "Expected closing parenthesis after varint width");
         advance(state);
         while (currentToken(state).type == LEFT_BRACKET)
             if (!parseTypeBrackets(state, depth + 1)) return 0;
@@ -1663,7 +1675,7 @@ static char parseCastTarget(parserState *state, typeTokens *target) {
             return signatureError(state, "Expected cast type; multi-token types require parentheses");
         if (!checkTypeName(state, tok)) return 0;
         if (tok.type == IDENTIFIER && ((!strcmp(tok.lexeme, "buffer") && peek(state).type == LESS_THAN) ||
-            !strcmp(tok.lexeme, "varint") ||
+            (!strcmp(tok.lexeme, "varint") || !strcmp(tok.lexeme, "varuint")) ||
             peek(state).type == LEFT_BRACKET)) {
             if (!parseSignatureType(state, state->syntaxDepth + 1)) return 0;
         } else advance(state);

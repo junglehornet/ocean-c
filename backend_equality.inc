@@ -134,8 +134,8 @@ static void prepareEqualityHelpers(Backend *b) {
 static Value equalityBits(Backend *b, Kind kind, const char *bits) {
     BufferKind *layout = bufferKind(b, kind);
     Value result;
-    if (layout && (layout->shape == 4 || layout->shape == 5 || layout->shape == 17 || !layout->shape ||
-                   (layout->definition && representationKind(b, kind) == SCALAR_ANY))) {
+    if (wideInteger(b, kind) || (layout && (layout->shape == 4 || layout->shape == 5 || layout->shape == 17 || !layout->shape ||
+                   (layout->definition && representationKind(b, kind) == SCALAR_ANY)))) {
         result = temp(b, kind);
         fprintf(b->body, "  %s = call %s @__ocean.any.unbox.%u(i64 %s)\n", result.operand, irType(b, kind), (unsigned)kind, bits);
     } else {

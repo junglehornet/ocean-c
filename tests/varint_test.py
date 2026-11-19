@@ -48,7 +48,7 @@ func main() int {
         body.append(f'if (a{width}->int != {minimum} || b{width}->int != {maximum}) return 1;')
         body.append(f'b{width}++; if (b{width}->int != {minimum}) return 2;')
     program('func main() int {\n' + '\n'.join(body) + '\nreturn 0; }')
-    for width in (0, 65, -1):
+    for width in (0, 8388609, -1):
         check(f'func main() {{ x: varint({width}); }}', 'varint width')
     check('func main() { x: varint(4) = 8; }', 'type mismatch')
     check('func main() { x: varint(6) = 3; y: varint(4) = x; }', 'type mismatch')

@@ -235,6 +235,12 @@ if(BUILD_TESTING)
     add_test(NAME bitfields_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/bitfields_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(bitfields_test PROPERTIES TIMEOUT 60)
+    add_test(NAME wide_integers_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/wide_integers_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(wide_integers_test PROPERTIES TIMEOUT 180)
+    add_test(NAME varuint_test COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/varuint_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
+    set_tests_properties(varuint_test PROPERTIES TIMEOUT 60)
     add_test(NAME varint_test COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/varint_test.py" "$<TARGET_FILE:ocean-c>" "${OCEAN_CLANG_EXECUTABLE}")
     set_tests_properties(varint_test PROPERTIES TIMEOUT 60)

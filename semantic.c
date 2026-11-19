@@ -42,6 +42,7 @@ struct Type {
     int typeList;
     const char *spelling; // Keep explicit numeric type names for diagnostics.
     unsigned varintBits;
+    int varintUnsigned;
     Type *semanticBase; // Numeric family used for operations; spelling retains storage width.
 };
 typedef struct Symbol {
@@ -246,12 +247,32 @@ static int matchesTypeConstraint(Type *expected, Type *actual) {
 static int integerShape(Type *t, int *isUnsigned) {
     if (definedType(t) || (canonical(t) != &integer && canonical(t) != &signedByte)) return 0;
     const char *name = t->spelling ? t->spelling : t->name;
-    if (t->varintBits) { *isUnsigned = 0; return t->varintBits; }
+    if (t->varintBits) { *isUnsigned = t->varintUnsigned; return t->varintBits; }
     *isUnsigned = name[0] == 'u' || !strcmp(name, "byte");
     if (!strcmp(name, "i8") || !strcmp(name, "u8") || !strcmp(name, "byte")) return 8;
     if (!strcmp(name, "i16") || !strcmp(name, "u16")) return 16;
     if (!strcmp(name, "i32") || !strcmp(name, "u32") || !strcmp(name, "rune")) return 32;
     return 64;
+}
+static Type *sizedInteger(Context *c, unsigned width, int isUnsigned) {
+    if (width == 64) return isUnsigned ? &unsignedIntegerType : &integer;
+    Type *result = allocate(c, sizeof(*result));
+    result->varintBits = width; result->varintUnsigned = isUnsigned; result->semanticBase = &integer;
+    char *name = allocate(c, 32); snprintf(name, 32, "%s(%u)", isUnsigned ? "varuint" : "varint", width);
+    result->name = result->spelling = name; return result;
+}
+static Type *commonIntegerType(Context *c, Type *a, Type *b, token at) {
+    int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);
+    if (aw == bw && au == bu) return a;
+    unsigned width = aw > bw ? aw : bw;
+    if (au == bu) return sizedInteger(c, width < 64 ? 64 : width, au);
+    unsigned unsignedWidth = au ? aw : bw, signedWidth = au ? bw : aw;
+    if (unsignedWidth < 64 && width <= 64) return &integer;
+    if (width <= 64 || unsignedWidth >= OCEAN_MAX_INTEGER_BITS) {
+        error(c, at, "mixed signed and unsigned integers require an explicit -> cast"); return &unknown;
+    }
+    if (signedWidth <= unsignedWidth) width = unsignedWidth + 1;
+    return sizedInteger(c, width, 0);
 }
 static int integerFits(Type *expected, Type *actual) {
     int eu, au;
@@ -470,15 +491,16 @@ static Type *typeOf(Context *c, typeTokens span) {
         }
         return v;
     }
-    if (t.type == IDENTIFIER && !strcmp(t.lexeme, "varint")) {
+    if (t.type == IDENTIFIER && (!strcmp(t.lexeme, "varint") || !strcmp(t.lexeme, "varuint"))) {
         if (span.nTokens != 4 || span.tokens[1].type != LEFT_PAREN ||
             span.tokens[2].type != LITERAL_INT || span.tokens[3].type != RIGHT_PAREN ||
-            span.tokens[2].numValue.integer < 1 || span.tokens[2].numValue.integer > 64) {
-            error(c, t, "varint width must be an integer literal from 1 to 64"); return &unknown;
+            span.tokens[2].wideInteger || span.tokens[2].numValue.integer < 1 || span.tokens[2].numValue.integer > OCEAN_MAX_INTEGER_BITS) {
+            error(c, t, !strcmp(t.lexeme, "varuint") ? "varuint width must be an integer literal from 1 to 8388608" : "varint width must be an integer literal from 1 to 8388608"); return &unknown;
         }
         Type *v = allocate(c, sizeof(*v));
         v->varintBits = span.tokens[2].numValue.integer;
-        char *name = allocate(c, 24); snprintf(name, 24, "varint(%u)", v->varintBits);
+        char *name = allocate(c, 24); snprintf(name, 24, "%s(%u)", t.lexeme, v->varintBits);
+        v->varintUnsigned = !strcmp(t.lexeme, "varuint");
         v->name = v->spelling = name; v->semanticBase = &integer;
         return v;
     }
@@ -920,8 +942,9 @@ static int coerceFloatLiteral(Type *expected, expr *e) {
     if (literal->type != LITERAL_TYPE_INT) return 0;
     double *number = malloc(sizeof(*number));
     if (!number) exit(1);
-    *number = literal->unsignedLiteral ? (double)*(uint64_t *)literal->value
-                                      : (double)*(int64_t *)literal->value;
+    *number = literal->wideInteger ? strtod(literal->wideInteger + 1, NULL) * (literal->negativeWide ? -1 : 1)
+              : literal->unsignedLiteral ? (double)*(uint64_t *)literal->value : (double)*(int64_t *)literal->value;
+    literal->wideInteger = NULL;
     free(literal->value);
     literal->value = number;
     literal->type = LITERAL_TYPE_FLOAT;
@@ -941,6 +964,12 @@ static int integerLiteralFits(Type *expected, expr *e) {
     if (e->type != EXPR_TYPE_LITERAL) return 0;
     struct expr_literal *v = e->underlying;
     if (v->type != LITERAL_TYPE_INT) return 0;
+    if (v->wideInteger) {
+        negate ^= v->negativeWide;
+        if (negate) return !isUnsigned && (v->integerBits < (unsigned)width ||
+            (v->integerBits == (unsigned)width && v->integerPowerOfTwo));
+        return v->integerBits <= (unsigned)(width - !isUnsigned);
+    }
     uint64_t magnitude;
     if (v->unsignedLiteral) magnitude = *(uint64_t *)v->value;
     else {
@@ -948,6 +977,7 @@ static int integerLiteralFits(Type *expected, expr *e) {
         if (number < 0) { negate = !negate; magnitude = UINT64_C(0) - (uint64_t)number; }
         else magnitude = (uint64_t)number;
     }
+    if (width > 64) return !negate || !magnitude || !isUnsigned;
     if (negate && magnitude) return !isUnsigned && magnitude <= (UINT64_C(1) << (width - 1));
     uint64_t maximum = isUnsigned ? (width == 64 ? ~UINT64_C(0) : (UINT64_C(1) << width) - 1)
                                        : (UINT64_C(1) << (width - 1)) - 1;
@@ -969,11 +999,11 @@ static Type *contextualInteger(Context *c, Type *expected, Type *actual, expr *e
 static typeTokens numericTypeSpan(Type *type, token at) {
     typeTokens span = {.nTokens = type->varintBits ? 4 : 1};
     span.tokens = calloc(span.nTokens, sizeof(token));
-    for (size_t i = 0; i < span.nTokens; i++) span.tokens[i] = at;
+    for (size_t i = 0; i < span.nTokens; i++) { span.tokens[i] = at; span.tokens[i].wideInteger = NULL; }
     span.tokens[0].type = IDENTIFIER;
     span.tokens[0].lexeme = (char *)(type->spelling ? type->spelling : type->name);
     if (type->varintBits) {
-        span.tokens[0].lexeme = "varint";
+        span.tokens[0].lexeme = type->varintUnsigned ? "varuint" : "varint";
         span.tokens[1].type = LEFT_PAREN; span.tokens[1].lexeme = "(";
         span.tokens[2].type = LITERAL_INT; span.tokens[2].lexeme = "<width>";
         span.tokens[2].numValue.integer = type->varintBits;
@@ -1844,8 +1874,12 @@ static Type *operatorResult(Context *c, enum binaryExprType op, Type *a, Type *b
         int comparison = op >= EXPR_EQUALITY && op <= EXPR_GREATER_EQUALS;
         if (!arithmetic && !comparison && !(integral && !isFloat)) return NULL;
         int au, bu, aw = integerShape(a, &au), bw = integerShape(b, &bu);
-        if (!isFloat && aw && bw && au != bu && (au ? aw : bw) == 64) return NULL;
+        if (!isFloat && aw && bw && au != bu &&
+            (((aw <= 64 && bw <= 64) && (au ? aw : bw) == 64) ||
+             (au ? aw : bw) >= OCEAN_MAX_INTEGER_BITS)) return NULL;
         Type *floatResult = floatOperatorType(a, b);
+        if (!isFloat && aw && bw && (aw > 64 || bw > 64))
+            return comparison ? &boolean : commonIntegerType(c, a, b, (token){0});
         return comparison ? &boolean : floatResult ? floatResult : identicalTypes(a, b) ? a : isFloat ? &floating : &integer;
     }
     if (canonical(a) == &boolean && canonical(b) == &boolean &&
@@ -1948,6 +1982,11 @@ static Type *expression(Context *c, expr *e) {
     case EXPR_TYPE_LITERAL: {
         struct expr_literal *v = e->underlying;
         if (v->type == LITERAL_TYPE_NULL) return &nullValue;
+        if (v->type == LITERAL_TYPE_INT && v->wideInteger) {
+            unsigned width = v->integerBits + (v->negativeWide && !v->integerPowerOfTwo);
+            if (width > OCEAN_MAX_INTEGER_BITS) { error(c, e->location, "integer literal exceeds maximum signed width"); return &unknown; }
+            return sizedInteger(c, width, !v->negativeWide);
+        }
         if (v->type == LITERAL_TYPE_INT && v->unsignedLiteral) {
             return &unsignedIntegerType;
         }
@@ -2392,7 +2431,7 @@ static Type *expression(Context *c, expr *e) {
             }
             int au, bu;
             int numericPair = integerShape(a, &au) && integerShape(b, &bu);
-            if (numericPair && au != bu && (au ? integerShape(a, &au) : integerShape(b, &bu)) == 64)
+            if (numericPair && au != bu && (au ? integerShape(a, &au) : integerShape(b, &bu)) == 64 && integerShape(a, &au) <= 64 && integerShape(b, &bu) <= 64)
                 error(c, at, "mixed signed and unsigned integers require an explicit -> cast");
             else if (!numericPair && !equalityCompatible(a, b)) check(c, a, b, at);
             return &boolean;
@@ -2442,10 +2481,7 @@ static Type *expression(Context *c, expr *e) {
         int stores = v->operation == EXPR_ASSIGNMENT ||
                      (v->operation >= EXPR_ADD_EQUALS && v->operation <= EXPR_BITWISE_OR_EQUALS);
         if (aw && bw && !stores) {
-            if (aw == bw && au == bu) integerResult = a;
-            else if (au == bu) integerResult = au ? &unsignedIntegerType : &integer;
-            else if ((au ? aw : bw) < 64) integerResult = &integer;
-            else error(c, at, "mixed signed and unsigned integers require an explicit -> cast");
+            integerResult = commonIntegerType(c, a, b, at);
         }
         if (recreated) recreated->freed = 0;
 
@@ -2968,12 +3004,13 @@ static void statement(Context *c, stmt *s) {
                 else if (width && v->fieldBits[i] > (unsigned)width)
                     error(c, v->fieldNames[i], "bitfield size exceeds its type width");
                 if (fieldType->varintBits && v->fieldTypes[i].nTokens == 4 &&
-                    !strcmp(v->fieldTypes[i].tokens[0].lexeme, "varint") &&
+                    (!strcmp(v->fieldTypes[i].tokens[0].lexeme, "varint") ||
+                     !strcmp(v->fieldTypes[i].tokens[0].lexeme, "varuint")) &&
                     v->fieldBits[i] < fieldType->varintBits) {
                     token at = diagnosticLocation(c, v->fieldNames[i]);
                     diagnostic(programSource(c->program, at.filename), at, "semantic", "warning",
-                               "bitfield size %u is smaller than explicit varint(%u)",
-                               v->fieldBits[i], fieldType->varintBits);
+                               "bitfield size %u is smaller than explicit %s(%u)",
+                               v->fieldBits[i], fieldType->varintUnsigned ? "varuint" : "varint", fieldType->varintBits);
                 }
             }
             Symbol *field = declare(c, v->fieldNames[i], fieldType, 0);

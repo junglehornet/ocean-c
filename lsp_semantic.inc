@@ -417,7 +417,7 @@ static void semanticWorker(FILE *out, const char *method, Json *params, Document
             }
             const char *builtins[] = {"uint", "u64", "u32", "u16", "u8", "int",    "i8",  "i16",  "i32",    "i64", "float",
                                       "f32",    "f64", "bool", "string", "any", "array", "Result",
-                                      "Optional", "varint", "buffer", "map", "delete", "len", "new", "make", "free", "recover",
+                                      "Optional", "varint", "varuint", "buffer", "map", "delete", "len", "new", "make", "free", "recover",
                                       "sizeof", "typeof", "zero"};
             for (i = 0; i < sizeof(builtins) / sizeof(*builtins); i++)
                 if (!strncmp(builtins[i], prefix, prefixLength))

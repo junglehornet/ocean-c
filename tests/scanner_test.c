@@ -129,8 +129,12 @@ int main(void) {
     assert(list->arr[6].numValue.integer == 0x3a9 && list->arr[7].numValue.integer == 0x1f30a);
     release(list);
     rejected("1e", "exponent"); rejected("1e+", "exponent");
-    rejected("18446744073709551616", "overflow");
-    rejected("0x10000000000000000", "overflow");
+    list = scan("18446744073709551616 0x10000000000000000 0b10000000000000000000000000000000000000000000000000000000000000000");
+    for (size_t i = 0; i < 3; i++) {
+        assert(list->arr[i].integerBits == 65 && list->arr[i].integerPowerOfTwo);
+        assert(!strcmp(list->arr[i].wideInteger, "u0x10000000000000000"));
+    }
+    release(list);
     rejected("\"\\uD800\"", "Unicode"); rejected("\"\\U00110000\"", "Unicode");
     rejected("\xc0\xaf", "UTF-8"); rejected("\xf4\x90\x80\x80", "UTF-8");
     rejected("'\xed\xa0\x80'", "UTF-8");
@@ -140,7 +144,16 @@ int main(void) {
     assert(list->arr[0].numValue.integer == LONG_MAX);
     release(list);
     snprintf(boundary, sizeof(boundary), "%ld0", LONG_MAX);
-    rejected(boundary, "overflow");
+    list = scan(boundary); assert(list->arr[0].type == LITERAL_INT); release(list);
+    size_t hexDigits = OCEAN_MAX_INTEGER_BITS / 4;
+    char *maximumLiteral = malloc(hexDigits + 4); assert(maximumLiteral);
+    maximumLiteral[0] = '0'; maximumLiteral[1] = 'x'; maximumLiteral[2] = '8';
+    memset(maximumLiteral + 3, '0', hexDigits - 1); maximumLiteral[hexDigits + 2] = 0;
+    list = scan(maximumLiteral);
+    assert(list->arr[0].integerBits == OCEAN_MAX_INTEGER_BITS && list->arr[0].integerPowerOfTwo);
+    release(list);
+    maximumLiteral[2] = '1'; maximumLiteral[hexDigits + 2] = '0'; maximumLiteral[hexDigits + 3] = 0;
+    rejected(maximumLiteral, "8388608 bits"); free(maximumLiteral);
     rejected("0b1.2", "invalid");
     rejected("'\n'", "character");
     rejected("\"\\q\"", "escape");

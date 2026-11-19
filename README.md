@@ -305,7 +305,9 @@ raw buffer globals are rejected; use arrays for runtime-sized global storage.
 The backend supports:
 
 - `int`/`i64` (signed 64-bit), `i32`, `i16`, `i8`, `uint`/`u64` (unsigned 64-bit), `u32`, `u16`, `u8`, `f32` (single precision), `float`/`f64` (double precision), `bool`,
-  and `string` (an alias for `i8[]`).
+  and `string` (an alias for `i8[]`). `varint(n)` and `varuint(n)` support signed
+  and unsigned integer widths from 1 through 8,388,608 bits; prefer named types
+  such as `type Counter varuint(256);` for repeated use.
 - Functions, recursion, forward calls, typed variadic parameters, multiple return
   values, named results, local variables, and lexical shadowing.
 - Function literals, shared mutable closures, structural `func(...)` types,
@@ -1509,10 +1511,21 @@ underscores; a lone `_` remains the discard token. Exported names use Unicode
 uppercase letters. UTF-8 character literals decode to Unicode scalar values,
 and `\uXXXX`/`\UXXXXXXXX` escapes encode scalars as UTF-8 in strings. Invalid
 UTF-8 and surrogate/out-of-range escapes are rejected. Decimal floating literals
-accept signed `e`/`E` exponents. Integer scanning preserves magnitudes through
-`UINT64_MAX`, with larger literals rejected. Unsigned integers use unsigned division,
-remainder, comparisons, and logical right shifts. Mixed integer operations use
-64-bit unsigned arithmetic when either operand is unsigned.
+accept signed `e`/`E` exponents. Integer scanning preserves exact magnitudes up
+to LLVM's 8,388,608-bit limit in decimal, hexadecimal, binary, and octal. Literals
+above `UINT64_MAX` infer a minimally wide `varuint`; an explicit type such as
+`value: varuint(256) = 340282366920938463463374607431768211456;` selects a stable
+width. Negative large literals infer a fitting signed width. Ordinary `int` and
+`uint` remain 64-bit. Unsigned integers use unsigned division, remainder,
+comparisons, and logical right shifts. Mixed-width operations retain at least
+64 bits and larger operand widths; wide mixed-sign operations use a signed
+width covering both ranges. Narrowing casts truncate; widening sign-extends or
+zero-extends according to the source signedness. Wide integers support named
+types, arrays, boxing, and reflection. Boxed values above 64 bits use owned heap
+storage. C scalar calls require an explicit cast to at most 64 bits or a pointer
+to wide storage; boxed wide values cannot supply C variadic formatting. Very
+large widths depend on LLVM target support and can be expensive to compile.
+Bitfield sizes remain 1–64 bits, including fields backed by wider integers.
 
 ### Maps
 
