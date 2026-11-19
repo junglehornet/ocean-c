@@ -1345,6 +1345,25 @@ for a C NULL argument. Ocean's explicit `null` is a distinct sentinel and must
 not be passed as C NULL. Compare native pointer results numerically with zero,
 for example `(handle -> int) == 0`, rather than with explicit `null`.
 
+## Terminal applications (`term/tui`)
+
+Implement `Model` with `Init() Cmd`, `Update(Msg) (Model, Cmd)`, and
+`View() string`. Construct a stable-address `Program` with `NewProgram` and call
+`Run().unwrap()`. Model methods run serially; commands run on native workers.
+`Options{AltScreen: true, Mouse: true}` enables the alternate screen and opt-in
+SGR button, wheel, and drag reporting. `Headless: true` disables terminal I/O.
+
+Handle `MouseMsg` in Update: `X`/`Y` are zero-based whole-terminal cell
+coordinates (also for inline views); `Action` is `press`, `release`, `motion`,
+or `scroll`. `Button` is `left`, `middle`, `right`, or `none`; scroll buttons
+are directions `up`, `down`, `left`, or `right`. `Shift`, `Alt`, and `Ctrl`
+are booleans. Motion reports occur while a button is held. SGR reports buffer
+across reads; extra buttons and legacy X10 reports are unsupported. Mouse
+reporting is disabled on normal exit, returned errors, and ordinary panic
+unwinding. Windows needs a terminal supplying SGR reports through VT input;
+Windows/macOS runtime behavior still needs host validation. Native threads
+are required, so this package cannot target WebAssembly.
+
 ## Unit tests
 
 Run `ocean test [location]` to compile and execute a package's tests. A location
