@@ -18,12 +18,13 @@ with tempfile.TemporaryDirectory(prefix="ocean string ownership ") as directory:
 #include <stdint.h>
 #include <stdlib.h>
 static void *allocations[65536];
-static int64_t live;
+static int64_t live, total;
 void *__real_malloc(size_t);
 void *__real_calloc(size_t, size_t);
 void __real_free(void *);
 static void *remember(void *p) {
     if (!p) return p;
+    ++total;
     for (size_t i = 0; i < 65536; ++i) if (!allocations[i]) {
         allocations[i] = p; ++live; return p;
     }
@@ -39,13 +40,14 @@ void __wrap_free(void *p) {
     abort(); // A double free or an attempt to free stack/static storage.
 }
 int64_t liveAllocations(void) { return live; }
+int64_t totalAllocations(void) { return total; }
 void writeFirst(char *data) { data[0] = 'X'; }
 ''')
     checks = 0
 
     def program(body):
         global checks
-        source.write_text('package main; extern int liveAllocations(); ' + body)
+        source.write_text('package main; extern int liveAllocations(); extern int totalAllocations(); ' + body)
         emitted = run([compiler, 'build', '--emit-llvm', str(source), '-o', str(ir)])
         assert emitted.returncode == 0, emitted.stdout + emitted.stderr
         module = ir.read_text()
@@ -66,6 +68,121 @@ void writeFirst(char *data) { data[0] = 'X'; }
         assert result.returncode != 0 and message in result.stderr, result
         checks += 1
 
+    program('''func main() int {
+        plain: int[];
+        made := make(int[]);
+        literal := int[]{};
+        zeroed := zero(int[]);
+        if (len(plain) != 0 || plain.capacity != 0) return 1;
+        if (len(made) != 0 || made.capacity != 0) return 2;
+        if (len(literal) != 0 || literal.capacity != 0) return 3;
+        if (len(zeroed) != 0 || zeroed.capacity != 0) return 4;
+        plain.append(1); made.append(2); literal.append(3); zeroed.append(4);
+        if (plain.capacity != 8 || made.capacity != 8 || literal.capacity != 8 || zeroed.capacity != 8) return 5;
+        if (len(plain) != 1 || plain[0] != 1 || made[0] != 2 || literal[0] != 3 || zeroed[0] != 4) return 6;
+        initialized: int[] = {1, 2};
+        if (initialized.capacity != 2) return 7;
+        free(plain); free(made); free(literal); free(zeroed); free(initialized);
+        return extern.liveAllocations();
+    }''')
+    program('''func main() int {
+        values := make(int[]);
+        if (values.capacity != 0) return 7;
+        before := extern.totalAllocations();
+        for (i := 0; i < 4096; i++) {
+            previous := values.capacity;
+            values.append(i);
+            if (i == 0 && values.capacity != 8) return 8;
+            if (values.capacity < len(values)) return 1;
+            if (previous != 0 && len(values) > previous && values.capacity != previous * 2) return 2;
+            if (len(values) <= previous && values.capacity != previous) return 3;
+        }
+        if (extern.totalAllocations() - before > 20) return 4;
+        for (i := 0; i < len(values); i++) if (values[i] != i) return 5;
+        copy := values; values.append(4096);
+        if (len(copy) != 4096 || copy[4095] != 4095) return 6;
+        free(copy); free(values); return extern.liveAllocations();
+    }''')
+    program('''func main() int {
+        values: int[]; values.append(1, 2, 3, 4);
+        capacity := values.capacity; positions: int[1] = {3};
+        before := extern.totalAllocations();
+        for (i := 0; i < 1024; i++) {
+            values.prepend(0); values.add(positions[0], 8, 9);
+            if (values.remove(positions[0]) != 8 || values.remove(positions[0]) != 9) return 1;
+            if (values.remove(0) != 0 || values.pop() != 4) return 2;
+            values.append(4);
+            if (values.capacity != capacity || len(values) != 4) return 3;
+        }
+        if (extern.totalAllocations() != before) return 4;
+        if (values[0] != 1 || values[1] != 2 || values[2] != 3 || values[3] != 4) return 5;
+        for (len(values) > 0) values.pop();
+        if (values.capacity != capacity) return 6;
+        values.prepend(1, 2, 3, 4, 5, 6, 7, 8, 9);
+        if (values.capacity != 16 || len(values) != 9) return 7;
+        values.add(4, 10, 11, 12, 13, 14, 15, 16, 17);
+        if (values.capacity != 32 || values[4] != 10 || values[12] != 5) return 8;
+        free(values); return extern.liveAllocations();
+    }''')
+    program('''func index(p *int[]) int { (*p).append(99); return 1; }
+    func main() int {
+        values: int[] = {1, 2, 3}; values.prepend(values...);
+        if (len(values) != 6 || values[3] != 1) return 1;
+        values.add(2, values...);
+        if (len(values) != 12 || values[2] != 1 || values[8] != 3) return 2;
+        if (values.remove(index(&values)) != 2 || len(values) != 11) return 3;
+        boxes: mixed any[]; boxes.append("a", int[]{1, 2});
+        removed := boxes.remove(0); boxes.prepend("b");
+        nested := boxes.pop().(int[]);
+        if (removed.(string) != "a" || nested[1] != 2 || boxes[0].(string) != "b") return 4;
+        free(values); free(boxes); free(nested); return 0;
+    }''')
+    program('''func rhs(p *int[]) int { (*p).append(99); return 7; }
+    func main() int {
+        values: int[]; before := extern.totalAllocations();
+        for (i := 0; i < 4096; i++) values += i;
+        if (extern.totalAllocations() - before > 20 || values.capacity != 4096) return 1;
+        for (i := 0; i < len(values); i++) if (values[i] != i) return 2;
+        small: int[]; small += 1;
+        before = extern.totalAllocations(); small += 2;
+        if (extern.totalAllocations() != before || small.capacity != 8) return 3;
+        copy := small; small += small;
+        if (len(small) != 4 || small[2] != 1 || len(copy) != 2) return 4;
+        other: int[] = {5, 6}; small += other;
+        if (small[4] != 5 || small[5] != 6 || small.capacity != 8) return 5;
+        small += rhs(&small);
+        if (len(small) != 7 || small[6] != 7) return 6;
+        nested: int[][]; child: int[] = {8}; nested += child;
+        child[0] = 9; if (nested[0][0] != 8) return 7;
+        free(values); free(small); free(copy); free(nested); free(child); free(other);
+        return extern.liveAllocations();
+    }''')
+    program('''func exercise() int {
+        values: mixed any[]; source: int[] = {1, 2};
+        text: any = "three"; values += source; values += text;
+        if (len(values) != 3 || values[0].(int) != 1 || values[2].(string) != "three") return 1;
+        values += values;
+        if (len(values) != 6 || values[5].(string) != "three") return 2;
+        homogeneous: any[]; homogeneous += source;
+        if (len(homogeneous) != 2 || homogeneous[1].(int) != 2) return 3;
+        return 0;
+    }
+    func main() int {
+        if (exercise() != 0) return 1;
+        return extern.liveAllocations();
+    }''')
+    program('''func next(p *int[]) int { (*p).append(99); return 7; }
+    func main() int {
+        values: int[] = {1, 2}; values.append(values...);
+        if (len(values) != 4 || values[2] != 1 || values[3] != 2) return 1;
+        values.append(next(&values));
+        if (len(values) != 5 || values[4] != 7) return 2;
+        nested: int[][] = {{1, 2}}; nested.append(nested[0]);
+        nested[0][0] = 9; if (nested[1][0] != 1) return 3;
+        nested.append(nested...); nested[0][0] = 8;
+        if (nested[2][0] != 9 || len(nested) != 4) return 4;
+        free(nested); free(values); return extern.liveAllocations();
+    }''')
     program('''func main() int {
         s := "hello"; values: int[] = {1, 2};
         baseline := extern.liveAllocations();

@@ -3406,6 +3406,14 @@ static Value materialize(Backend *b, expr *e) {
 static int pureIndex(expr *e) {
     if (!e || !e->underlying) return 1;
     if (e->type == EXPR_TYPE_IDENTIFIER || e->type == EXPR_TYPE_LITERAL) return 1;
+    if (e->type == EXPR_TYPE_DOT) {
+        struct expr_dot *v = e->underlying;
+        return pureIndex(&v->parent);
+    }
+    if (e->type == EXPR_TYPE_INDEX) {
+        struct expr_index *v = e->underlying;
+        return pureIndex(&v->parent) && pureIndex(&v->index);
+    }
     if (e->type == EXPR_TYPE_BINARY) {
         struct expr_binary *v = e->underlying;
         return v->operation < EXPR_ADD_EQUALS && pureIndex(&v->left) && pureIndex(&v->right);
@@ -3544,23 +3552,129 @@ static Value removeDynamicArray(Backend *b, struct expr_dot *dot, struct expr_ca
     Value removed = copyValue(b, load(b, elementAddress(b, source, index)), 0);
     Value newLength = temp(b, INT);
     fprintf(b->body, "  %s = sub i64 %s, 1\n", newLength.operand, length.operand);
-    Value result = allocateCollection(b, source.kind, newLength), cursor = slot(b, INT);
-    rawStore(b, cursor, value(b, INT, "0"));
-    unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
-    jump(b, condition); label(b, condition);
-    Value i = load(b, cursor), more = temp(b, BOOL);
-    fprintf(b->body, "  %s = icmp ult i64 %s, %s\n", more.operand, i.operand, newLength.operand);
-    branch(b, more, body, end); label(b, body);
-    Value after = temp(b, BOOL), shifted = temp(b, INT), from = temp(b, INT);
-    fprintf(b->body, "  %s = icmp uge i64 %s, %s\n", after.operand, i.operand, index.operand);
-    fprintf(b->body, "  %s = add i64 %s, 1\n", shifted.operand, i.operand);
-    fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 %s\n", from.operand, after.operand, shifted.operand, i.operand);
-    store(b, elementAddress(b, result, i), load(b, elementAddress(b, source, from)));
-    rawStore(b, cursor, shifted); jump(b, condition); label(b, end);
-    if (snapshot) dropDynamicArrayPayload(b, source);
-    escapeDynamicArrays(b, result);
-    dropDynamicArrayPayload(b, load(b, binding)); rawStore(b, binding, result);
+    // Release only the removed element; surviving elements transfer ownership
+    // within the same payload. The returned value is already an independent copy.
+    Value oldItem = load(b, elementAddress(b, source, index));
+    if (representationKind(b, oldItem.kind) == SCALAR_ANY) {
+        int previous = b->copyTransport; b->copyTransport = 3;
+        copyValue(b, oldItem, 0); b->copyTransport = previous;
+    } else dropNestedDynamicArrays(b, oldItem, 0);
+    Value next = temp(b, INT), remaining = temp(b, INT), bytes = temp(b, INT);
+    BufferKind *t = bufferKind(b, source.kind);
+    Value stride = storageSize(b, t->element);
+    fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, index.operand);
+    fprintf(b->body, "  %s = sub i64 %s, %s\n", remaining.operand, newLength.operand, index.operand);
+    fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, remaining.operand, stride.operand);
+    Value destination = elementAddress(b, source, index), from = elementAddress(b, source, next);
+    fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
+            destination.operand, from.operand, bytes.operand);
+    b->dataCopyUsed = 1;
+    rawStore(b, elementAddress(b, source, newLength), emptyValue(b, t->element));
+    rawStore(b, value(b, INT, "%s", source.operand), newLength);
+    escapeDynamicArrays(b, source);
+    if (snapshot) dropDynamicArrayPayload(b, load(b, binding));
+    rawStore(b, binding, source);
     return removed;
+}
+static Value insertDynamicArrayValues(Backend *b, Value binding, Value source, int snapshot,
+                                      Value index, Value *items, size_t explicitCount,
+                                      Value tail, Value tailLength, int spread, int shift) {
+    BufferKind *t = bufferKind(b, source.kind);
+    Value oldLength = arrayLength(b, source);
+    Value added = temp(b, INT), length = temp(b, INT);
+    fprintf(b->body, "  %s = add i64 %zu, %s\n", added.operand, explicitCount, tailLength.operand);
+    fprintf(b->body, "  %s = add i64 %s, %s\n", length.operand, oldLength.operand, added.operand);
+    // Own RHS values before moving storage: an argument/spread may alias source.
+    int previousTransport = b->copyTransport;
+    b->copyTransport = 1; // New elements belong to the array, not temporary box slots.
+    for (size_t j = 0; j < explicitCount; j++)
+        items[j] = copyValue(b, coerce(b, items[j], t->element), 0);
+    b->copyTransport = previousTransport;
+    if (spread) tail = collectionCopy(b, tail, source.kind);
+    Value holder = slot(b, source.kind);
+    rawStore(b, holder, source);
+    Value zero = emptyValue(b, source.kind), empty = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp eq ptr %s, %s\n", empty.operand, source.operand, zero.operand);
+    unsigned create = ++b->label, ready = ++b->label;
+    branch(b, empty, create, ready); label(b, create);
+    rawStore(b, holder, allocateCollection(b, source.kind, value(b, INT, "0")));
+    jump(b, ready); label(b, ready);
+    Value result = load(b, holder), cap = temp(b, INT), dataField = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 1\n", cap.operand, result.operand);
+    fprintf(b->body, "  %s = getelementptr { i64, i64, ptr }, ptr %s, i32 0, i32 2\n", dataField.operand, result.operand);
+    Value capacity = load(b, cap), grow = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ugt i64 %s, %s\n", grow.operand, length.operand, capacity.operand);
+    unsigned resize = ++b->label, filled = ++b->label;
+    branch(b, grow, resize, filled); label(b, resize);
+    Value doubled = temp(b, INT), small = temp(b, BOOL), minimum = temp(b, INT);
+    Value fits = temp(b, BOOL), nextCapacity = temp(b, INT);
+    fprintf(b->body, "  %s = mul i64 %s, 2\n", doubled.operand, capacity.operand);
+    fprintf(b->body, "  %s = icmp ult i64 %s, 8\n", small.operand, doubled.operand);
+    fprintf(b->body, "  %s = select i1 %s, i64 8, i64 %s\n", minimum.operand, small.operand, doubled.operand);
+    fprintf(b->body, "  %s = icmp uge i64 %s, %s\n", fits.operand, minimum.operand, length.operand);
+    fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 %s\n", nextCapacity.operand, fits.operand, minimum.operand, length.operand);
+    Value stride = storageSize(b, t->element), bytes = temp(b, INT), data = temp(b, RAW_POINTER);
+    fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, nextCapacity.operand, stride.operand);
+    fprintf(b->body, "  %s = call ptr %s(i64 %s)\n", data.operand, libcSymbol(b, "malloc"), bytes.operand);
+    Value present = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ne ptr %s, null\n", present.operand, data.operand);
+    unsigned allocated = ++b->label, failed = ++b->label;
+    branch(b, present, allocated, failed); label(b, failed);
+    fputs("  call void @llvm.trap()\n  unreachable\n", b->body);
+    b->nullChecksUsed = 1; b->terminated = 1; label(b, allocated);
+    Value oldData = arrayData(b, result), oldBytes = temp(b, INT);
+    fprintf(b->body, "  %s = mul i64 %s, %s\n", oldBytes.operand, oldLength.operand, stride.operand);
+    fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n", data.operand, oldData.operand, oldBytes.operand);
+    fprintf(b->body, "  call void %s(ptr %s)\n", libcSymbol(b, "free"), oldData.operand);
+    b->dataCopyUsed = 1;
+    rawStore(b, dataField, data); rawStore(b, cap, nextCapacity);
+    jump(b, filled); label(b, filled);
+    rawStore(b, value(b, INT, "%s", result.operand), length);
+    if (shift) {
+        Value remaining = temp(b, INT), shifted = temp(b, INT), bytes = temp(b, INT);
+        Value stride = storageSize(b, t->element);
+        fprintf(b->body, "  %s = sub i64 %s, %s\n", remaining.operand, oldLength.operand, index.operand);
+        fprintf(b->body, "  %s = add i64 %s, %s\n", shifted.operand, index.operand, added.operand);
+        fprintf(b->body, "  %s = mul i64 %s, %s\n", bytes.operand, remaining.operand, stride.operand);
+        Value from = elementAddress(b, result, index), to = elementAddress(b, result, shifted);
+        fprintf(b->body, "  call void @llvm.memmove.p0.p0.i64(ptr %s, ptr %s, i64 %s, i1 false)\n",
+                to.operand, from.operand, bytes.operand);
+        b->dataCopyUsed = 1;
+    }
+    // Only live elements are initialized; spare capacity owns no values.
+    for (size_t j = 0; j < explicitCount; j++) {
+        Value at = temp(b, INT);
+        fprintf(b->body, "  %s = add i64 %s, %zu\n", at.operand, index.operand, j);
+        Value destination = elementAddress(b, result, at);
+        escapeDynamicArrays(b, items[j]); rawStore(b, destination, items[j]);
+    }
+    if (spread) {
+        Value cursor = slot(b, INT); rawStore(b, cursor, value(b, INT, "0"));
+        unsigned check = ++b->label, body = ++b->label, done = ++b->label;
+        jump(b, check); label(b, check);
+        Value i = load(b, cursor), more = temp(b, BOOL);
+        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, tailLength.operand);
+        branch(b, more, body, done); label(b, body);
+        Value offset = temp(b, INT), at = temp(b, INT);
+        fprintf(b->body, "  %s = add i64 %s, %zu\n", offset.operand, index.operand, explicitCount);
+        fprintf(b->body, "  %s = add i64 %s, %s\n", at.operand, offset.operand, i.operand);
+        Value destination = elementAddress(b, result, at);
+        rawStore(b, destination, emptyValue(b, t->element));
+        store(b, destination, load(b, elementAddress(b, tail, i)));
+        Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
+        rawStore(b, cursor, next); jump(b, check); label(b, done);
+        dropDynamicArrayPayload(b, tail);
+    }
+    checkArrayRequirement(b, result, t->requirement);
+    if (t->element == SCALAR_ANY && !t->count) {
+        b->homogeneousUsed = 1;
+        fprintf(b->body, "  call void @__ocean.array.dynamic.check(ptr %s)\n", result.operand);
+    }
+    free(items);
+    escapeDynamicArrays(b, result);
+    if (snapshot) dropDynamicArrayPayload(b, load(b, binding));
+    rawStore(b, binding, result);
+    return result;
 }
 static Value mutateDynamicArray(Backend *b, struct expr_dot *dot, struct expr_call *call) {
     const char *name = ((struct expr_identifier *)dot->field.underlying)->lexeme.lexeme;
@@ -3585,52 +3699,11 @@ static Value mutateDynamicArray(Backend *b, struct expr_dot *dot, struct expr_ca
     for (size_t i = 0; i < explicitCount; i++) items[i] = expectedValue(b, &call->params[first + i], t->element);
     Value tail = value(b, BAD, ""), tailLength = value(b, INT, "0");
     if (call->spread) { tail = expression(b, &call->params[call->nParams - 1]); tailLength = arrayLength(b, tail); }
-    Value added = temp(b, INT), length = temp(b, INT);
-    fprintf(b->body, "  %s = add i64 %zu, %s\n", added.operand, explicitCount, tailLength.operand);
-    fprintf(b->body, "  %s = add i64 %s, %s\n", length.operand, oldLength.operand, added.operand);
-    Value result = allocateCollection(b, source.kind, length), cursor = slot(b, INT);
-    rawStore(b, cursor, value(b, INT, "0"));
-    unsigned condition = ++b->label, body = ++b->label, end = ++b->label;
-    jump(b, condition); label(b, condition);
-    Value i = load(b, cursor), more = temp(b, BOOL);
-    fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, oldLength.operand);
-    branch(b, more, body, end); label(b, body);
-    Value after = temp(b, BOOL), shifted = temp(b, INT), destination = temp(b, INT);
-    fprintf(b->body, "  %s = icmp sge i64 %s, %s\n", after.operand, i.operand, index.operand);
-    fprintf(b->body, "  %s = add i64 %s, %s\n", shifted.operand, i.operand, added.operand);
-    fprintf(b->body, "  %s = select i1 %s, i64 %s, i64 %s\n", destination.operand, after.operand, shifted.operand, i.operand);
-    store(b, elementAddress(b, result, destination), load(b, elementAddress(b, source, i)));
-    Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
-    rawStore(b, cursor, next); jump(b, condition); label(b, end);
-    for (size_t j = 0; j < explicitCount; j++) {
-        Value at = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, %zu\n", at.operand, index.operand, j);
-        store(b, elementAddress(b, result, at), items[j]);
-    }
-    if (call->spread) {
-        rawStore(b, cursor, value(b, INT, "0"));
-        condition = ++b->label; body = ++b->label; end = ++b->label;
-        jump(b, condition); label(b, condition);
-        i = load(b, cursor); more = temp(b, BOOL);
-        fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, tailLength.operand);
-        branch(b, more, body, end); label(b, body);
-        Value offset = temp(b, INT), at = temp(b, INT);
-        fprintf(b->body, "  %s = add i64 %s, %zu\n", offset.operand, index.operand, explicitCount);
-        fprintf(b->body, "  %s = add i64 %s, %s\n", at.operand, offset.operand, i.operand);
-        store(b, elementAddress(b, result, at), load(b, elementAddress(b, tail, i)));
-        next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
-        rawStore(b, cursor, next); jump(b, condition); label(b, end);
-    }
-    checkArrayRequirement(b, result, t->requirement);
-    if (t->element == SCALAR_ANY && !t->count) {
-        b->homogeneousUsed = 1;
-        fprintf(b->body, "  call void @__ocean.array.dynamic.check(ptr %s)\n", result.operand);
-    }
-    free(items);
-    if (snapshot) dropDynamicArrayPayload(b, source);
-    escapeDynamicArrays(b, result);
-    dropDynamicArrayPayload(b, load(b, binding)); rawStore(b, binding, result);
+    insertDynamicArrayValues(b, binding, source, snapshot, index, items, explicitCount,
+                             tail, tailLength, call->spread, strcmp(name, "append") != 0);
     return value(b, VOID, "");
 }
+
 static Value addArrayValues(Backend *b, Value left, Value right, Kind resultKind) {
     BufferKind *resultType = bufferKind(b, resultKind);
     if (!resultType->shape && resultType->fixedArray) {
@@ -4785,6 +4858,19 @@ static Value expressionImpl(Backend *b, expr *e) {
                 old = load(b, addr);
             BufferKind *target = bufferKind(b, addr.kind);
             int arrayAdd = v->operation == EXPR_ADD_EQUALS && target && (target->shape == 4 || target->fixedArray);
+            if (arrayAdd && target->dynamicArray && !target->immutableString &&
+                arrayAdditionKind(b, old.kind, expressionKind(b, &v->right)) != BAD) {
+                int snapshot = !pureIndex(&v->right);
+                if (snapshot) old = copyValue(b, old, 0);
+                Value index = arrayLength(b, old), rhs = expression(b, &v->right);
+                BufferKind *rhsType = bufferKind(b, rhs.kind);
+                int spread = rhsType && (rhsType->shape == 4 || rhsType->fixedArray) &&
+                             rhs.kind != target->element;
+                Value *items = checked(sizeof(Value));
+                if (!spread) items[0] = rhs;
+                return insertDynamicArrayValues(b, addr, old, snapshot, index, items, !spread,
+                                               rhs, spread ? arrayLength(b, rhs) : value(b, INT, "0"), spread, 0);
+            }
             if (arrayAdd) old = copyValue(b, old, 0);
             Value r = arrayAdd ? expression(b, &v->right) : expectedValue(b, &v->right, addr.kind);
             if (v->operation != EXPR_ASSIGNMENT) {

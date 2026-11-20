@@ -514,8 +514,21 @@ value, ok := fixed[3];           // zero and false, rather than a trap
 Ordinary array/dynamic-array indexing checks bounds. Raw buffer indexing does
 not. Buffer lengths are erased at function boundaries: pass an explicit count;
 a sized cast can restore lexical metadata. `len` is element count; `.size` is
-payload bytes. Dynamic arrays expose `.length` and `.capacity`. Strings expose
-byte counts and `.array()`, but reject element writes and mutation methods.
+payload bytes. Dynamic arrays expose `.length` and `.capacity`. Empty dynamic
+arrays (`items: int[]`, `make(int[])`, `zero(int[])`, or `int[]{}`) start with
+length and capacity zero; the first single-element append grows capacity to eight.
+Arrays initialized with values start with capacity equal to their length.
+`append`, `prepend`, `add`, and dynamic-array `+=` reuse spare capacity and grow to the
+larger of twice the capacity, eight elements,
+or the required length. Repeated single-element appends take amortized constant
+time for scalar elements with side-effect-free arguments; arguments that can
+mutate the receiver require a snapshot. `pop` and `remove` retain capacity and
+reuse the payload, clearing the vacated slot; `remove`, `prepend`, and `add` shift
+only the affected suffix. Removed values remain independent copies. Value copies
+remain independent. Dynamic-array `+=` accepts a single element or concatenates
+compatible arrays, including self-concatenation; strings and fixed-array `+=`
+retain their existing copy behavior. Strings expose byte counts and `.array()`,
+but reject element writes and mutation methods.
 
 Construct arrays using `x: T[n]` or `T[n]{...}`. For compatibility, expression
 `T[n]` without a literal body creates a dynamic array. `array<T>` is not a
