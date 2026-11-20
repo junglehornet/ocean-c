@@ -674,6 +674,8 @@ Array and pointer suffixes after `map[K]` belong to the value type:
 strings to pointers. Use an alias to make an array of maps. Maps support normal
 parameters, results, struct fields, explicit generics, and boxed type assertions.
 Map storage is managed automatically and has no public `.data` or capacity API.
+Updating an existing key reuses its bucket without growing or rehashing the table,
+including at the load threshold. Growth is reserved for inserting new keys.
 No standard-library import or build/module configuration change is required.
 
 

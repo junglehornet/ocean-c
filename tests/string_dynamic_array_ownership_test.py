@@ -68,6 +68,26 @@ void writeFirst(char *data) { data[0] = 'X'; }
         assert result.returncode != 0 and message in result.stderr, result
         checks += 1
 
+    program('''func exercise() int {
+        values: map[int]int;
+        for (i := 0; i < 4; i++) values[i] = i;
+        before := extern.totalAllocations();
+        for (i := 0; i < 1024; i++) {
+            values[i % 4] = i;
+            values[i % 4] += 1;
+        }
+        if (extern.totalAllocations() != before || len(values) != 4) return 1;
+        for (i := 0; i < 4; i++) if (values[i] != 1021 + i) return 2;
+        values[4] = 44;
+        if (extern.totalAllocations() <= before || len(values) != 5) return 3;
+        for (i := 0; i < 4; i++) if (values[i] != 1021 + i) return 4;
+        if (values[4] != 44) return 5;
+        return 0;
+    }
+    func main() int {
+        if (exercise() != 0) return 1;
+        return extern.liveAllocations();
+    }''')
     program('''func main() int {
         plain: int[];
         made := make(int[]);

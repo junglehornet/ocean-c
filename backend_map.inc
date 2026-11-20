@@ -141,7 +141,17 @@ static Value mapWriteAddress(Backend *b, Value binding, Value key) {
     Value twice = temp(b, INT), crowded = temp(b, BOOL);
     fprintf(b->body, "  %s = mul i64 %s, 2\n", twice.operand, live.operand);
     fprintf(b->body, "  %s = icmp uge i64 %s, %s\n", crowded.operand, twice.operand, count.operand);
+    // An overwrite needs no extra bucket, even at the growth threshold.
+    Value savedIndex = slot(b, INT), initial = mapProbe(b, map, key);
+    rawStore(b, savedIndex, initial);
+    Value valid = temp(b, BOOL);
+    fprintf(b->body, "  %s = icmp ne i64 %s, -1\n", valid.operand, initial.operand);
+    unsigned inspectKey = ++b->label, missing = ++b->label;
     unsigned grow = ++b->label, ready = ++b->label;
+    branch(b, valid, inspectKey, missing); label(b, inspectKey);
+    Value initialEntry = elementAddress(b, map, initial);
+    Value exists = load(b, mapField(b, initialEntry, 0, BOOL));
+    branch(b, exists, ready, missing); label(b, missing);
     branch(b, crowded, grow, ready); label(b, grow);
     Value doubled = temp(b, INT), small = temp(b, BOOL), capacity = temp(b, INT);
     fprintf(b->body, "  %s = mul i64 %s, 2\n", doubled.operand, count.operand);
@@ -161,9 +171,11 @@ static Value mapWriteAddress(Backend *b, Value binding, Value key) {
     jump(b, advance); label(b, advance);
     Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
     rawStore(b, cursor, next); jump(b, check); label(b, done);
-    store(b, binding, replacement); jump(b, ready); label(b, ready);
+    store(b, binding, replacement);
+    rawStore(b, savedIndex, mapProbe(b, load(b, binding), key));
+    jump(b, ready); label(b, ready);
     map = load(b, binding);
-    index = mapProbe(b, map, key); entry = elementAddress(b, map, index);
+    index = load(b, savedIndex); entry = elementAddress(b, map, index);
     occupied = load(b, mapField(b, entry, 0, BOOL));
     unsigned insert = ++b->label, finish = ++b->label;
     branch(b, occupied, finish, insert); label(b, insert);
