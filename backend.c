@@ -1849,6 +1849,8 @@ static Value trackBox(Backend *b, Value box) {
 }
 static Value boxScalar(Backend *b, Value v, int promote) {
     if (v.kind == SCALAR_ANY) return v;
+    // Box and register explicit null using the same raw-pointer representation.
+    if (v.kind == NULL_VALUE) v = value(b, RAW_POINTER, "@__ocean.null");
     // Mode 2 boxes private enum storage, which cannot itself escape to a
     // reflection call. Ordinary boxing of a payload still registers its type.
     if (promote != 2) reflectionInput(b, v.kind);
@@ -1856,9 +1858,8 @@ static Value boxScalar(Backend *b, Value v, int promote) {
     // Preserve Ocean identity while keeping small scalars ready for C varargs.
     if (representationKind(b, v.kind) == BOOL || representationKind(b, v.kind) == I8 || representationKind(b, v.kind) == I16 || representationKind(b, v.kind) == U8 || representationKind(b, v.kind) == U16) v = convert(b, v, I32);
     if (representationKind(b, v.kind) == F32) v = convert(b, v, FLOAT);
-    if (v.kind == NULL_VALUE) v = value(b, RAW_POINTER, "@__ocean.null");
     BufferKind *t = bufferKind(b, v.kind);
-    Value metadata = anyMetadata(b, identity == NULL_VALUE ? RAW_POINTER : identity);
+    Value metadata = anyMetadata(b, identity);
     if (t && (t->shape == 2 || t->shape == 4 || t->shape == 5 || t->shape == 17 || !t->shape || (t->definition && representationKind(b, t->kind) == SCALAR_ANY))) {
         Value address = slot(b, v.kind), result = temp(b, SCALAR_ANY);
         rawStore(b, address, v);

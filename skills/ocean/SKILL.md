@@ -578,6 +578,7 @@ share identity, while separately created captured environments do not.
 Boxed `any` and interface values dispatch equality using their concrete types.
 Matching concrete types compare by the rules above; different types compare
 unequal, except primitive numeric values retain the usual numeric conversions.
+Two `any` values containing explicit `null` compare equal.
 Floating-point equality is numeric even inside aggregates: positive and negative
 zero are equal, and NaN is unequal to itself. Both operands are evaluated once,
 left to right; the left value is preserved if the right expression mutates it.
