@@ -68,6 +68,41 @@ void writeFirst(char *data) { data[0] = 'X'; }
         assert result.returncode != 0 and message in result.stderr, result
         checks += 1
 
+    for operation in ('items.pop();', 'items.remove(0);', 'free(items);', ''):
+        program('''struct Box { value any; }
+        func exercise() {
+            items: Box[];
+            items.append(Box{"owned"});
+            ''' + operation + '''
+        }
+        func main() int {
+            exercise(); return extern.liveAllocations();
+        }''')
+    program('''struct Box { value any; }
+    struct Nested { fields Box[2]; children Box[]; }
+    func exercise() int {
+        items: Nested[];
+        literals: Box[] = {Box{"initial"}};
+        literals[0].value = "replacement";
+        if (literals.pop().value.(string) != "replacement") return 4;
+        free(literals);
+        for (i := 0; i < 20; i++) {
+            child: Box[]; child.append(Box{int[]{1, 2}});
+            items.append(Nested{{Box{"first"}, Box{int[]{3, 4}}}, child});
+        }
+        saved := items.pop();
+        if (saved.fields[0].value.(string) != "first") return 1;
+        removed := items.remove(0);
+        if (removed.children[0].value.(int[])[1] != 2) return 2;
+        items.prepend(saved); items.add(1, removed); items += items;
+        copy := items; free(items);
+        if (copy[0].fields[1].value.(int[])[0] != 3) return 3;
+        free(copy); return 0;
+    }
+    func main() int {
+        if (exercise() != 0) return 1;
+        return extern.liveAllocations();
+    }''')
     program('''func exercise() int {
         values: map[int]int;
         for (i := 0; i < 4; i++) values[i] = i;

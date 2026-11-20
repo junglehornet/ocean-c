@@ -53,6 +53,7 @@ typedef struct {
     Kind kind;
     const char *operand; // Backend-owned text; aggregate constants can be arbitrarily long.
     struct Scope *owner;
+    int ownedArrayElement; // Storage owns boxed fields recursively.
     int ownedBox; // A map bucket owns its box outside lexical temporary regions.
     int closureCell; // Shared capture storage, owned by the closure runtime.
     int throughPointer;
@@ -1707,6 +1708,7 @@ static void dropDynamicArrayPayload(Backend *, Value);
 static void escapeDynamicArrays(Backend *, Value);
 static void trackDynamicArrays(Backend *, Value);
 static void dropNestedDynamicArrays(Backend *, Value, unsigned);
+static void dropNestedArrayStorage(Backend *, Value, unsigned, int);
 static void store(Backend *b, Value address, Value v) {
     BufferKind *targetArray = bufferKind(b, address.kind), *sourceArray = bufferKind(b, v.kind);
     if (targetArray && sourceArray && targetArray->shape == 4 && sourceArray->shape == 4 &&
@@ -1721,12 +1723,24 @@ static void store(Backend *b, Value address, Value v) {
         fprintf(b->body, "  call void @__ocean.%s.check_write(ptr %s, { ptr, i64 } %s)\n",
                 address.homogeneousDynamic ? "array.dynamic" : "array", address.homogeneousArray, v.operand);
     }
-    if (address.ownedBox) {
+    if (address.ownedBox || (address.ownedArrayElement && representationKind(b, address.kind) == SCALAR_ANY)) {
         int previous = b->copyTransport; b->copyTransport = 1;
         Value replacement = copyValue(b, v, 0);
         b->copyTransport = 3; copyValue(b, load(b, address), 0);
         b->copyTransport = previous;
         rawStore(b, address, replacement); return;
+    }
+    if (address.ownedArrayElement && targetArray && v.kind == address.kind &&
+        (!targetArray->shape || targetArray->shape == 2 || targetArray->shape == 5) &&
+        ownsArrays(b, address.kind)) {
+        int previous = b->copyTransport;
+        b->copyTransport = 1;
+        Value replacement = copyValue(b, v, 0);
+        b->copyTransport = previous;
+        escapeDynamicArrays(b, replacement);
+        dropNestedArrayStorage(b, load(b, address), 0, 1);
+        rawStore(b, address, replacement);
+        return;
     }
     if (targetArray && targetArray->dynamicArray && v.kind == address.kind) {
         Value replacement = copyValue(b, v, 0);
@@ -2502,9 +2516,18 @@ static void releaseScopeValues(Backend *b) {
                 rawStore(b, binding->address, emptyValue(b, binding->address.kind));
             }
 }
-static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
+static void dropNestedArrayStorage(Backend *b, Value item, unsigned depth, int ownedBoxes) {
     if (b->errors) return;
     if (depth >= 32) { fail(b, "nested dynamic array ownership is too deep"); return; }
+    // Array-owned heap copies have unregistered boxes; lexical copies use
+    // separate box cleanup slots and must not be destroyed a second time here.
+    if (representationKind(b, item.kind) == SCALAR_ANY) {
+        if (ownedBoxes) {
+            int previous = b->copyTransport; b->copyTransport = 3;
+            copyValue(b, item, depth); b->copyTransport = previous;
+        }
+        return;
+    }
     BufferKind *t = bufferKind(b, item.kind);
     if (!t) return;
     if (t->mapEntry) {
@@ -2535,7 +2558,7 @@ static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
             Value i = load(b, cursor), more = temp(b, BOOL);
             fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
             branch(b, more, body, done); label(b, body);
-            dropNestedDynamicArrays(b, load(b, elementAddress(b, item, i)), depth + 1);
+            dropNestedArrayStorage(b, load(b, elementAddress(b, item, i)), depth + 1, ownedBoxes);
             Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
             rawStore(b, cursor, next); jump(b, condition); label(b, done);
         }
@@ -2543,7 +2566,10 @@ static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
         return;
     }
     if (!t->shape || t->shape == 2 || t->shape == 5)
-        for (size_t i = 0; i < t->count; i++) dropNestedDynamicArrays(b, extract(b, item, i), depth + 1);
+        for (size_t i = 0; i < t->count; i++) dropNestedArrayStorage(b, extract(b, item, i), depth + 1, ownedBoxes);
+}
+static void dropNestedDynamicArrays(Backend *b, Value item, unsigned depth) {
+    dropNestedArrayStorage(b, item, depth, 0);
 }
 static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
     b->returnTransportUsed = 1;
@@ -2562,10 +2588,7 @@ static void dropDynamicArrayPayload(Backend *b, Value dynamicArray) {
         fprintf(b->body, "  %s = icmp slt i64 %s, %s\n", more.operand, i.operand, count.operand);
         branch(b, more, body, done); label(b, body);
         Value item = load(b, elementAddress(b, dynamicArray, i));
-        if (representationKind(b, type->element) == SCALAR_ANY) {
-            int previous = b->copyTransport; b->copyTransport = 3;
-            copyValue(b, item, 0); b->copyTransport = previous;
-        } else dropNestedDynamicArrays(b, item, 0);
+        dropNestedArrayStorage(b, item, 0, 1);
         Value next = temp(b, INT); fprintf(b->body, "  %s = add i64 %s, 1\n", next.operand, i.operand);
         rawStore(b, cursor, next); jump(b, condition); label(b, done);
     }
@@ -2600,6 +2623,7 @@ static Value arrayHeaderSize(Backend *b, Kind kind) {
 static Value elementAddress(Backend *b, Value array, Value index) {
     BufferKind *t = bufferKind(b, array.kind);
     Value data = arrayData(b, array), result = temp(b, t->element);
+    result.ownedArrayElement = t->dynamicArray || array.ownedArrayElement;
     result.ownedBox = t->dynamicArray && t->element == SCALAR_ANY;
     result.owner = array.owner;
     result.throughPointer = array.throughPointer;
@@ -3456,6 +3480,7 @@ static Value address(Backend *b, expr *e) {
             size_t i = recordField(t, name);
             if (i < t->count) {
                 Value result = temp(b, t->members[i]);
+                result.ownedArrayElement = base.ownedArrayElement;
                 result.owner = base.owner;
                 result.throughPointer = base.throughPointer;
                 fprintf(b->body, "  %s = getelementptr %s, ptr %s, i32 0, i32 %zu\n",
@@ -3502,6 +3527,7 @@ static Value address(Backend *b, expr *e) {
         }
         index = convert(b, index, INT);
         Value result = temp(b, t->element);
+        result.ownedArrayElement = t->dynamicArray || base.ownedArrayElement;
         result.ownedBox = t->dynamicArray && t->element == SCALAR_ANY;
         result.owner = base.owner;
         result.throughPointer = base.throughPointer;
@@ -3555,10 +3581,7 @@ static Value removeDynamicArray(Backend *b, struct expr_dot *dot, struct expr_ca
     // Release only the removed element; surviving elements transfer ownership
     // within the same payload. The returned value is already an independent copy.
     Value oldItem = load(b, elementAddress(b, source, index));
-    if (representationKind(b, oldItem.kind) == SCALAR_ANY) {
-        int previous = b->copyTransport; b->copyTransport = 3;
-        copyValue(b, oldItem, 0); b->copyTransport = previous;
-    } else dropNestedDynamicArrays(b, oldItem, 0);
+    dropNestedArrayStorage(b, oldItem, 0, 1);
     Value next = temp(b, INT), remaining = temp(b, INT), bytes = temp(b, INT);
     BufferKind *t = bufferKind(b, source.kind);
     Value stride = storageSize(b, t->element);
