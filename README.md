@@ -913,7 +913,22 @@ constraints. Matching is directional: a `Box<int>` satisfies `Box`, but a value
 known only as `Box` does not satisfy `Box<int>`. Nested arguments can also be
 constraints: `Box<Box>` accepts `Box<Box<int>>` and `Box<Box<bool>>`.
 
-Type-guard switch cases use these same constraints. Cases are tested in source
+A type assertion `value.(T)` recovers a concrete type from a boxed `any` or
+interface value and traps when the dynamic type differs. Bind two names to test
+instead of trapping: the second is a `bool` success flag, and the first is `T`'s
+zero value on failure. The two-binding form works in declarations, `=`
+assignments, and `if`/`switch` initializers.
+
+```ocean
+func describe(value any) int {
+    if (text, ok := value.(string); ok) return len(text);
+    number, ok := value.(int);
+    if (!ok) return -1; // number is 0 here
+    return number;
+}
+```
+
+Type-guard switch cases use the struct-family constraints above. Cases are tested in source
 order; put specific cases before family cases when both should be reachable.
 `default` runs only if no case matches, regardless of where it appears.
 

@@ -1041,6 +1041,16 @@ static TypeList valueTypes(Context *c, expr *values, size_t count, Type **expect
                 return (TypeList){items, 2};
             }
         }
+        if (assignmentContext && count == 1 && nExpected == 2 && values[i].type == EXPR_TYPE_ASSERTION) {
+            // Enum extraction is rewritten above; record patterns bind their own names.
+            struct expr_assertion *assertion = values[i].underlying;
+            if (!assertion->isTypeGuard && !assertion->pattern && strcmp(t->name, "tuple")) {
+                assertion->tryAssert = 1;
+                Type **items = allocate(c, 2 * sizeof(*items));
+                items[0] = t; items[1] = &boolean;
+                return (TypeList){items, 2};
+            }
+        }
         if (!assignmentContext && i < nExpected)
             t = widenToTypeSet(c,expected[i],t,&values[i],0);
         if (!assignmentContext && i < nExpected)
