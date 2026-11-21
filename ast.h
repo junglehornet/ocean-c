@@ -358,6 +358,7 @@ struct expr_assertion {
     typeTokens type; // Empty for .(type), which is restricted to switch guards.
     char isTypeGuard;
     expr *pattern; // Optional named record extraction pattern.
+    char tryAssert; // Two-binding assertion returns (value, success) without trapping.
 };
 
 struct expr_slice {
