@@ -44,6 +44,15 @@ func main() int {
     if (okf || f != 0.0) return 10;
     if (describe("abc") != 3 || describe(7) != 700 || describe(1.5) != -1) return 11;
     if (value.(string) != "hello") return 12;
+    items: any[] = int[]{1, 2};
+    boxed: any = items;
+    view, okv := boxed.(any[]);
+    if (!okv || len(view) != 2) return 13;
+    raw: any = int[]{5, 6, 7};
+    rawView, okr := raw.(any[]);
+    if (!okr || len(rawView) != 3) return 14;
+    none, okn := num.(any[]);
+    if (okn || len(none) != 0) return 15;
     return 0;
 }
 '''

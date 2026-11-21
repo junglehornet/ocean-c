@@ -3077,6 +3077,7 @@ static ValueList tryIndexValues(Backend *b, struct expr_index *v) {
     return (ValueList){items, 2};
 }
 static Kind constraintShape(Backend *, int, Kind, size_t);
+static Kind constraintKind(Backend *, typeTokens);
 static Value unboxArrayView(Backend *, Value, Kind);
 static Value unboxMatched(Backend *, Value, Kind);
 /* value, ok := box.(T) yields T's zero value and false instead of trapping. */
@@ -3087,7 +3088,9 @@ static ValueList tryAssertValues(Backend *b, struct expr_assertion *v) {
     int arrayView = array && !array->definition && array->shape == 4 &&
                     (array->fixedArray || array->element == SCALAR_ANY);
     if (arrayView) {
-        matches = testConstraint(b, box, constraintShape(b, 16, array->element, 0), 0);
+        // Fixed targets match fixed-array families; dynamic any[] matches like `case any[]:`.
+        Kind pattern = array->fixedArray ? constraintShape(b, 16, array->element, 0) : constraintKind(b, v->type);
+        matches = testConstraint(b, box, pattern, 0);
     } else {
         Value metadata = anyMetadata(b, kind), tag = temp(b, RAW_POINTER);
         matches = temp(b, BOOL);
