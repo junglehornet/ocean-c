@@ -514,8 +514,21 @@ value, ok := fixed[3];           // zero and false, rather than a trap
 Ordinary array/dynamic-array indexing checks bounds. Raw buffer indexing does
 not. Buffer lengths are erased at function boundaries: pass an explicit count;
 a sized cast can restore lexical metadata. `len` is element count; `.size` is
-payload bytes. Dynamic arrays expose `.length` and `.capacity`. Strings expose
-byte counts and `.array()`, but reject element writes and mutation methods.
+payload bytes. Dynamic arrays expose `.length` and `.capacity`. Empty dynamic
+arrays (`items: int[]`, `make(int[])`, `zero(int[])`, or `int[]{}`) start with
+length and capacity zero; the first single-element append grows capacity to eight.
+Arrays initialized with values start with capacity equal to their length.
+`append`, `prepend`, `add`, and dynamic-array `+=` reuse spare capacity and grow to the
+larger of twice the capacity, eight elements,
+or the required length. Repeated single-element appends take amortized constant
+time for scalar elements with side-effect-free arguments; arguments that can
+mutate the receiver require a snapshot. `pop` and `remove` retain capacity and
+reuse the payload, clearing the vacated slot; `remove`, `prepend`, and `add` shift
+only the affected suffix. Removed values remain independent copies. Value copies
+remain independent. Dynamic-array `+=` accepts a single element or concatenates
+compatible arrays, including self-concatenation; strings and fixed-array `+=`
+retain their existing copy behavior. Strings expose byte counts and `.array()`,
+but reject element writes and mutation methods.
 
 Construct arrays using `x: T[n]` or `T[n]{...}`. For compatibility, expression
 `T[n]` without a literal body creates a dynamic array. `array<T>` is not a
@@ -544,6 +557,12 @@ end bound and the caller must ensure that the selected memory is valid.
 Value assignments, arguments, and returns copy owned data recursively. Mutating
 a copy does not mutate the original. Scope exit and reassignment clean up owned
 strings/dynamic arrays, including nested values, without garbage collection.
+Dynamic-array elements recursively own boxed `any` fields inside structs, tuples,
+and fixed arrays. Removal, explicit `free`, and scope exit release those boxes;
+returned or copied aggregates remain independently owned. Replacing a runtime-sized
+array field in an owned element releases the previous field and gives the element
+ownership of the replacement. Borrowed raw buffer fields still alias their
+original storage.
 Pointers and buffer views copy addresses. Use `*T`, `&value`, and `*pointer` for
 shared access; `*T[]` points to a dynamic array while `T*[]` holds pointers.
 `new(T)` returns an explicitly managed `*T` initialized to `zero(T)`;
@@ -662,6 +681,8 @@ Array and pointer suffixes after `map[K]` belong to the value type:
 strings to pointers. Use an alias to make an array of maps. Maps support normal
 parameters, results, struct fields, explicit generics, and boxed type assertions.
 Map storage is managed automatically and has no public `.data` or capacity API.
+Updating an existing key reuses its bucket without growing or rehashing the table,
+including at the load threshold. Growth is reserved for inserting new keys.
 No standard-library import or build/module configuration change is required.
 
 
