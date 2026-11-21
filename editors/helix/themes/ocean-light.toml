@@ -1,0 +1,128 @@
+# ocean-light: the Ocean website's code highlighting palette for Helix.
+# Light variant, based on IntelliJ Light with muted blues.
+# Syntax colors match the code blocks on ocean-lang.dev;
+# the interface uses the site's background, surface, line, and accent colors.
+
+# Syntax
+"variable" = "default"
+"variable.parameter" = "param"
+"variable.builtin" = { fg = "keyword", modifiers = ["italic"] }
+"variable.other.member" = "field"
+"keyword" = "keyword"
+"keyword.control" = "keyword"
+"keyword.control.import" = "keyword"
+"keyword.function" = "keyword"
+"keyword.directive" = "keyword"
+"keyword.storage" = "keyword"
+"type" = { fg = "class", modifiers = ["bold"] }
+"type.builtin" = "keyword"
+"type.parameter" = "typeparam"
+"type.enum.variant" = { fg = "field", modifiers = ["italic", "bold"] }
+"constructor" = "class"
+"function" = "function"
+"function.method" = "function"
+"function.builtin" = { fg = "keyword", modifiers = ["italic"] }
+"function.macro" = "keyword"
+"namespace" = "namespace"
+"constant" = { fg = "field", modifiers = ["italic"] }
+"constant.builtin" = { fg = "keyword", modifiers = ["italic"] }
+"constant.builtin.boolean" = { fg = "keyword", modifiers = ["italic"] }
+"constant.numeric" = "number"
+"constant.character" = "string"
+"constant.character.escape" = "keyword"
+"string" = "string"
+"string.special" = "keyword"
+"comment" = { fg = "comment", modifiers = ["italic"] }
+"label" = { fg = "comment", modifiers = ["italic"] }
+"attribute" = "namespace"
+"tag" = "keyword"
+"operator" = "default"
+"punctuation" = "default"
+"special" = "call"
+
+# Markup (Markdown and similar)
+"markup.heading" = { fg = "function", modifiers = ["bold"] }
+"markup.bold" = { modifiers = ["bold"] }
+"markup.italic" = { modifiers = ["italic"] }
+"markup.strikethrough" = { modifiers = ["crossed_out"] }
+"markup.link.url" = { fg = "call", underline = { style = "line" } }
+"markup.link.text" = "function"
+"markup.raw" = "string"
+"markup.list" = "keyword"
+"markup.quote" = { fg = "comment", modifiers = ["italic"] }
+
+# Diffs
+"diff.plus" = "added"
+"diff.minus" = "removed"
+"diff.delta" = "changed"
+
+# Interface
+"ui.background" = { bg = "bg" }
+"ui.text" = "default"
+"ui.text.focus" = { fg = "text", modifiers = ["bold"] }
+"ui.text.inactive" = "muted"
+"ui.cursor" = { fg = "bg", bg = "muted" }
+"ui.cursor.primary" = { fg = "bg", bg = "accent" }
+"ui.cursor.match" = { bg = "raised", modifiers = ["bold"] }
+"ui.cursorline.primary" = { bg = "surface" }
+"ui.selection" = { bg = "raised" }
+"ui.selection.primary" = { bg = "selection" }
+"ui.linenr" = "line"
+"ui.linenr.selected" = "muted"
+"ui.gutter" = { bg = "bg" }
+"ui.statusline" = { fg = "text", bg = "surface" }
+"ui.statusline.inactive" = { fg = "muted", bg = "surface" }
+"ui.statusline.normal" = { fg = "bg", bg = "accent", modifiers = ["bold"] }
+"ui.statusline.insert" = { fg = "bg", bg = "string", modifiers = ["bold"] }
+"ui.statusline.select" = { fg = "bg", bg = "param", modifiers = ["bold"] }
+"ui.popup" = { fg = "text", bg = "surface" }
+"ui.popup.info" = { fg = "text", bg = "surface" }
+"ui.window" = "line"
+"ui.help" = { fg = "text", bg = "surface" }
+"ui.menu" = { fg = "text", bg = "surface" }
+"ui.menu.selected" = { fg = "text", bg = "raised", modifiers = ["bold"] }
+"ui.menu.scroll" = { fg = "line", bg = "surface" }
+"ui.picker.header" = { fg = "muted", modifiers = ["bold"] }
+"ui.virtual.whitespace" = "line"
+"ui.virtual.indent-guide" = "line"
+"ui.virtual.ruler" = { bg = "surface" }
+"ui.virtual.inlay-hint" = { fg = "comment", modifiers = ["italic"] }
+"ui.virtual.jump-label" = { fg = "keyword", modifiers = ["bold"] }
+"ui.highlight" = { bg = "raised" }
+
+# Diagnostics
+"error" = "removed"
+"warning" = "keyword"
+"info" = "call"
+"hint" = "comment"
+"diagnostic.error" = { underline = { color = "removed", style = "curl" } }
+"diagnostic.warning" = { underline = { color = "keyword", style = "curl" } }
+"diagnostic.info" = { underline = { color = "call", style = "line" } }
+"diagnostic.hint" = { underline = { color = "comment", style = "dotted" } }
+"diagnostic.unnecessary" = { modifiers = ["dim"] }
+"diagnostic.deprecated" = { modifiers = ["crossed_out"] }
+
+[palette]
+default = "#1f2d3d"
+keyword = "#0033b3"
+string = "#067d17"
+number = "#1750eb"
+comment = "#56698a"
+function = "#1c5a9e"
+call = "#2f4f86"
+field = "#871094"
+class = "#1f4e79"
+typeparam = "#00707b"
+param = "#4b3fa3"
+namespace = "#22578a"
+bg = "#edf3fc"
+surface = "#e3ebf7"
+raised = "#d4e2f5"
+selection = "#c3d6f2"
+line = "#a9b9cf"
+muted = "#526680"
+text = "#182d4d"
+accent = "#245fbb"
+added = "#067d17"
+removed = "#b3261e"
+changed = "#1750eb"
