@@ -761,7 +761,9 @@ ordinary fields, initialized once in literals such as `Matrix{2, 3}`.
 A defined type needs explicit casts to/from its underlying type; aliases do not.
 Generic constraints include interfaces, unions, `~T` underlying types, and struct
 families (`Box` versus `Box<int>`). Boxed `any` values support type assertions
-and type switches. `mixed any[]` allows heterogeneous elements; ordinary
+and type switches. `value.(T)` traps on a mismatch; the two-binding form
+`msg, ok := value.(string);` yields the zero value and `false` instead (also in
+`=` assignments and `if (s, ok := value.(string); ok)` initializers). `mixed any[]` allows heterogeneous elements; ordinary
 interface arrays require one concrete element type. Interface method calls
 dispatch to the boxed concrete receiver.
 
