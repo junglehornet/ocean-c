@@ -559,7 +559,10 @@ a copy does not mutate the original. Scope exit and reassignment clean up owned
 strings/dynamic arrays, including nested values, without garbage collection.
 Dynamic-array elements recursively own boxed `any` fields inside structs, tuples,
 and fixed arrays. Removal, explicit `free`, and scope exit release those boxes;
-returned or copied aggregates remain independently owned.
+returned or copied aggregates remain independently owned. Replacing a runtime-sized
+array field in an owned element releases the previous field and gives the element
+ownership of the replacement. Borrowed raw buffer fields still alias their
+original storage.
 Pointers and buffer views copy addresses. Use `*T`, `&value`, and `*pointer` for
 shared access; `*T[]` points to a dynamic array while `T*[]` holds pointers.
 `new(T)` returns an explicitly managed `*T` initialized to `zero(T)`;

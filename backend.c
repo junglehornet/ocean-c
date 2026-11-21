@@ -1753,14 +1753,14 @@ static void store(Backend *b, Value address, Value v) {
         // A string/reference value stored through *T may change size. Its new
         // backing must outlive this frame, including when T lives on the heap.
         int previous = b->copyTransport;
-        if (address.throughPointer || address.owner == b->globalScope) b->copyTransport = 1;
+        if (address.ownedArrayElement || address.throughPointer || address.owner == b->globalScope) b->copyTransport = 1;
         else if (address.owner)
             for (Scope *scope = b->scope; scope && scope != address.owner; scope = scope->parent)
                 scope->retainAllocations = 1;
         Value replacement = copyValue(b, v, 0);
         b->copyTransport = previous;
         escapeDynamicArrays(b, replacement);
-        dropNestedDynamicArrays(b, load(b, address), 0);
+        dropNestedArrayStorage(b, load(b, address), 0, address.ownedArrayElement);
         rawStore(b, address, replacement);
         return;
     }
@@ -2623,7 +2623,7 @@ static Value arrayHeaderSize(Backend *b, Kind kind) {
 static Value elementAddress(Backend *b, Value array, Value index) {
     BufferKind *t = bufferKind(b, array.kind);
     Value data = arrayData(b, array), result = temp(b, t->element);
-    result.ownedArrayElement = t->dynamicArray || array.ownedArrayElement;
+    result.ownedArrayElement = t->dynamicArray || (t->shape != 3 && array.ownedArrayElement);
     result.ownedBox = t->dynamicArray && t->element == SCALAR_ANY;
     result.owner = array.owner;
     result.throughPointer = array.throughPointer;
@@ -3527,7 +3527,7 @@ static Value address(Backend *b, expr *e) {
         }
         index = convert(b, index, INT);
         Value result = temp(b, t->element);
-        result.ownedArrayElement = t->dynamicArray || base.ownedArrayElement;
+        result.ownedArrayElement = t->dynamicArray || (t->shape != 3 && base.ownedArrayElement);
         result.ownedBox = t->dynamicArray && t->element == SCALAR_ANY;
         result.owner = base.owner;
         result.throughPointer = base.throughPointer;

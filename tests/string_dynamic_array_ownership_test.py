@@ -68,6 +68,35 @@ void writeFirst(char *data) { data[0] = 'X'; }
         assert result.returncode != 0 and message in result.stderr, result
         checks += 1
 
+    program('''struct Holder { view buffer<any>[]; }
+    func exercise() int {
+        view: buffer<any>[] = {"old"};
+        holders: Holder[]; holders.append(Holder{view});
+        holders[0].view[0] = "new";
+        free(holders);
+        if (view[0].(string) != "new") return 1;
+        return 0;
+    }
+    func main() int {
+        if (exercise() != 0) return 1;
+        return extern.liveAllocations();
+    }''')
+    program('''struct BoxedField { value any; }
+    struct Holder(n int) { data BoxedField[n]; }
+    func exercise() int {
+        a := Holder{1}; a.data[0] = BoxedField{"old"};
+        b := Holder{1}; b.data[0] = BoxedField{"new"};
+        items: Holder[]; items.append(a);
+        items[0].data = b.data;
+        if (items[0].data[0].value.(string) != "new") return 1;
+        free(items);
+        if (b.data[0].value.(string) != "new") return 2;
+        return 0;
+    }
+    func main() int {
+        if (exercise() != 0) return 1;
+        return extern.liveAllocations();
+    }''')
     for operation in ('items.pop();', 'items.remove(0);', 'free(items);', ''):
         program('''struct Box { value any; }
         func exercise() {
