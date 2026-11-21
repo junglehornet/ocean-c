@@ -3076,11 +3076,45 @@ static ValueList tryIndexValues(Backend *b, struct expr_index *v) {
     trackDynamicArrays(b, items[0]);
     return (ValueList){items, 2};
 }
+static Kind constraintShape(Backend *, int, Kind, size_t);
+static Value unboxArrayView(Backend *, Value, Kind);
+static Value unboxMatched(Backend *, Value, Kind);
+/* value, ok := box.(T) yields T's zero value and false instead of trapping. */
+static ValueList tryAssertValues(Backend *b, struct expr_assertion *v) {
+    Kind kind = type(b, v->type);
+    Value box = expression(b, &v->child), matches;
+    BufferKind *array = bufferKind(b, kind);
+    int arrayView = array && !array->definition && array->shape == 4 &&
+                    (array->fixedArray || array->element == SCALAR_ANY);
+    if (arrayView) {
+        matches = testConstraint(b, box, constraintShape(b, 16, array->element, 0), 0);
+    } else {
+        Value metadata = anyMetadata(b, kind), tag = temp(b, RAW_POINTER);
+        matches = temp(b, BOOL);
+        fprintf(b->body, "  %s = extractvalue { ptr, i64 } %s, 0\n", tag.operand, box.operand);
+        fprintf(b->body, "  %s = icmp eq ptr %s, %s\n", matches.operand, tag.operand, metadata.operand);
+    }
+    Value result = slot(b, kind);
+    rawStore(b, result, emptyValue(b, kind));
+    unsigned yes = ++b->label, end = ++b->label;
+    branch(b, matches, yes, end); label(b, yes);
+    Value unboxed = arrayView && array->element == SCALAR_ANY ? unboxArrayView(b, box, kind) : unboxMatched(b, box, kind);
+    rawStore(b, result, unboxed);
+    jump(b, end); label(b, end);
+    Value *items = checked(2 * sizeof(*items));
+    items[0] = load(b, result); items[1] = matches;
+    rawStore(b, result, emptyValue(b, kind));
+    trackDynamicArrays(b, items[0]);
+    return (ValueList){items, 2};
+}
 static ValueList evaluateValues(Backend *b, expr *items, size_t count, Kind *expected,
                                 size_t nExpected, int snapshot) {
     if (count == 1 && items[0].type == EXPR_TYPE_INDEX &&
         ((struct expr_index *)items[0].underlying)->tryIndex)
         return tryIndexValues(b, items[0].underlying);
+    if (count == 1 && items[0].type == EXPR_TYPE_ASSERTION &&
+        ((struct expr_assertion *)items[0].underlying)->tryAssert)
+        return tryAssertValues(b, items[0].underlying);
     ValueList result = {.items = checked(sizeof(Value) * (count + 1)), .count = count};
     for (size_t i = 0; i < count; i++) {
         Value v = expectedValue(b, &items[i], i < nExpected ? expected[i] : BAD);
