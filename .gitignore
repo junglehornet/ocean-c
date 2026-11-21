@@ -60,3 +60,6 @@ __pycache__/
 
 /installer/ocean-installer
 /installer/ocean-installer.exe
+
+# Claude code folder
+.claude
